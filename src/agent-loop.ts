@@ -6,6 +6,13 @@ import pc from "picocolors";
 import ora from "ora";
 import boxen from "boxen";
 import pkg from "enquirer";
+import os from "node:os";
+import { marked } from "marked";
+import { markedTerminal } from "marked-terminal";
+
+// Initialize marked with terminal renderer
+marked.use(markedTerminal());
+
 type EnquirerCtor = new (options: Record<string, unknown>) => { run(): Promise<unknown> };
 const { Select, Confirm, Input } = pkg as unknown as { Select: EnquirerCtor; Confirm: EnquirerCtor; Input: EnquirerCtor };
 
@@ -245,6 +252,8 @@ export class AgentLoop {
   private abortController: AbortController | null = null;
   private autoApproveTools = false;
   private themeColor: (text: string) => string = pc.cyan;
+  private persistentHistory: string[] = [];
+  private readonly historyPath = path.join(os.homedir(), ".mesh_history");
 
   constructor(
     private readonly config: AppConfig,
@@ -270,6 +279,16 @@ export class AgentLoop {
   async runCli(initialPrompt?: string): Promise<void> {
     await this.checkInit();
     this.sessionCapsule = await this.sessionStore.load();
+    
+    // Load persistent history
+    try {
+      const historyRaw = await fs.readFile(this.historyPath, "utf-8");
+      this.persistentHistory = historyRaw.split("\n").filter(Boolean).reverse(); // readline expects newest first? No, readline history is old to new. 
+      // Actually readline history is [older, ..., newer]
+      this.persistentHistory = historyRaw.split("\n").filter(Boolean);
+    } catch {
+      this.persistentHistory = [];
+    }
 
     try {
       const { execFile } = await import("node:child_process");
@@ -313,7 +332,8 @@ export class AgentLoop {
         input: input,
         output: output,
         terminal: true,
-        completer: (line) => this.completeInput(line)
+        completer: (line) => this.completeInput(line),
+        history: [...this.persistentHistory]
       });
       this.setupGhostText(rl, input, output);
 
@@ -341,6 +361,12 @@ export class AgentLoop {
       let userInput = "";
       try {
         userInput = (await rl.question(prompt)).trim();
+        // Update persistent history
+        if (userInput && !userInput.startsWith("/") && userInput !== this.persistentHistory[this.persistentHistory.length - 1]) {
+          this.persistentHistory.push(userInput);
+          if (this.persistentHistory.length > 1000) this.persistentHistory.shift();
+          await fs.writeFile(this.historyPath, this.persistentHistory.join("\n"), "utf-8");
+        }
       } catch (err) {
         rl.close();
         break;
@@ -929,8 +955,9 @@ export class AgentLoop {
   }
 
   private renderAssistantTurn(text: string): void {
+    const rendered = marked.parse(text);
     if (this.useAnsi) {
-      output.write("\n" + this.themeColor(pc.bold("assistant")) + pc.dim(" › ") + text + "\n");
+      output.write("\n" + this.themeColor(pc.bold("assistant")) + pc.dim(" › ") + "\n" + rendered + "\n");
       return;
     }
     output.write(`\nassistant> ${text}\n`);
