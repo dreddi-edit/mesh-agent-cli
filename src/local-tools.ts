@@ -89,7 +89,19 @@ export class LocalToolBackend implements ToolBackend {
       },
       {
         name: "workspace.read_file",
-        description: "Read one file from local workspace and return Mesh summary.",
+        description: "Read the Mesh capsule (optimized summary) of a file. Use this for general understanding.",
+        inputSchema: {
+          type: "object",
+          required: ["path"],
+          properties: {
+            path: { type: "string" },
+            tier: { type: "string", enum: ["low", "medium", "high"], default: "medium" }
+          }
+        }
+      },
+      {
+        name: "workspace.read_file_raw",
+        description: "Read the actual raw source code of a file. ONLY use this when you need to edit the file or see exact implementation details that are missing from the capsule.",
         inputSchema: {
           type: "object",
           required: ["path"],
@@ -113,7 +125,7 @@ export class LocalToolBackend implements ToolBackend {
       },
       {
         name: "workspace.grep_content",
-        description: "Search file contents by substring and return matching snippets.",
+        description: "Search raw file contents. Expensive, use only if grep_capsules fails to find what you need.",
         inputSchema: {
           type: "object",
           required: ["query"],
@@ -121,6 +133,18 @@ export class LocalToolBackend implements ToolBackend {
             query: { type: "string" },
             limit: { type: "number" },
             path: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "workspace.grep_capsules",
+        description: "Search in cached capsules (summaries). Very fast and efficient for high-level searching.",
+        inputSchema: {
+          type: "object",
+          required: ["query"],
+          properties: {
+            query: { type: "string" },
+            limit: { type: "number" }
           }
         }
       },
@@ -253,6 +277,10 @@ export class LocalToolBackend implements ToolBackend {
         return this.writeFile(args);
       case "workspace.run_command":
         return this.runCommand(args);
+      case "workspace.read_file_raw":
+        return this.readFileRaw(args);
+      case "workspace.grep_capsules":
+        return this.grepCapsules(args);
       case "workspace.get_index_status":
         return this.getIndexStatus();
       case "workspace.read_multiple_files":
@@ -358,8 +386,43 @@ export class LocalToolBackend implements ToolBackend {
       bytes: stat.size,
       tier,
       capsule: requestedContent,
-      source: "generated"
+      source: "generated",
+      note: "This is a Mesh-optimized capsule. Use read_file_raw if you need the full source code."
     };
+  }
+
+  private async readFileRaw(args: Record<string, unknown>): Promise<unknown> {
+    const requestedPath = String(args.path ?? "").trim();
+    if (!requestedPath) throw new Error("read_file_raw requires path");
+    const absolutePath = ensureInsideRoot(this.workspaceRoot, requestedPath);
+    const content = await fs.readFile(absolutePath, "utf8");
+    return {
+      ok: true,
+      path: toPosixRelative(this.workspaceRoot, absolutePath),
+      content,
+      note: "Raw source code loaded. Use sparingly to save tokens."
+    };
+  }
+
+  private async grepCapsules(args: Record<string, unknown>): Promise<unknown> {
+    const query = String(args.query ?? "").trim().toLowerCase();
+    const limit = Math.max(1, Math.min(Number(args.limit) || 50, 200));
+    const files = await collectFiles(this.workspaceRoot, 10000);
+    const matches: Array<{ path: string; snippet: string }> = [];
+
+    for (const file of files) {
+      if (matches.length >= limit) break;
+      const rel = toPosixRelative(this.workspaceRoot, file);
+      // Check medium tier as it's the standard for indexing
+      const capsule = await this.cache.getCapsule(rel, "medium", 0); 
+      if (capsule && capsule.content.toLowerCase().includes(query)) {
+        matches.push({
+          path: rel,
+          snippet: capsule.content.slice(0, 300)
+        });
+      }
+    }
+    return { ok: true, query, count: matches.length, matches };
   }
 
   private async readMultipleFiles(args: Record<string, unknown>): Promise<unknown> {
