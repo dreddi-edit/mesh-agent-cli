@@ -3,6 +3,11 @@ import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+
+const DEFAULT_WHISPER_MODEL_URL =
+  "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
 
 export interface VoiceConfig {
   whisperPath: string;
@@ -67,11 +72,53 @@ export class VoiceManager {
     if (configured && fsSync.existsSync(configured)) {
       return configured;
     }
-    return configured ?? null;
+    return null;
+  }
+
+  private resolvePiperModel(): string | null {
+    const configured = this.config.piperModel;
+    if (configured && fsSync.existsSync(configured)) {
+      return configured;
+    }
+    return null;
   }
 
   hasHomebrew(): boolean {
     return this.resolveBinary("brew") !== "brew";
+  }
+
+  getWhisperModelPath(): string | undefined {
+    return this.config.whisperModel;
+  }
+
+  hasWhisperModel(): boolean {
+    return Boolean(this.resolveWhisperModel());
+  }
+
+  async installWhisperModel(targetPath = this.config.whisperModel): Promise<string> {
+    if (!targetPath) {
+      throw new Error("Whisper model path not configured.");
+    }
+
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    const tempPath = `${targetPath}.download`;
+
+    try {
+      const response = await fetch(DEFAULT_WHISPER_MODEL_URL);
+      if (!response.ok || !response.body) {
+        throw new Error(`HTTP ${response.status} while downloading Whisper model`);
+      }
+
+      await pipeline(
+        Readable.fromWeb(response.body as globalThis.ReadableStream),
+        fsSync.createWriteStream(tempPath)
+      );
+      await fs.rename(tempPath, targetPath);
+      return targetPath;
+    } catch (error) {
+      await fs.unlink(tempPath).catch(() => {});
+      throw error;
+    }
   }
 
   async installCoreDependencies(packages: string[] = ["ffmpeg", "whisper-cpp"]): Promise<void> {
@@ -149,7 +196,7 @@ export class VoiceManager {
   async transcribe(filePath: string): Promise<string> {
     const whisperModel = this.resolveWhisperModel();
     if (!whisperModel) {
-      throw new Error("Whisper model path not configured. Use /setup to set it.");
+      throw new Error(`Whisper model not found at ${this.config.whisperModel}.`);
     }
 
     const args = [
@@ -163,12 +210,21 @@ export class VoiceManager {
 
     return new Promise((resolve, reject) => {
       let output = "";
+      let errorOutput = "";
       const proc = spawn(whisperPath, args);
       proc.on("error", (err) => reject(new Error(`whisper-cpp spawn failed: ${err.message}`)));
       proc.stdout.on("data", (data) => (output += data.toString()));
+      proc.stderr.on("data", (data) => (errorOutput += data.toString()));
       proc.on("close", (code) => {
         if (code === 0) resolve(output.trim());
-        else reject(new Error(`whisper-cpp failed with code ${code}`));
+        else {
+          const detail = errorOutput.trim().split("\n").slice(-3).join(" | ");
+          reject(
+            new Error(
+              `whisper-cpp failed with code ${code} (model: ${whisperModel})${detail ? `: ${detail}` : ""}`
+            )
+          );
+        }
       });
     });
   }
@@ -177,7 +233,8 @@ export class VoiceManager {
    * Speak text using Piper and afplay
    */
   async speak(text: string): Promise<void> {
-    if (!this.config.piperModel) {
+    const piperModel = this.resolvePiperModel();
+    if (!piperModel) {
       // Fallback to 'say' on Mac if piper is missing
       if (process.platform === "darwin") {
         execSync(`say "${text.replace(/"/g, '\\"')}"`);
@@ -190,7 +247,7 @@ export class VoiceManager {
     
     // piper -m model.onnx --output_file out.wav
     const args = [
-      "-m", this.config.piperModel,
+      "-m", piperModel,
       "--output_file", tempAudio
     ];
     const piperPath = this.resolveBinary(this.config.piperPath!);

@@ -1212,6 +1212,14 @@ export class AgentLoop {
               output.write(pc.red("Voice mode remains OFF until ffmpeg and whisper-cpp are installed.\n"));
             }
           }
+
+          if (this.voiceMode && !this.voiceManager.hasWhisperModel()) {
+            await this.ensureWhisperModel();
+            if (!this.voiceManager.hasWhisperModel()) {
+              this.voiceMode = false;
+              output.write(pc.red("Voice mode remains OFF until a Whisper model is available.\n"));
+            }
+          }
         }
 
         output.write(`\nVoice mode: ${this.voiceMode ? pc.green("ON") : pc.red("OFF")}\n`);
@@ -1526,9 +1534,20 @@ export class AgentLoop {
           output.write(`   ${pc.dim(`Hint: ${dep.hint}`)}\n`);
         }
       }
+      output.write(
+        `${this.voiceManager.hasWhisperModel() ? pc.green("✔") : pc.red("✘")} ${"whisper model".padEnd(15)} ${
+          this.voiceManager.hasWhisperModel() ? pc.green("Available") : pc.red(`Missing (${this.voiceManager.getWhisperModelPath()})`)
+        }\n`
+      );
+      output.write(
+        `${pc.yellow("•")} ${"tts voice".padEnd(15)} ${pc.dim("Falls back to macOS say if Piper model is missing")}\n`
+      );
 
       if (wantsFix) {
         voiceDeps = await this.ensureVoiceCoreDependencies(voiceDeps);
+        if (!this.voiceManager.hasWhisperModel()) {
+          await this.ensureWhisperModel();
+        }
       }
       return;
     }
@@ -1614,6 +1633,36 @@ export class AgentLoop {
       const message = error instanceof Error ? error.message : String(error);
       output.write(pc.red(`\nVoice dependency installation failed: ${message}\n`));
       return voiceDeps;
+    }
+  }
+
+  private async ensureWhisperModel(): Promise<boolean> {
+    if (this.voiceManager.hasWhisperModel()) {
+      output.write(pc.green("\nWhisper model is already installed.\n"));
+      return true;
+    }
+
+    const targetPath = this.voiceManager.getWhisperModelPath();
+    const confirmPrompt = new Confirm({
+      name: "installWhisperModel",
+      message: `Download Whisper base model to ${targetPath}? (~141 MB)`,
+      initial: true
+    });
+    const confirmed = Boolean(await confirmPrompt.run().catch(() => false));
+    if (!confirmed) {
+      output.write(pc.dim("\nWhisper model download cancelled.\n"));
+      return false;
+    }
+
+    output.write(this.themeColor(`\nDownloading Whisper model to ${targetPath}\n`));
+    try {
+      await this.voiceManager.installWhisperModel();
+      output.write(pc.green("\nWhisper model download complete.\n"));
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      output.write(pc.red(`\nWhisper model download failed: ${message}\n`));
+      return false;
     }
   }
 
