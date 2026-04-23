@@ -1198,6 +1198,22 @@ export class AgentLoop {
         if (subVoice === "on") this.voiceMode = true;
         else if (subVoice === "off") this.voiceMode = false;
         else this.voiceMode = !this.voiceMode;
+
+        if (this.voiceMode) {
+          const voiceDeps = await this.voiceManager.checkDependencies();
+          const missingCore = voiceDeps.filter((dep) => !dep.ok && (dep.name === "ffmpeg" || dep.name === "whisper-cpp"));
+          if (missingCore.length > 0) {
+            output.write(pc.yellow("\nVoice dependencies missing.\n"));
+            await this.ensureVoiceCoreDependencies(voiceDeps);
+            const refreshedDeps = await this.voiceManager.checkDependencies();
+            const stillMissing = refreshedDeps.filter((dep) => !dep.ok && (dep.name === "ffmpeg" || dep.name === "whisper-cpp"));
+            if (stillMissing.length > 0) {
+              this.voiceMode = false;
+              output.write(pc.red("Voice mode remains OFF until ffmpeg and whisper-cpp are installed.\n"));
+            }
+          }
+        }
+
         output.write(`\nVoice mode: ${this.voiceMode ? pc.green("ON") : pc.red("OFF")}\n`);
         return { wasHandled: true, shouldExit: false };
       default:
@@ -1512,44 +1528,7 @@ export class AgentLoop {
       }
 
       if (wantsFix) {
-        const missingCore = voiceDeps
-          .filter((dep) => !dep.ok && (dep.name === "ffmpeg" || dep.name === "whisper-cpp"))
-          .map((dep) => dep.name);
-
-        if (missingCore.length === 0) {
-          output.write(pc.green("\nCore voice dependencies are already installed.\n"));
-          return;
-        }
-
-        if (!this.voiceManager.hasHomebrew()) {
-          output.write(pc.red("\nHomebrew is not installed. Install it from https://brew.sh and rerun /doctor voice fix.\n"));
-          return;
-        }
-
-        const confirmPrompt = new Confirm({
-          name: "installVoiceDeps",
-          message: `Install missing voice dependencies with Homebrew? (${missingCore.join(", ")})`,
-          initial: true
-        });
-        const confirmed = Boolean(await confirmPrompt.run().catch(() => false));
-        if (!confirmed) {
-          output.write(pc.dim("\nInstallation cancelled.\n"));
-          return;
-        }
-
-        output.write(this.themeColor(`\nInstalling: ${missingCore.join(", ")}\n`));
-        try {
-          await this.voiceManager.installCoreDependencies(missingCore);
-          voiceDeps = await this.voiceManager.checkDependencies();
-          output.write(pc.green("\nVoice dependency installation complete.\n"));
-          for (const dep of voiceDeps) {
-            const icon = dep.ok ? pc.green("✔") : pc.red("✘");
-            output.write(`${icon} ${dep.name.padEnd(15)} ${dep.ok ? pc.green("Available") : pc.red("Missing")}\n`);
-          }
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          output.write(pc.red(`\nVoice dependency installation failed: ${message}\n`));
-        }
+        voiceDeps = await this.ensureVoiceCoreDependencies(voiceDeps);
       }
       return;
     }
@@ -1590,6 +1569,52 @@ export class AgentLoop {
 
     lines.push("");
     output.write(lines.join("\n"));
+  }
+
+  private async ensureVoiceCoreDependencies(
+    existingDeps?: { name: string; ok: boolean; hint?: string }[]
+  ): Promise<{ name: string; ok: boolean; hint?: string }[]> {
+    const voiceDeps = existingDeps ?? await this.voiceManager.checkDependencies();
+    const missingCore = voiceDeps
+      .filter((dep) => !dep.ok && (dep.name === "ffmpeg" || dep.name === "whisper-cpp"))
+      .map((dep) => dep.name);
+
+    if (missingCore.length === 0) {
+      output.write(pc.green("\nCore voice dependencies are already installed.\n"));
+      return voiceDeps;
+    }
+
+    if (!this.voiceManager.hasHomebrew()) {
+      output.write(pc.red("\nHomebrew is not installed. Install it from https://brew.sh and rerun /doctor voice fix.\n"));
+      return voiceDeps;
+    }
+
+    const confirmPrompt = new Confirm({
+      name: "installVoiceDeps",
+      message: `Install missing voice dependencies with Homebrew? (${missingCore.join(", ")})`,
+      initial: true
+    });
+    const confirmed = Boolean(await confirmPrompt.run().catch(() => false));
+    if (!confirmed) {
+      output.write(pc.dim("\nInstallation cancelled.\n"));
+      return voiceDeps;
+    }
+
+    output.write(this.themeColor(`\nInstalling: ${missingCore.join(", ")}\n`));
+    try {
+      await this.voiceManager.installCoreDependencies(missingCore);
+      const updatedDeps = await this.voiceManager.checkDependencies();
+      output.write(pc.green("\nVoice dependency installation complete.\n"));
+      for (const dep of updatedDeps) {
+        const icon = dep.ok ? pc.green("✔") : pc.red("✘");
+        output.write(`${icon} ${dep.name.padEnd(15)} ${dep.ok ? pc.green("Available") : pc.red("Missing")}\n`);
+      }
+      return updatedDeps;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      output.write(pc.red(`\nVoice dependency installation failed: ${message}\n`));
+      return voiceDeps;
+    }
   }
 
   private async exportSessionCapsule(requestedPath?: string): Promise<void> {
