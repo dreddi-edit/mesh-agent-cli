@@ -8,7 +8,7 @@ mesh
 ```
 
 - **Voice**: `/voice` local Speech-to-Speech.
-- **Voice Setup**: `mesh doctor voice fix` installs core voice dependencies on macOS via Homebrew.
+- **Voice Setup**: `mesh doctor voice fix` installs core voice dependencies on macOS via Homebrew and uses Homebrew's Whisper runtime fallback when no local model exists.
 - **Context**: Optimized for large projects.
 - **Tools**: Auto-executes shell & file edits.
 

@@ -13,16 +13,23 @@ const os = require('os');
 const readline = require('readline');
 
 function resolveBinary(command) {
-  const candidates = [
-    ...(process.env.PATH || '')
-      .split(path.delimiter)
-      .filter(Boolean)
-      .map((dir) => path.join(dir, command)),
-    path.join('/opt/homebrew/bin', command),
-    path.join('/usr/local/bin', command)
-  ];
+  const aliases = command === 'whisper-cpp' ? ['whisper-cpp', 'whisper-cli'] : [command];
 
-  return candidates.find((candidate) => fs.existsSync(candidate)) || command;
+  for (const alias of aliases) {
+    const candidates = [
+      ...(process.env.PATH || '')
+        .split(path.delimiter)
+        .filter(Boolean)
+        .map((dir) => path.join(dir, alias)),
+      path.join('/opt/homebrew/bin', alias),
+      path.join('/usr/local/bin', alias)
+    ];
+
+    const match = candidates.find((candidate) => fs.existsSync(candidate));
+    if (match) return match;
+  }
+
+  return command;
 }
 
 function askYesNo(question) {

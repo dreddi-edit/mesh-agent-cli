@@ -20,6 +20,22 @@ export class VoiceManager {
   }
 
   private resolveBinary(command: string): string {
+    const aliases =
+      command === "whisper-cpp"
+        ? ["whisper-cpp", "whisper-cli"]
+        : [command];
+
+    for (const alias of aliases) {
+      const resolved = this.resolveBinaryCandidate(alias);
+      if (resolved) {
+        return resolved;
+      }
+    }
+
+    return command;
+  }
+
+  private resolveBinaryCandidate(command: string): string | null {
     if (path.isAbsolute(command) || command.includes(path.sep)) {
       return command;
     }
@@ -40,10 +56,30 @@ export class VoiceManager {
     }
 
     try {
-      return execFileSync("which", [command], { encoding: "utf8" }).trim() || command;
+      return execFileSync("which", [command], { encoding: "utf8" }).trim() || null;
     } catch {
-      return command;
+      return null;
     }
+  }
+
+  private resolveWhisperModel(): string | null {
+    const configured = this.config.whisperModel;
+    if (configured && fsSync.existsSync(configured)) {
+      return configured;
+    }
+
+    const fallbackModels = [
+      "/opt/homebrew/share/whisper-cpp/for-tests-ggml-tiny.bin",
+      "/usr/local/share/whisper-cpp/for-tests-ggml-tiny.bin"
+    ];
+
+    for (const modelPath of fallbackModels) {
+      if (fsSync.existsSync(modelPath)) {
+        return modelPath;
+      }
+    }
+
+    return configured ?? null;
   }
 
   hasHomebrew(): boolean {
@@ -123,12 +159,13 @@ export class VoiceManager {
    * Transcribe WAV using whisper-cpp
    */
   async transcribe(filePath: string): Promise<string> {
-    if (!this.config.whisperModel) {
+    const whisperModel = this.resolveWhisperModel();
+    if (!whisperModel) {
       throw new Error("Whisper model path not configured. Use /setup to set it.");
     }
 
     const args = [
-      "-m", this.config.whisperModel,
+      "-m", whisperModel,
       "-f", filePath,
       "-nt" // No timestamps
     ];
