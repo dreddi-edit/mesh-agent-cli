@@ -2,8 +2,9 @@ import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import pc from "picocolors";
 import ora from "ora";
+import boxen from "boxen";
 
-import { AppConfig } from "./config.js";
+import { AppConfig, shortPathLabel } from "./config.js";
 import {
   BedrockLlmClient,
   ConverseMessage,
@@ -81,12 +82,6 @@ function formatMultiline(prefix: string, message: string): string {
   return `${prefix}${lines[0]}\n${lines.slice(1).map((line) => `    ${line}`).join("\n")}`;
 }
 
-function shortPathLabel(fullPath: string): string {
-  const normalized = fullPath.replace(/\\/g, "/");
-  const parts = normalized.split("/").filter(Boolean);
-  return parts.at(-1) || fullPath;
-}
-
 export class AgentLoop {
   private readonly llm: BedrockLlmClient;
   private readonly useAnsi = output.isTTY;
@@ -130,10 +125,11 @@ export class AgentLoop {
     }
 
     this.printBanner();
-    const commands = ["/help", "/status", "/index", "/model", "/cost", "/compact", "/clear", "/exit"];
+    const commands = ["/help", "/status", "/index", "/sync", "/model", "/cost", "/compact", "/clear", "/exit"];
     const rl = readline.createInterface({
-      input,
-      output,
+      input: input,
+      output: output,
+      terminal: true,
       completer: (line: string): [string[], string] => {
         const hits = commands.filter((c) => c.startsWith(line));
         return [hits.length ? hits : commands, line];
@@ -171,6 +167,10 @@ export class AgentLoop {
       }
       if (userInput === "/index") {
         await this.runIndexing();
+        continue;
+      }
+      if (userInput === "/sync") {
+        await this.printSync();
         continue;
       }
       if (userInput === "/clear") {
@@ -227,7 +227,19 @@ export class AgentLoop {
         if (spinner) {
           spinner.stop();
         }
-        output.write(`\n${answer}\n`);
+        
+        if (this.useAnsi) {
+          output.write("\n" + boxen(answer, {
+            padding: 1,
+            margin: 1,
+            borderStyle: "round",
+            borderColor: "cyan",
+            title: "Mesh Agent",
+            titleAlignment: "center"
+          }) + "\n");
+        } else {
+          output.write(`\n${answer}\n`);
+        }
       } catch (error) {
         const errorLabel = this.useAnsi ? pc.red("error> ") : "error> ";
         output.write(
@@ -270,102 +282,88 @@ export class AgentLoop {
           return response.text || lastAssistantText || "(no answer)";
         }
 
-      lastAssistantText = response.text ?? lastAssistantText;
+        lastAssistantText = response.text ?? lastAssistantText;
 
-      // Record the assistant turn that issued the toolUse.
-      const assistantContent: ContentBlock[] = [];
-      if (response.text) {
-        assistantContent.push({ text: response.text });
-      }
-      assistantContent.push({
-        toolUse: {
-          toolUseId: response.toolUseId,
-          name: response.name,
-          input: response.input
+        // Record the assistant turn that issued the toolUse.
+        const assistantContent: ContentBlock[] = [];
+        if (response.text) {
+          assistantContent.push({ text: response.text });
         }
-      });
-      this.transcript.push({ role: "assistant", content: assistantContent });
+        assistantContent.push({
+          toolUse: {
+            toolUseId: response.toolUseId,
+            name: response.name,
+            input: response.input
+          }
+        });
+        this.transcript.push({ role: "assistant", content: assistantContent });
 
-      // Execute the tool (or report unknown tool) and push a user-turn tool result.
-      const selectedTool = wireToolMap.get(response.name);
+        // Execute the tool
+        const selectedTool = wireToolMap.get(response.name);
 
-      if (!selectedTool) {
+        if (!selectedTool) {
+          this.transcript.push({
+            role: "user",
+            content: [
+              {
+                toolResult: {
+                  toolUseId: response.toolUseId,
+                  status: "error",
+                  content: [{ text: `Tool '${response.name}' is not available.` }]
+                }
+              }
+            ]
+          });
+          continue;
+        }
+
+        let resultText: string;
+        let errored = false;
+
+        // Tool Security Check
+        if ((selectedTool.tool.name === "workspace.run_command" || selectedTool.tool.name === "workspace.write_file") && !this.autoApproveTools) {
+          if (hooks?.askPermission) {
+            const allowed = await hooks.askPermission(`Allow ${selectedTool.tool.name} to run?`);
+            if (!allowed) {
+              this.transcript.push({
+                role: "user",
+                content: [
+                  {
+                    toolResult: {
+                      toolUseId: response.toolUseId,
+                      status: "error",
+                      content: [{ text: "User denied permission to run this tool." }]
+                    }
+                  }
+                ]
+              });
+              continue;
+            }
+          }
+        }
+
+        try {
+          hooks?.onToolStart?.(response.name, response.input);
+          const raw = await this.backend.callTool(selectedTool.tool.name, response.input);
+          resultText = await buildLlmSafeMeshContext(selectedTool.tool.name, response.input, raw);
+        } catch (error) {
+          resultText = `Tool execution failed: ${(error as Error).message}`;
+          errored = true;
+        }
+
         this.transcript.push({
           role: "user",
           content: [
             {
               toolResult: {
                 toolUseId: response.toolUseId,
-                status: "error",
-                content: [
-                  {
-                    text: `Tool '${response.name}' is not available. Pick one of: ${tools
-                      .map((_, i) => wireTools[i]?.wireName ?? "tool")
-                      .join(", ")}`
-                  }
-                ]
+                status: errored ? "error" : "success",
+                content: [{ text: resultText }]
               }
             }
           ]
         });
-        continue;
       }
-
-      let resultText: string;
-      let errored = false;
-
-      // --- Tool Security Check ---
-      if (selectedTool && (selectedTool.tool.name === "workspace.run_command" || selectedTool.tool.name === "workspace.write_file") && !this.autoApproveTools) {
-        if (hooks?.askPermission) {
-          const allowed = await hooks.askPermission(`Allow ${selectedTool.tool.name} to run?`);
-          if (!allowed) {
-            this.transcript.push({
-              role: "user",
-              content: [
-                {
-                  toolResult: {
-                    toolUseId: response.toolUseId,
-                    status: "error",
-                    content: [{ text: "User denied permission to run this tool." }]
-                  }
-                }
-              ]
-            });
-            continue;
-          }
-        }
-      }
-      // ---------------------------
-
-      try {
-        hooks?.onToolStart?.(response.name, response.input);
-        const raw = await this.backend.callTool(
-          selectedTool.tool.name,
-          response.input
-        );
-        resultText = await buildLlmSafeMeshContext(
-          selectedTool.tool.name,
-          response.input,
-          raw
-        );
-      } catch (error) {
-        resultText = `Tool execution failed: ${(error as Error).message}`;
-        errored = true;
-      }
-
-      this.transcript.push({
-        role: "user",
-        content: [
-          {
-            toolResult: {
-              toolUseId: response.toolUseId,
-              status: errored ? "error" : "success",
-              content: [{ text: resultText }]
-            }
-          }
-        ]
-      });
-    } // end for loop
     } catch (err: any) {
       if (err.name === "AbortError" || err.message?.includes("aborted")) {
         return lastAssistantText || "Request aborted.";
@@ -396,9 +394,9 @@ export class AgentLoop {
       output.write("\n" + banner.join("\n") + "\n");
       output.write(
         [
-          `mesh-agent  ${this.config.agent.mode}  ${shortPathLabel(this.config.agent.workspaceRoot)}`,
+          `mesh  ${this.config.agent.mode}  ${shortPathLabel(this.config.agent.workspaceRoot)}`,
           `model: ${this.currentModelId}`,
-          "commands: /help /status /index /model /clear /exit"
+          "commands: /help /status /index /sync /model /clear /exit"
         ].join("\n") + "\n"
       );
       return;
@@ -409,14 +407,30 @@ export class AgentLoop {
       [
         `${pc.cyan(pc.bold("mesh"))}  ${pc.dim(this.config.agent.mode)}  ${pc.dim(shortPathLabel(this.config.agent.workspaceRoot))}`,
         `${pc.dim("model:")} ${pc.cyan(this.currentModelId)}`,
-        `${pc.dim("commands:")} ${pc.magenta("/help")} ${pc.magenta("/status")} ${pc.magenta("/index")} ${pc.magenta("/model")} ${pc.magenta("/cost")}`
+        `${pc.dim("commands:")} ${pc.magenta("/help")} ${pc.magenta("/status")} ${pc.magenta("/index")} ${pc.magenta("/sync")} ${pc.magenta("/model")}`
       ].join("\n") + "\n"
+    );
+  }
+
+  private async printSync(): Promise<void> {
+    const status: any = await this.backend.callTool("workspace.check_sync", {});
+    if (!status.l2Enabled) {
+      output.write(pc.yellow("\nCloud (L2) cache is disabled. Check your SUPABASE_URL/KEY.\n"));
+      return;
+    }
+    output.write(
+      [
+        "",
+        `${pc.cyan(pc.bold("Cloud Sync Status"))}`,
+        `${pc.dim("L2 Capsules:")} ${pc.green(status.l2Count)}`,
+        `${pc.dim("L2 Status:")}   ${pc.green("Connected")}`,
+        ""
+      ].join("\n")
     );
   }
 
   private async printStatus(): Promise<void> {
     const status: any = await this.backend.callTool("workspace.get_index_status", {});
-    
     output.write(
       [
         "",
@@ -436,7 +450,6 @@ export class AgentLoop {
     }
 
     const spinner = ora({ text: "Scanning workspace...", color: "cyan" }).start();
-    
     try {
       for await (const progress of this.backend.indexEverything()) {
         spinner.text = `Indexing [${progress.current}/${progress.total}] ${pc.dim(progress.path)}`;
@@ -450,9 +463,7 @@ export class AgentLoop {
   private printCost(): void {
     const inT = this.sessionTokens.inputTokens;
     const outT = this.sessionTokens.outputTokens;
-    // Approx Claude 3.5 Sonnet pricing: $3.00 / 1M input, $15.00 / 1M output
     const cost = (inT * 0.003 / 1000) + (outT * 0.015 / 1000);
-    
     output.write(
       [
         "",
@@ -470,6 +481,7 @@ export class AgentLoop {
         `${pc.magenta("/help")}             show commands`,
         `${pc.magenta("/status")}           show indexing status & runtime info`,
         `${pc.magenta("/index")}            re-index workspace (generate capsules)`,
+        `${pc.magenta("/sync")}             check cloud (L2) cache synchronization`,
         `${pc.magenta("/model")}            show current model`,
         `${pc.magenta("/model <id>")}       switch model for next messages`,
         `${pc.magenta("/cost")}             show token usage and approx cost`,

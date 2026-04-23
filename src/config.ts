@@ -19,6 +19,12 @@ const DEFAULT_ENDPOINT_BASE = "https://mesh-llm.edgar-baumann.workers.dev";
  */
 const DEFAULT_MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
 
+export function shortPathLabel(fullPath: string): string {
+  const normalized = fullPath.replace(/\\/g, "/");
+  const parts = normalized.split("/").filter(Boolean);
+  return parts.at(-1) || fullPath;
+}
+
 function optionalString(name: string, fallback: string): string {
   const value = process.env[name];
   if (!value || !value.trim()) {

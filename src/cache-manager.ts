@@ -103,6 +103,19 @@ export class CacheManager {
     }
   }
 
+  public async getSyncStatus(): Promise<{ l2Count: number; l2Enabled: boolean }> {
+    if (!this.supabase) return { l2Count: 0, l2Enabled: false };
+    try {
+      const { count, error } = await this.supabase
+        .from("capsules")
+        .select("*", { count: "exact", head: true })
+        .eq("workspace_hash", this.workspaceHash);
+      return { l2Count: count || 0, l2Enabled: true };
+    } catch {
+      return { l2Count: 0, l2Enabled: true };
+    }
+  }
+
   private async writeL1(filePath: string, tier: string, entry: CacheEntry): Promise<void> {
     try {
       const l1Path = this.getL1Path(filePath, tier);

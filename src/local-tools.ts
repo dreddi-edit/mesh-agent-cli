@@ -142,11 +142,9 @@ export class LocalToolBackend implements ToolBackend {
           }
         }
       },
-      {
-        name: "workspace.get_index_status",
-        description: "Returns statistics about how many files are already cached.",
-        inputSchema: { type: "object", properties: {} }
-      }
+      { name: "workspace.get_index_status", description: "Get current indexing progress and cache coverage" },
+      { name: "workspace.check_sync", description: "Verify cloud (L2) synchronization status" },
+      { name: "workspace.index_everything", description: "Explicitly trigger full workspace indexing (generate all capsules)" }
     ];
   }
 
@@ -158,7 +156,9 @@ export class LocalToolBackend implements ToolBackend {
         return this.readFile(args);
       case "workspace.search_files":
         return this.searchFiles(args);
-      case "workspace.grep_content":
+      case "workspace.check_sync":
+        return this.checkSync();
+      case "workspace.index_everything":
         return this.grepContent(args);
       case "workspace.write_file":
         return this.writeFile(args);
@@ -383,6 +383,11 @@ export class LocalToolBackend implements ToolBackend {
         stderr: trimOutput(error.stderr || String(error))
       };
     }
+  }
+
+  private async checkSync(): Promise<unknown> {
+    const status = await this.cache.getSyncStatus();
+    return { ok: true, ...status };
   }
 
   private async getIndexStatus(): Promise<unknown> {
