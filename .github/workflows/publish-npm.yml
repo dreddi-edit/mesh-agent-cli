@@ -30,7 +30,7 @@ jobs:
 
       - name: Set CI publish version
         run: |
-          node -e 'const fs=require("fs");const pkg=require("./package.json");const [major,minor]=String(pkg.version||"0.1.0").split(".");const run=process.env.GITHUB_RUN_NUMBER||"0";const attempt=process.env.GITHUB_RUN_ATTEMPT||"1";const version=`${major}.${minor}.${run}${attempt==="1"?"":`-run.${attempt}`}`;pkg.version=version;fs.writeFileSync("package.json", JSON.stringify(pkg,null,2)+"\\n");console.log("Publishing version",version);'
+          node -e 'const fs=require("fs");const pkg=require("./package.json");const [major,minor]=String(pkg.version||"0.1.0").split(".");const run=process.env.GITHUB_RUN_NUMBER||"0";const attempt=process.env.GITHUB_RUN_ATTEMPT||"1";const version=`${major}.${minor}.${run}${attempt==="1"?"":`-run.${attempt}`}`;pkg.version=version;fs.writeFileSync("package.json", JSON.stringify(pkg,null,2)+"\n");console.log("Publishing version",version);'
 
       - name: Publish to npm
         run: npm publish --provenance --access public
