@@ -39,7 +39,11 @@ async function processDirectory(srcDir, destDir) {
     
     const content = await fs.readFile(file, "utf8");
     try {
-      const result = await minify(content, MINIFY_CONFIG);
+      const isESM = !file.endsWith('.cjs');
+      const result = await minify(content, {
+        ...MINIFY_CONFIG,
+        module: isESM
+      });
       if (result.code) {
         await fs.writeFile(destPath, result.code, "utf8");
       }
