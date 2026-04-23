@@ -1,0 +1,377 @@
+{
+  "generatedAt": "2026-04-23T17:58:01.978Z",
+  "modelId": "us.anthropic.claude-opus-4-6-v1",
+  "results": [
+    {
+      "caseId": "20f-5n",
+      "mode": "direct",
+      "modelId": "us.anthropic.claude-opus-4-6-v1",
+      "totalFiles": 20,
+      "needleAt": 5,
+      "pass": true,
+      "response": "MESH_NIAH_SECRET_20F5N_9A2F7E1C",
+      "error": null,
+      "latencyMs": 3180,
+      "inputTokens": 9379,
+      "outputTokens": 25,
+      "totalTokens": 9404,
+      "directContextTokens": 7146,
+      "directFilesIncluded": 8,
+      "needleInDirectContext": true
+    },
+    {
+      "caseId": "20f-5n",
+      "mode": "mesh-cli",
+      "modelId": "us.anthropic.claude-opus-4-6-v1",
+      "totalFiles": 20,
+      "needleAt": 5,
+      "pass": true,
+      "response": "MESH_NIAH_SECRET_20F5N_9A2F7E1C",
+      "error": null,
+      "latencyMs": 4287,
+      "inputTokens": 3279,
+      "outputTokens": 83,
+      "totalTokens": 3362,
+      "toolCalls": 1,
+      "toolTrace": [
+        {
+          "name": "workspace.grep_content",
+          "args": {
+            "query": "SESSION_SECRET"
+          },
+          "ok": true
+        }
+      ]
+    },
+    {
+      "caseId": "20f-5n",
+      "mode": "mesh-cli-capsule",
+      "modelId": "us.anthropic.claude-opus-4-6-v1",
+      "totalFiles": 20,
+      "needleAt": 5,
+      "pass": false,
+      "response": "There are 20 JS files. The SESSION_SECRET is likely hidden in one of them. Let me read all their capsules to find it.",
+      "error": "Stopped after 10 steps without final answer.",
+      "latencyMs": 25973,
+      "inputTokens": 20948,
+      "outputTokens": 597,
+      "totalTokens": 21545,
+      "toolCalls": 10,
+      "toolTrace": [
+        {
+          "name": "workspace.grep_capsules",
+          "args": {
+            "query": "SESSION_SECRET"
+          },
+          "ok": true
+        },
+        {
+          "name": "workspace.search_files",
+          "args": {
+            "query": "SESSION_SECRET"
+          },
+          "ok": true
+        },
+        {
+          "name": "workspace.search_files",
+          "args": {
+            "query": "secret"
+          },
+          "ok": true
+        },
+        {
+          "name": "workspace.search_files",
+          "args": {
+            "query": "session"
+          },
+          "ok": true
+        },
+        {
+          "name": "workspace.search_files",
+          "args": {
+            "query": "env"
+          },
+          "ok": true
+        },
+        {
+          "name": "workspace.list_files",
+          "args": {
+            "path": "/"
+          },
+          "ok": false
+        },
+        {
+          "name": "workspace.list_files",
+          "args": {
+            "path": "."
+          },
+          "ok": true
+        },
+        {
+          "name": "workspace.grep_capsules",
+          "args": {
+            "query": "SECRET"
+          },
+          "ok": true
+        },
+        {
+          "name": "workspace.list_files",
+          "args": {
+            "path": ".",
+            "limit": 100
+          },
+          "ok": true
+        },
+        {
+          "name": "workspace.read_multiple_files",
+          "args": {},
+          "ok": true
+        }
+      ]
+    },
+    {
+      "caseId": "80f-60n",
+      "mode": "direct",
+      "modelId": "us.anthropic.claude-opus-4-6-v1",
+      "totalFiles": 80,
+      "needleAt": 60,
+      "pass": false,
+      "response": "NOTFOUND",
+      "error": null,
+      "latencyMs": 1848,
+      "inputTokens": 9235,
+      "outputTokens": 7,
+      "totalTokens": 9242,
+      "directContextTokens": 7040,
+      "directFilesIncluded": 7,
+      "needleInDirectContext": false
+    },
+    {
+      "caseId": "80f-60n",
+      "mode": "mesh-cli",
+      "modelId": "us.anthropic.claude-opus-4-6-v1",
+      "totalFiles": 80,
+      "needleAt": 60,
+      "pass": true,
+      "response": "MESH_NIAH_SECRET_80F60N_9A2F7E1C",
+      "error": null,
+      "latencyMs": 4644,
+      "inputTokens": 3279,
+      "outputTokens": 83,
+      "totalTokens": 3362,
+      "toolCalls": 1,
+      "toolTrace": [
+        {
+          "name": "workspace.grep_content",
+          "args": {
+            "query": "SESSION_SECRET"
+          },
+          "ok": true
+        }
+      ]
+    },
+    {
+      "caseId": "80f-60n",
+      "mode": "mesh-cli-capsule",
+      "modelId": "us.anthropic.claude-opus-4-6-v1",
+      "totalFiles": 80,
+      "needleAt": 60,
+      "pass": false,
+      "response": "Let me read the files in batches to find SESSION_SECRET.",
+      "error": "Stopped after 10 steps without final answer.",
+      "latencyMs": 28001,
+      "inputTokens": 22179,
+      "outputTokens": 629,
+      "totalTokens": 22808,
+      "toolCalls": 10,
+      "toolTrace": [
+        {
+          "name": "workspace.grep_capsules",
+          "args": {
+            "query": "SESSION_SECRET"
+          },
+          "ok": true
+        },
+        {
+          "name": "workspace.search_files",
+          "args": {
+            "query": "SESSION_SECRET"
+          },
+          "ok": true
+        },
+        {
+          "name": "workspace.search_files",
+          "args": {
+            "query": "secret"
+          },
+          "ok": true
+        },
+        {
+          "name": "workspace.search_files",
+          "args": {
+            "query": "session"
+          },
+          "ok": true
+        },
+        {
+          "name": "workspace.search_files",
+          "args": {
+            "query": "env"
+          },
+          "ok": true
+        },
+        {
+          "name": "workspace.list_files",
+          "args": {
+            "path": "/"
+          },
+          "ok": false
+        },
+        {
+          "name": "workspace.list_files",
+          "args": {
+            "path": "."
+          },
+          "ok": true
+        },
+        {
+          "name": "workspace.grep_capsules",
+          "args": {},
+          "ok": true
+        },
+        {
+          "name": "workspace.read_multiple_files",
+          "args": {},
+          "ok": true
+        },
+        {
+          "name": "workspace.read_multiple_files",
+          "args": {},
+          "ok": true
+        }
+      ]
+    },
+    {
+      "caseId": "180f-150n",
+      "mode": "direct",
+      "modelId": "us.anthropic.claude-opus-4-6-v1",
+      "totalFiles": 180,
+      "needleAt": 150,
+      "pass": false,
+      "response": "NOTFOUND",
+      "error": null,
+      "latencyMs": 1849,
+      "inputTokens": 9235,
+      "outputTokens": 7,
+      "totalTokens": 9242,
+      "directContextTokens": 7040,
+      "directFilesIncluded": 7,
+      "needleInDirectContext": false
+    },
+    {
+      "caseId": "180f-150n",
+      "mode": "mesh-cli",
+      "modelId": "us.anthropic.claude-opus-4-6-v1",
+      "totalFiles": 180,
+      "needleAt": 150,
+      "pass": true,
+      "response": "MESH_NIAH_SECRET_180F150N_9A2F7E1C",
+      "error": null,
+      "latencyMs": 4274,
+      "inputTokens": 3279,
+      "outputTokens": 83,
+      "totalTokens": 3362,
+      "toolCalls": 1,
+      "toolTrace": [
+        {
+          "name": "workspace.grep_content",
+          "args": {
+            "query": "SESSION_SECRET"
+          },
+          "ok": true
+        }
+      ]
+    },
+    {
+      "caseId": "180f-150n",
+      "mode": "mesh-cli-capsule",
+      "modelId": "us.anthropic.claude-opus-4-6-v1",
+      "totalFiles": 180,
+      "needleAt": 150,
+      "pass": false,
+      "response": "All 180 files are indexed but none mention SECRET in their capsules. Let me try reading some files to check if SESSION_SECRET is buried in the code but not surfaced in capsules.",
+      "error": "Stopped after 10 steps without final answer.",
+      "latencyMs": 27019,
+      "inputTokens": 23675,
+      "outputTokens": 604,
+      "totalTokens": 24279,
+      "toolCalls": 10,
+      "toolTrace": [
+        {
+          "name": "workspace.grep_capsules",
+          "args": {
+            "query": "SESSION_SECRET"
+          },
+          "ok": true
+        },
+        {
+          "name": "workspace.search_files",
+          "args": {
+            "query": "SESSION_SECRET"
+          },
+          "ok": true
+        },
+        {
+          "name": "workspace.search_files",
+          "args": {
+            "query": "secret"
+          },
+          "ok": true
+        },
+        {
+          "name": "workspace.search_files",
+          "args": {
+            "query": "session"
+          },
+          "ok": true
+        },
+        {
+          "name": "workspace.search_files",
+          "args": {
+            "query": "env"
+          },
+          "ok": true
+        },
+        {
+          "name": "workspace.list_directory",
+          "args": {},
+          "ok": true
+        },
+        {
+          "name": "workspace.list_directory",
+          "args": {
+            "path": "src"
+          },
+          "ok": true
+        },
+        {
+          "name": "workspace.grep_capsules",
+          "args": {
+            "query": "SECRET"
+          },
+          "ok": true
+        },
+        {
+          "name": "workspace.get_index_status",
+          "args": {},
+          "ok": true
+        },
+        {
+          "name": "workspace.grep_capsules",
+          "args": {},
+          "ok": true
+        }
+      ]
+    }
+  ]
+}

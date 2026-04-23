@@ -219,6 +219,16 @@ function resolveModelOption(raw: string): ModelOption | null {
   );
 }
 
+function stripAnsi(value: string): string {
+  return value.replace(/\x1B\[[0-9;]*m/g, "");
+}
+
+function fitTerminalLine(value: string, width: number): string {
+  const plain = stripAnsi(value);
+  if (plain.length <= width) return value;
+  return plain.slice(0, Math.max(0, width - 1)) + "…";
+}
+
 export class AgentLoop {
   private ghostTextListener: ((...args: unknown[]) => void) | null = null;
   private readonly llm: BedrockLlmClient;
@@ -536,32 +546,32 @@ export class AgentLoop {
   private printBanner(): void {
     const width = output.columns || 80;
     const hr = "═".repeat(width);
-    
+
     const banner = [
-      " __  __ _____ ____  _   _             ▟          ▙",
-      "|  \\/  | ____/ ___|| | | |            ▟            ▙ ",
-      "| |\\/| |  _| \\___ \\| |_| |           █              █  ",
-      "| |  | | |___ ___) |  _  |            ▜            ▛ ",
-      "|_|  |_|_____|____/|_| |_|             ▜          ▛",
-      ""
+      "███╗   ███╗███████╗███████╗██╗  ██╗          ▄▄██████▄▄",
+      "████╗ ████║██╔════╝██╔════╝██║  ██║       ▄██▀▀    ▀▀██▄",
+      "██╔████╔██║█████╗  ███████╗███████║      ██▀  ▄████▄  ▀██",
+      "██║╚██╔╝██║██╔══╝  ╚════██║██╔══██║      ██  ███  ███  ██",
+      "██║ ╚═╝ ██║███████╗███████║██║  ██║      ▀██▄ ▀████▀ ▄██▀",
+      "╚═╝     ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝        ▀▀████████▀▀"
+    ];
+
+    const statusRows = [
+      `mesh  ${this.config.agent.mode}  ${shortPathLabel(this.config.agent.workspaceRoot)}`,
+      `branch: ${this.currentBranch}   model: ${shortModelName(this.currentModelId)}`,
+      "commands: /help /status /capsule /model pick /setup /clear /exit",
+      "tip: Type / and press TAB for command completion"
     ];
 
     if (!this.useAnsi) {
       output.write("\n" + hr + "\n");
       output.write(banner.join("\n") + "\n");
-      output.write(
-        [
-          `mesh  ${this.config.agent.mode}  ${shortPathLabel(this.config.agent.workspaceRoot)}`,
-          `branch: ${this.currentBranch}   model: ${shortModelName(this.currentModelId)}`,
-          "commands: /help /status /capsule /model /setup /clear /exit",
-          "tip: press TAB for slash-command autocomplete"
-        ].join("\n") + "\n"
-      );
+      output.write(statusRows.join("\n") + "\n");
       return;
     }
-    
+
     output.write("\n" + this.themeColor(hr) + "\n");
-    output.write(this.themeColor(banner.join("\n")) + "\n");
+    output.write(banner.map((line) => this.themeColor(pc.bold(line))).join("\n") + "\n");
     output.write(
       [
         `${this.themeColor(pc.bold("mesh"))}  ${pc.dim(this.config.agent.mode)}  ${pc.dim(shortPathLabel(this.config.agent.workspaceRoot))}`,
@@ -577,8 +587,47 @@ export class AgentLoop {
     if (!this.useAnsi) {
       return `\n${pc.cyan("◈")} ${pc.bold("mesh")} // ${pc.dim(this.currentBranch)} ${pc.cyan("›")} `;
     }
-    const left = `${this.themeColor(pc.bold("◈ mesh"))} ${pc.dim("//")} ${pc.dim(this.currentBranch)}`;
-    return `\n${left} ${this.themeColor(pc.bold("›"))} `;
+    const width = Math.max(48, Math.min(output.columns || 80, 140));
+    const promptLabel = ` mesh/${this.currentBranch} :: `;
+    const promptBar = fitTerminalLine(this.renderPromptBar(promptLabel, width), width);
+    const statusLine = fitTerminalLine(this.renderPromptStatus(width), width);
+    return `\n${promptBar}\x1b[s\n${statusLine}\x1b[u`;
+  }
+
+  private renderPromptBar(label: string, width: number): string {
+    const plainLabel = label;
+    const fill = Math.max(1, width - plainLabel.length);
+    const body = plainLabel + " ".repeat(fill);
+
+    switch (this.config.agent.themeColor) {
+      case "magenta":
+        return pc.bgMagenta(pc.white(pc.bold(body)));
+      case "yellow":
+        return pc.bgYellow(pc.black(pc.bold(body)));
+      case "green":
+        return pc.bgGreen(pc.black(pc.bold(body)));
+      case "blue":
+        return pc.bgBlue(pc.white(pc.bold(body)));
+      case "white":
+        return pc.bgWhite(pc.black(pc.bold(body)));
+      case "cyan":
+      default:
+        return pc.bgCyan(pc.black(pc.bold(body)));
+    }
+  }
+
+  private renderPromptStatus(width: number): string {
+    const parts = [
+      `${pc.dim("workspace")} ${this.themeColor(shortPathLabel(this.config.agent.workspaceRoot))}`,
+      `${pc.dim("model")} ${this.themeColor(shortModelName(this.currentModelId))}`,
+      `${pc.dim("mode")} ${this.themeColor(this.config.agent.mode)}`,
+      `${pc.dim("capsule")} ${this.sessionCapsule ? pc.green("active") : pc.dim("idle")}`,
+      `${pc.dim("approvals")} ${this.autoApproveTools ? pc.green("auto") : pc.yellow("manual")}`
+    ];
+    const raw = `  ${parts.join(pc.dim("  •  "))}`;
+    const plain = stripAnsi(raw);
+    const padded = plain.length < width ? raw + " ".repeat(width - plain.length) : raw;
+    return pc.bgBlack(pc.white(padded));
   }
 
   private async printSync(): Promise<void> {

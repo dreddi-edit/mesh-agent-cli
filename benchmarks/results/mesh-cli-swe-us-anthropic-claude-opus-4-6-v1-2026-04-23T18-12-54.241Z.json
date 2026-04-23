@@ -1,0 +1,113 @@
+{
+  "generatedAt": "2026-04-23T18:12:54.241Z",
+  "modelId": "us.anthropic.claude-opus-4-6-v1",
+  "results": [
+    {
+      "caseId": "reverse-words",
+      "resolved": true,
+      "verifyPassed": true,
+      "summary": "Tests pass. Fixed `reverseWords` by changing `split(\"\")` to `split(\" \")` (and `join(\"\")` to `join(\" \")`) so it splits and rejoins on spaces, reversing word order instead of character order.",
+      "error": null,
+      "latencyMs": 20043,
+      "inputTokens": 15977,
+      "outputTokens": 558,
+      "totalTokens": 16535,
+      "filesChanged": [
+        "string-utils.js"
+      ],
+      "toolCalls": 6,
+      "toolTrace": [
+        {
+          "name": "workspace.search_files",
+          "ok": true
+        },
+        {
+          "name": "workspace.list_files",
+          "ok": true
+        },
+        {
+          "name": "workspace.read_file_raw",
+          "ok": true
+        },
+        {
+          "name": "workspace.read_file_raw",
+          "ok": true
+        },
+        {
+          "name": "workspace.patch_file",
+          "ok": true
+        },
+        {
+          "name": "workspace.run_command",
+          "ok": true
+        }
+      ]
+    },
+    {
+      "caseId": "config-default-port",
+      "resolved": true,
+      "verifyPassed": true,
+      "summary": "All tests pass. The fix changes the false branch of the ternary in `loadPort` to return `fallback` instead of `parsed`, so invalid/non-positive inputs correctly fall back to the default port.",
+      "error": null,
+      "latencyMs": 19700,
+      "inputTokens": 13763,
+      "outputTokens": 516,
+      "totalTokens": 14279,
+      "filesChanged": [
+        "config.js"
+      ],
+      "toolCalls": 5,
+      "toolTrace": [
+        {
+          "name": "workspace.list_files",
+          "ok": true
+        },
+        {
+          "name": "workspace.read_file_raw",
+          "ok": true
+        },
+        {
+          "name": "workspace.read_file_raw",
+          "ok": true
+        },
+        {
+          "name": "workspace.patch_file",
+          "ok": true
+        },
+        {
+          "name": "workspace.run_command",
+          "ok": true
+        }
+      ]
+    },
+    {
+      "caseId": "status-label",
+      "resolved": true,
+      "verifyPassed": true,
+      "summary": "All tests pass. The fix changes the `\"in_progress\"` case in `formatStatusLabel` to return `\"In Progress\"` instead of the raw lowercase `\"in_progress\"`.",
+      "error": null,
+      "latencyMs": 11961,
+      "inputTokens": 8545,
+      "outputTokens": 359,
+      "totalTokens": 8904,
+      "filesChanged": [
+        "status.js"
+      ],
+      "toolCalls": 3,
+      "toolTrace": [
+        {
+          "name": "workspace.grep_capsules",
+          "ok": true
+        },
+        {
+          "name": "workspace.patch_file",
+          "ok": true
+        },
+        {
+          "name": "workspace.run_command",
+          "ok": true
+        }
+      ]
+    }
+  ]
+}

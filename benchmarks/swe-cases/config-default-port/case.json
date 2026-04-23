@@ -1,0 +1,6 @@
+{
+  "id": "config-default-port",
+  "title": "loadPort should fall back to default on invalid numbers",
+  "issue": "loadPort currently returns invalid values instead of falling back to the provided default port. Fix it and verify the tests pass.",
+  "verifyCommand": "node --test test/*.test.js"
+}

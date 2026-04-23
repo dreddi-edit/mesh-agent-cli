@@ -1,0 +1,6 @@
+{
+  "id": "status-label",
+  "title": "formatStatusLabel should title-case known statuses",
+  "issue": "formatStatusLabel should render known statuses as human-friendly title case, but one branch returns the raw lowercase string. Fix the bug and verify the tests pass.",
+  "verifyCommand": "node --test test/*.test.js"
+}

@@ -415,8 +415,12 @@ export class LocalToolBackend implements ToolBackend {
     for (const file of files) {
       if (matches.length >= limit) break;
       const rel = toPosixRelative(this.workspaceRoot, file);
+      const stat = await fs.stat(file).catch(() => null);
+      if (!stat?.isFile()) {
+        continue;
+      }
       // Check medium tier as it's the standard for indexing
-      const capsule = await this.cache.getCapsule(rel, "medium", 0); 
+      const capsule = await this.cache.getCapsule(rel, "medium", Math.floor(stat.mtimeMs));
       if (capsule && capsule.content.toLowerCase().includes(query)) {
         matches.push({
           path: rel,

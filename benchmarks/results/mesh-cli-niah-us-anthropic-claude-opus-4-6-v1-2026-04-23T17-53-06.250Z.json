@@ -1,0 +1,129 @@
+{
+  "generatedAt": "2026-04-23T17:53:06.250Z",
+  "modelId": "us.anthropic.claude-opus-4-6-v1",
+  "results": [
+    {
+      "caseId": "20f-5n",
+      "mode": "direct",
+      "modelId": "us.anthropic.claude-opus-4-6-v1",
+      "totalFiles": 20,
+      "needleAt": 5,
+      "pass": true,
+      "response": "MESH_NIAH_SECRET_20F5N_9A2F7E1C",
+      "error": null,
+      "latencyMs": 2596,
+      "inputTokens": 9379,
+      "outputTokens": 25,
+      "totalTokens": 9404,
+      "directContextTokens": 7146,
+      "directFilesIncluded": 8,
+      "needleInDirectContext": true
+    },
+    {
+      "caseId": "20f-5n",
+      "mode": "mesh-cli",
+      "modelId": "us.anthropic.claude-opus-4-6-v1",
+      "totalFiles": 20,
+      "needleAt": 5,
+      "pass": true,
+      "response": "MESH_NIAH_SECRET_20F5N_9A2F7E1C",
+      "error": null,
+      "latencyMs": 5204,
+      "inputTokens": 3279,
+      "outputTokens": 83,
+      "totalTokens": 3362,
+      "toolCalls": 1,
+      "toolTrace": [
+        {
+          "name": "workspace.grep_content",
+          "args": {
+            "query": "SESSION_SECRET"
+          },
+          "ok": true
+        }
+      ]
+    },
+    {
+      "caseId": "80f-60n",
+      "mode": "direct",
+      "modelId": "us.anthropic.claude-opus-4-6-v1",
+      "totalFiles": 80,
+      "needleAt": 60,
+      "pass": false,
+      "response": "NOTFOUND",
+      "error": null,
+      "latencyMs": 2248,
+      "inputTokens": 9235,
+      "outputTokens": 7,
+      "totalTokens": 9242,
+      "directContextTokens": 7040,
+      "directFilesIncluded": 7,
+      "needleInDirectContext": false
+    },
+    {
+      "caseId": "80f-60n",
+      "mode": "mesh-cli",
+      "modelId": "us.anthropic.claude-opus-4-6-v1",
+      "totalFiles": 80,
+      "needleAt": 60,
+      "pass": true,
+      "response": "MESH_NIAH_SECRET_80F60N_9A2F7E1C",
+      "error": null,
+      "latencyMs": 4499,
+      "inputTokens": 3279,
+      "outputTokens": 83,
+      "totalTokens": 3362,
+      "toolCalls": 1,
+      "toolTrace": [
+        {
+          "name": "workspace.grep_content",
+          "args": {
+            "query": "SESSION_SECRET"
+          },
+          "ok": true
+        }
+      ]
+    },
+    {
+      "caseId": "180f-150n",
+      "mode": "direct",
+      "modelId": "us.anthropic.claude-opus-4-6-v1",
+      "totalFiles": 180,
+      "needleAt": 150,
+      "pass": false,
+      "response": "NOTFOUND",
+      "error": null,
+      "latencyMs": 2418,
+      "inputTokens": 9235,
+      "outputTokens": 7,
+      "totalTokens": 9242,
+      "directContextTokens": 7040,
+      "directFilesIncluded": 7,
+      "needleInDirectContext": false
+    },
+    {
+      "caseId": "180f-150n",
+      "mode": "mesh-cli",
+      "modelId": "us.anthropic.claude-opus-4-6-v1",
+      "totalFiles": 180,
+      "needleAt": 150,
+      "pass": true,
+      "response": "MESH_NIAH_SECRET_180F150N_9A2F7E1C",
+      "error": null,
+      "latencyMs": 4769,
+      "inputTokens": 3279,
+      "outputTokens": 83,
+      "totalTokens": 3362,
+      "toolCalls": 1,
+      "toolTrace": [
+        {
+          "name": "workspace.grep_content",
+          "args": {
+            "query": "SESSION_SECRET"
+          },
+          "ok": true
+        }
+      ]
+    }
+  ]
+}

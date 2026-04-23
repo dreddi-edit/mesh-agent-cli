@@ -1,6 +1,6 @@
 {
   "name": "@edgarelmo/mesh-agent-cli",
-  "version": "0.2.39",
+  "version": "0.2.40",
   "private": false,
   "type": "module",
   "description": "Mesh terminal agent CLI. Zero-config: ships with a shared Mesh LLM proxy so no AWS credentials are needed.",
@@ -29,7 +29,9 @@
     "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "bench:niah:mesh-cli": "tsx benchmarks/mesh-cli-niah.ts",
+    "bench:swe:mesh-cli": "tsx benchmarks/mesh-cli-swe.ts"
   },
   "engines": {
     "node": ">=20.10.0"

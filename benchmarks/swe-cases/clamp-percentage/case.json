@@ -1,0 +1,6 @@
+{
+  "id": "clamp-percentage",
+  "title": "clampPercentage should bound values to 0-100",
+  "issue": "clampPercentage currently lets values above 100 pass through. Fix the implementation so percentages are always clamped into the inclusive 0-100 range, then verify the tests pass.",
+  "verifyCommand": "node --test test/*.test.js"
+}

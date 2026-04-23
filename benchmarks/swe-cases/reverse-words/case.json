@@ -1,0 +1,6 @@
+{
+  "id": "reverse-words",
+  "title": "reverseWords should reverse word order, not character order",
+  "issue": "The function reverseWords returns characters reversed instead of reversing the order of words. Fix the implementation and verify the tests pass.",
+  "verifyCommand": "node --test test/*.test.js"
+}
