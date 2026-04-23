@@ -20,6 +20,7 @@
 
 export interface Env {
   BEDROCK_API_KEY: string;
+  SUPABASE_JWT_SECRET: string;
   BEDROCK_REGION?: string;
   ALLOWED_MODELS?: string;
   RATE_LIMIT_PER_MIN?: string;
@@ -43,6 +44,19 @@ export default {
       return json({ error: "method_not_allowed" }, 405);
     }
 
+    const authHeader = req.headers.get("authorization");
+    if (!authHeader?.startsWith("Bearer ")) {
+      return json({ error: "unauthorized", hint: "Missing or invalid Authorization header" }, 401);
+    }
+
+    const token = authHeader.split(" ")[1];
+    const payload = await verifySupabaseJwt(token, env.SUPABASE_JWT_SECRET);
+    if (!payload || !payload.sub) {
+      return json({ error: "unauthorized", hint: "Invalid JWT" }, 401);
+    }
+
+    const userId = payload.sub;
+
     const url = new URL(req.url);
     const match = CONVERSE_PATH_RE.exec(url.pathname);
     if (!match) {
@@ -58,10 +72,9 @@ export default {
       return json({ error: "model_not_allowed", modelId }, 403);
     }
 
-    // Rate limit per IP (best-effort, requires KV binding named RATE_LIMIT).
-    const ip = req.headers.get("cf-connecting-ip") ?? "unknown";
+    // Rate limit per Supabase User ID.
     const limit = Number(env.RATE_LIMIT_PER_MIN || "30");
-    const rateHit = await checkRateLimit(env.RATE_LIMIT, ip, limit);
+    const rateHit = await checkRateLimit(env.RATE_LIMIT, userId, limit);
     if (!rateHit.ok) {
       return json(
         { error: "rate_limited", retryAfterSeconds: rateHit.retryAfter },
@@ -103,6 +116,46 @@ export default {
   }
 };
 
+async function verifySupabaseJwt(token: string, secret: string): Promise<any> {
+  if (!secret) return null;
+  const [headerB64, payloadB64, signatureB64] = token.split(".");
+  if (!headerB64 || !payloadB64 || !signatureB64) return null;
+
+  try {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(`${headerB64}.${payloadB64}`);
+    
+    const signature = base64UrlToUint8Array(signatureB64);
+    const key = await crypto.subtle.importKey(
+      "raw",
+      encoder.encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["verify"]
+    );
+
+    const isValid = await crypto.subtle.verify("HMAC", key, signature, data);
+    if (!isValid) return null;
+
+    const payload = JSON.parse(atob(payloadB64.replace(/-/g, "+").replace(/_/g, "/")));
+    return payload;
+  } catch (err) {
+    return null;
+  }
+}
+
+function base64UrlToUint8Array(base64Url: string): Uint8Array {
+  const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
+  const pad = base64.length % 4;
+  const padded = pad ? base64 + "=".repeat(4 - pad) : base64;
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
 function isModelAllowed(modelId: string, allowlist?: string): boolean {
   if (!allowlist || !allowlist.trim()) {
     return true;
@@ -116,14 +169,14 @@ function isModelAllowed(modelId: string, allowlist?: string): boolean {
 
 async function checkRateLimit(
   kv: KVNamespace | undefined,
-  ip: string,
+  id: string,
   limitPerMinute: number
 ): Promise<{ ok: true } | { ok: false; retryAfter: number }> {
   if (!kv) {
     return { ok: true };
   }
   const bucket = Math.floor(Date.now() / 60_000);
-  const key = `rl:${ip}:${bucket}`;
+  const key = `rl:${id}:${bucket}`;
   const current = Number((await kv.get(key)) || "0");
   if (current >= limitPerMinute) {
     return { ok: false, retryAfter: 60 - (Math.floor(Date.now() / 1000) % 60) };
@@ -154,3 +207,4 @@ function corsPreflight(): Response {
     }
   });
 }
+

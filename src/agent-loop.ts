@@ -547,14 +547,25 @@ export class AgentLoop {
     const width = output.columns || 80;
     const hr = "═".repeat(width);
 
-    const banner = [
-      "███╗   ███╗███████╗███████╗██╗  ██╗          ▄▄██████▄▄",
-      "████╗ ████║██╔════╝██╔════╝██║  ██║       ▄██▀▀    ▀▀██▄",
-      "██╔████╔██║█████╗  ███████╗███████║      ██▀  ▄████▄  ▀██",
-      "██║╚██╔╝██║██╔══╝  ╚════██║██╔══██║      ██  ███  ███  ██",
-      "██║ ╚═╝ ██║███████╗███████║██║  ██║      ▀██▄ ▀████▀ ▄██▀",
-      "╚═╝     ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝        ▀▀████████▀▀"
+    // Banner split into parts so we can color the two brackets independently:
+    //   mesh  → themeColor (user-configurable via config.agent.themeColor)
+    //   left  → themeColor (stays in sync with MESH)
+    //   right → accentColor (brand purple, stays purple across themes)
+    const bannerRows: Array<{ mesh: string; left: string; right: string }> = [
+      { mesh: "███╗   ███╗███████╗███████╗██╗  ██╗", left: "    ▄██ ", right: " ██▄    " },
+      { mesh: "████╗ ████║██╔════╝██╔════╝██║  ██║", left: "  ▄██▀  ", right: "  ▀██▄  " },
+      { mesh: "██╔████╔██║█████╗  ███████╗███████║", left: "▄██▀    ", right: "    ▀██▄" },
+      { mesh: "██║╚██╔╝██║██╔══╝  ╚════██║██╔══██║", left: "▀██▄    ", right: "    ▄██▀" },
+      { mesh: "██║ ╚═╝ ██║███████╗███████║██║  ██║", left: "  ▀██▄  ", right: "  ▄██▀  " },
+      { mesh: "╚═╝     ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝", left: "    ▀██ ", right: " ██▀    " }
     ];
+    const meshGap = "          "; // 10 spaces between MESH text and left bracket
+    const bracketGap = "       "; //  7 spaces between left and right bracket
+
+    // Brand accent for the right bracket. Falls back to magenta if not a valid pc key.
+    const accentName = (this.config.agent as { accentColor?: string }).accentColor || "magenta";
+    const pcMap = pc as unknown as Record<string, (s: string) => string>;
+    const accentFn = typeof pcMap[accentName] === "function" ? pcMap[accentName] : pc.magenta;
 
     const statusRows = [
       `mesh  ${this.config.agent.mode}  ${shortPathLabel(this.config.agent.workspaceRoot)}`,
@@ -565,13 +576,26 @@ export class AgentLoop {
 
     if (!this.useAnsi) {
       output.write("\n" + hr + "\n");
-      output.write(banner.join("\n") + "\n");
+      output.write(
+        bannerRows
+          .map((r) => r.mesh + meshGap + r.left + bracketGap + r.right)
+          .join("\n") + "\n"
+      );
       output.write(statusRows.join("\n") + "\n");
       return;
     }
 
     output.write("\n" + this.themeColor(hr) + "\n");
-    output.write(banner.map((line) => this.themeColor(pc.bold(line))).join("\n") + "\n");
+    output.write(
+      bannerRows
+        .map(
+          (r) =>
+            this.themeColor(pc.bold(r.mesh + meshGap + r.left)) +
+            bracketGap +
+            accentFn(pc.bold(r.right))
+        )
+        .join("\n") + "\n"
+    );
     output.write(
       [
         `${this.themeColor(pc.bold("mesh"))}  ${pc.dim(this.config.agent.mode)}  ${pc.dim(shortPathLabel(this.config.agent.workspaceRoot))}`,
@@ -733,14 +757,24 @@ export class AgentLoop {
       await fs.writeFile(path.join(meshDir, "dependency_graph.md"), "# Dependency Graph\n\n*Generated during indexing...*");
     }
 
-    // Always update/create config.json
+    // Always update/create config.json by merging with existing
+    const configPath = path.join(meshDir, "config.json");
+    let existingConfig = {};
+    try {
+      const raw = await fs.readFile(configPath, "utf-8");
+      existingConfig = JSON.parse(raw);
+    } catch {
+      // New file or invalid JSON
+    }
+
     const config = {
+      ...existingConfig,
       modelId: this.config.bedrock.modelId,
       themeColor: this.config.agent.themeColor,
       enableCloudCache: this.config.agent.enableCloudCache,
       updatedAt: new Date().toISOString()
     };
-    await fs.writeFile(path.join(meshDir, "config.json"), JSON.stringify(config, null, 2));
+    await fs.writeFile(configPath, JSON.stringify(config, null, 2));
 
     // If meta doesn't exist, it's the first time -> Auto Index
     if (!metaExists) {
