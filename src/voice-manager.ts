@@ -16,6 +16,8 @@ export interface VoiceConfig {
   piperModel: string;
 }
 
+const MACOS_SAY_RATE = "260";
+
 export class VoiceManager {
   private isRecording = false;
 
@@ -229,15 +231,36 @@ export class VoiceManager {
     });
   }
 
+  private prepareSpeechText(text: string): string {
+    return text
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .replace(/```[\s\S]*?```/g, " Code ausgelassen. ")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+      .replace(/^\s*[-*•]\s+/gm, "")
+      .replace(/^\s*\d+\.\s+/gm, "")
+      .replace(/\*\*([^*]+)\*\*/g, "$1")
+      .replace(/\*([^*]+)\*/g, "$1")
+      .replace(/_([^_]+)_/g, "$1")
+      .replace(/\p{Extended_Pictographic}/gu, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
   /**
    * Speak text using Piper and afplay
    */
   async speak(text: string): Promise<void> {
+    const speechText = this.prepareSpeechText(text);
+    if (!speechText) {
+      return;
+    }
+
     const piperModel = this.resolvePiperModel();
     if (!piperModel) {
       // Fallback to 'say' on Mac if piper is missing
       if (process.platform === "darwin") {
-        execSync(`say "${text.replace(/"/g, '\\"')}"`);
+        execFileSync("say", ["-r", MACOS_SAY_RATE, speechText], { stdio: "ignore" });
         return;
       }
       throw new Error("Piper model path not configured.");
@@ -255,7 +278,7 @@ export class VoiceManager {
     return new Promise((resolve, reject) => {
       const proc = spawn(piperPath, args);
       proc.on("error", (err) => reject(new Error(`piper spawn failed: ${err.message}`)));
-      proc.stdin.write(text);
+      proc.stdin.write(speechText);
       proc.stdin.end();
       
       proc.on("close", (code) => {

@@ -42,6 +42,15 @@ const SYSTEM_PROMPT = [
   "Operating Environment: You run as a CLI tool on the user's machine with access to a rich toolset. Your priority is to minimize I/O and token usage by leveraging the Mesh-Compression cache aggressively. If you feel you lack context, suggest the user run '/index' to pre-cache the entire workspace."
 ].join("\n");
 
+const VOICE_SYSTEM_PROMPT = [
+  "Voice mode is active.",
+  "Respond for spoken conversation, not for markdown reading.",
+  "Use short natural sentences.",
+  "Do not use emojis, bullet lists, markdown formatting, headings, code fences, or decorative symbols.",
+  "Avoid reading punctuation-heavy structures aloud.",
+  "If the user asks a coding question, answer briefly first and only give commands or code when truly necessary."
+].join("\n");
+
 interface WireTool {
   wireName: string;
   tool: ToolDefinition;
@@ -1716,6 +1725,9 @@ export class AgentLoop {
 
   private buildRuntimeSystemPrompt(): string {
     const sections = [SYSTEM_PROMPT];
+    if (this.voiceMode) {
+      sections.push(`\nVoice Instructions:\n${VOICE_SYSTEM_PROMPT}`);
+    }
     if (this.localInstructions) {
       sections.push(`\nLocal Project Instructions:\n${this.localInstructions}`);
     }
