@@ -288,20 +288,11 @@ export class AgentLoop {
 
 
     while (true) {
-      if ((rl as any).closed) {
-        rl = readline.createInterface({
-          input: input,
-          output: output,
-          terminal: true,
-          completer: (line) => this.completeInput(line)
-        });
-        this.setupGhostText(rl, input, output);
-      }
       const prompt = this.buildPrompt();
       let userInput = "";
       try {
         userInput = (await rl.question(prompt)).trim();
-      } catch {
+      } catch (err) {
         break;
       }
       if (!userInput) {
@@ -883,8 +874,6 @@ export class AgentLoop {
 
     try {
       const pickedValue = await prompt.run();
-      if (input.isTTY) input.setRawMode(true);
-      input.resume();
       this.setupGhostText(rl, input, output);
       const picked = MODEL_OPTIONS.find((o) => o.value === pickedValue)!;
       
@@ -899,8 +888,6 @@ export class AgentLoop {
       });
 
       const shouldSave = await confirmPrompt.run();
-      if (input.isTTY) input.setRawMode(true);
-      input.resume();
       this.setupGhostText(rl, input, output);
       if (shouldSave) {
         const current = await loadUserSettings();
