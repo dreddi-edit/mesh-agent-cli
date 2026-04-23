@@ -2,6 +2,12 @@
 
 This file defines the engineering soul of this project. Mesh reads these instructions at every startup to align its reasoning with your specific standards.
 
+## 🧠 System Architecture & Intelligence
+*   **Capsule Cache:** All transient file summaries (L1 Cache) are stored outside this repository in the global temporary directory to keep the workspace clean.
+*   **Project Intelligence:** The `.mesh/` folder contains high-level artifacts:
+    *   `dependency_graph.md`: Map of module relationships.
+    *   `architecture.md`: Core structural definitions.
+
 ## 🎯 Project Mission
 *Briefly describe what this project is trying to achieve.*
 
@@ -15,16 +21,11 @@ This file defines the engineering soul of this project. Mesh reads these instruc
 2.  **Type Safety:** Strive for 100% type coverage. Avoid `any`.
 3.  **Mesh Optimization:** 
     *   Use `patch_file` for small changes to save context.
-    *   Always check `.mesh/index` before performing deep searches.
-    *   Trust the capsules for high-level architectural questions.
+    *   Trust the global capsules for high-level architectural questions.
 
-## 🧪 Testing & Quality
-*   Write unit tests for every new feature.
-*   Run `npm run build` before finalizing any complex refactoring.
-
-## 🚀 Optimization Rules
-*   Prefer `workspace.read_multiple_files` for batch operations.
-*   Minimize raw file reads by utilizing `workspace.read_file` (Capsules).
+## 🚀 Intelligence Assets
+*   Refer to `.mesh/dependency_graph.md` to understand how modules interact.
+*   Update `.mesh/architecture.md` whenever core structures change.
 
 ---
 *Add your custom rules below this line.*

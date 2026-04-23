@@ -669,15 +669,18 @@ export class AgentLoop {
       await fs.writeFile(path.join(meshDir, "config.json"), JSON.stringify(config, null, 2));
       
       const instructions = [
-        "# Project Instructions",
+        "# Mesh Project Instructions 🛸",
         "",
-        "This file contains project-specific instructions for Mesh.",
-        "Add your coding standards, architecture patterns, and rules here.",
+        "This file defines the engineering soul of this project.",
         "",
-        "## Examples",
-        "- Use Tabs for indentation",
-        "- Follow Hexagonal Architecture",
-        "- Prefer functional programming patterns",
+        "## 🧠 System Architecture & Intelligence",
+        "*   **Capsule Cache:** All transient file summaries (L1 Cache) are stored outside this repository in the global temporary directory.",
+        "*   **Project Intelligence:** The `.mesh/` folder contains high-level artifacts like `dependency_graph.md` and `architecture.md`.",
+        "",
+        "## 📏 Coding Standards",
+        "1.  **DRY & KISS:** Favor simplicity over clever abstractions.",
+        "2.  **Type Safety:** Strive for 100% type coverage.",
+        "3.  **Mesh Optimization:** Use `patch_file` for small changes.",
         ""
       ].join("\n");
       await fs.writeFile(path.join(meshDir, "instructions.md"), instructions);
