@@ -2,6 +2,7 @@ export interface ToolDefinition {
   name: string;
   description?: string;
   inputSchema?: unknown;
+  requiresApproval?: boolean;
 }
 
 export interface ToolBackend {

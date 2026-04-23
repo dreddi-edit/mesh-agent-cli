@@ -6,7 +6,8 @@ import pc from "picocolors";
 import ora from "ora";
 import boxen from "boxen";
 import pkg from "enquirer";
-const { Select, Confirm } = pkg as any;
+type EnquirerCtor = new (options: Record<string, unknown>) => { run(): Promise<unknown> };
+const { Select, Confirm } = pkg as unknown as { Select: EnquirerCtor; Confirm: EnquirerCtor };
 
 import { AppConfig, loadUserSettings, saveUserSettings, shortPathLabel, UserSettings } from "./config.js";
 import {
@@ -65,6 +66,7 @@ interface ModelOption {
   value: string;
   aliases: string[];
   note: string;
+  pricing: { inputPer1k: number; outputPer1k: number };
 }
 
 interface ParsedCommandArgs {
@@ -72,24 +74,38 @@ interface ParsedCommandArgs {
   keyValues: Record<string, string>;
 }
 
+interface IndexStatus {
+  cachedFiles: number;
+  totalFiles: number;
+  percent: string;
+}
+
+interface SyncStatus {
+  l2Enabled: boolean;
+  l2Count: number;
+}
+
 const MODEL_OPTIONS: ModelOption[] = [
   {
     label: "Claude Sonnet 4.6",
     value: "us.anthropic.claude-sonnet-4-6",
     aliases: ["sonnet4.6", "sonnet-4.6", "sonnet46"],
-    note: "default"
+    note: "default",
+    pricing: { inputPer1k: 0.003, outputPer1k: 0.015 }
   },
   {
     label: "Claude Opus 4.6",
     value: "us.anthropic.claude-opus-4-6-v1",
     aliases: ["opus4.6", "opus-4.6", "opus46"],
-    note: "powerful"
+    note: "powerful",
+    pricing: { inputPer1k: 0.015, outputPer1k: 0.075 }
   },
   {
     label: "Claude Haiku 4.5",
     value: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     aliases: ["haiku4.5", "haiku-4.5", "haiku45"],
-    note: "modern fast"
+    note: "modern fast",
+    pricing: { inputPer1k: 0.00025, outputPer1k: 0.00125 }
   }
 ];
 const ALLOWED_THEMES = new Set(["cyan", "magenta", "yellow", "green", "blue", "white"]);
@@ -204,7 +220,7 @@ function resolveModelOption(raw: string): ModelOption | null {
 }
 
 export class AgentLoop {
-  private ghostTextListener: any = null;
+  private ghostTextListener: ((...args: unknown[]) => void) | null = null;
   private readonly llm: BedrockLlmClient;
   private readonly useAnsi = output.isTTY;
   private readonly sessionStore: SessionCapsuleStore;
@@ -218,7 +234,7 @@ export class AgentLoop {
   private workspaceContext = "";
   private abortController: AbortController | null = null;
   private autoApproveTools = false;
-  private themeColor: any = pc.cyan;
+  private themeColor: (text: string) => string = pc.cyan;
 
   constructor(
     private readonly config: AppConfig,
@@ -234,10 +250,10 @@ export class AgentLoop {
       maxTokens: config.bedrock.maxTokens
     });
     
-    // Set theme color from config
     const colorStr = config.agent.themeColor || "cyan";
-    if ((pc as any)[colorStr]) {
-      this.themeColor = (pc as any)[colorStr];
+    const colorFn = pc[colorStr as keyof typeof pc];
+    if (typeof colorFn === "function") {
+      this.themeColor = colorFn as (text: string) => string;
     }
   }
 
@@ -246,9 +262,16 @@ export class AgentLoop {
     this.sessionCapsule = await this.sessionStore.load();
 
     try {
-      const { execSync } = await import("node:child_process");
-      const gitBranch = execSync("git branch --show-current 2>/dev/null", { stdio: "pipe", cwd: this.config.agent.workspaceRoot }).toString().trim();
-      const gitStatus = execSync("git status --short 2>/dev/null", { stdio: "pipe", cwd: this.config.agent.workspaceRoot }).toString().trim();
+      const { execFile } = await import("node:child_process");
+      const { promisify } = await import("node:util");
+      const execFileAsync = promisify(execFile);
+      const cwd = this.config.agent.workspaceRoot;
+      const [branchResult, statusResult] = await Promise.allSettled([
+        execFileAsync("git", ["branch", "--show-current"], { cwd }),
+        execFileAsync("git", ["status", "--short"], { cwd })
+      ]);
+      const gitBranch = branchResult.status === "fulfilled" ? branchResult.value.stdout.trim() : "";
+      const gitStatus = statusResult.status === "fulfilled" ? statusResult.value.stdout.trim() : "";
       if (gitBranch) {
         this.currentBranch = gitBranch;
         this.workspaceContext = `Workspace context:\n- Git branch: ${gitBranch}\n- Git status:\n${gitStatus || "clean"}`;
@@ -384,6 +407,7 @@ export class AgentLoop {
     const toolSpecs = toToolSpecs(wireTools);
     const wireToolMap = new Map(wireTools.map((item) => [item.wireName, item]));
 
+    const preTurnLength = this.transcript.length;
     this.transcript.push({ role: "user", content: [{ text: userInput }] });
 
     let lastAssistantText = "";
@@ -448,7 +472,7 @@ export class AgentLoop {
         let errored = false;
 
         // Tool Security Check
-        if ((selectedTool.tool.name === "workspace.run_command" || selectedTool.tool.name === "workspace.write_file") && !this.autoApproveTools) {
+        if (selectedTool.tool.requiresApproval && !this.autoApproveTools) {
           if (hooks?.askPermission) {
             const allowed = await hooks.askPermission(`Allow ${selectedTool.tool.name} to run?`);
             if (!allowed) {
@@ -494,6 +518,7 @@ export class AgentLoop {
         });
       }
     } catch (err: any) {
+      this.transcript = this.transcript.slice(0, preTurnLength);
       if (err.name === "AbortError" || err.message?.includes("aborted")) {
         return lastAssistantText || "Request aborted.";
       }
@@ -557,7 +582,7 @@ export class AgentLoop {
   }
 
   private async printSync(): Promise<void> {
-    const status: any = await this.backend.callTool("workspace.check_sync", {});
+    const status = await this.backend.callTool("workspace.check_sync", {}) as SyncStatus;
     if (!status.l2Enabled) {
       output.write(pc.yellow("\nCloud (L2) cache is disabled. Enable it in /setup.\n"));
       return;
@@ -574,7 +599,7 @@ export class AgentLoop {
   }
 
   private async printStatus(): Promise<void> {
-    const status: any = await this.backend.callTool("workspace.get_index_status", {});
+    const status = await this.backend.callTool("workspace.get_index_status", {}) as IndexStatus;
     const transcriptChars = this.estimateTranscriptChars();
     output.write(
       [
@@ -623,8 +648,7 @@ export class AgentLoop {
       cloudRaw === ""
         ? current.enableCloudCache
         : cloudRaw === "y" || cloudRaw === "yes" || cloudRaw === "true" || cloudRaw === "1";
-    const allowedThemes = new Set(["cyan", "magenta", "yellow", "green", "blue", "white"]);
-    const theme = allowedThemes.has(themeRaw) ? themeRaw : current.themeColor;
+    const theme = ALLOWED_THEMES.has(themeRaw) ? themeRaw : current.themeColor;
     const customKey =
       customKeyRaw === ""
         ? current.customApiKey
@@ -684,7 +708,23 @@ export class AgentLoop {
         ""
       ].join("\n");
       await fs.writeFile(path.join(meshDir, "instructions.md"), instructions);
-      
+
+      const architecturePlaceholder = [
+        "# Architecture",
+        "",
+        "Run `/index` to let Mesh populate this file, or document your architecture here manually.",
+        ""
+      ].join("\n");
+      await fs.writeFile(path.join(meshDir, "architecture.md"), architecturePlaceholder);
+
+      const depGraphPlaceholder = [
+        "# Dependency Graph",
+        "",
+        "Run `/index` to let Mesh populate this file, or document key dependencies here manually.",
+        ""
+      ].join("\n");
+      await fs.writeFile(path.join(meshDir, "dependency_graph.md"), depGraphPlaceholder);
+
       output.write(pc.green("✔ Workspace initialized. Check .mesh/instructions.md for customization.\n"));
     }
   }
@@ -709,7 +749,11 @@ export class AgentLoop {
   private printCost(): void {
     const inT = this.sessionTokens.inputTokens;
     const outT = this.sessionTokens.outputTokens;
-    const cost = (inT * 0.003 / 1000) + (outT * 0.015 / 1000);
+    const model = MODEL_OPTIONS.find(
+      (o) => this.currentModelId.includes(o.value) || o.value.includes(this.currentModelId)
+    );
+    const { inputPer1k, outputPer1k } = model?.pricing ?? { inputPer1k: 0.003, outputPer1k: 0.015 };
+    const cost = (inT * inputPer1k / 1000) + (outT * outputPer1k / 1000);
     output.write(
       [
         "",
@@ -1148,8 +1192,8 @@ export class AgentLoop {
 
   private async runDoctor(args: string[] = []): Promise<void> {
     const mode = (args[0] || "brief").toLowerCase();
-    const indexStatus: any = await this.backend.callTool("workspace.get_index_status", {});
-    const syncStatus: any = await this.backend.callTool("workspace.check_sync", {});
+    const indexStatus = await this.backend.callTool("workspace.get_index_status", {}) as IndexStatus;
+    const syncStatus = await this.backend.callTool("workspace.check_sync", {}) as SyncStatus;
     const transcriptChars = this.estimateTranscriptChars();
     const capsule = this.sessionCapsule ? this.parseSessionCapsule(this.sessionCapsule.summary) : null;
 
@@ -1232,7 +1276,8 @@ export class AgentLoop {
   }
 
   private async autoCompactIfNeeded(): Promise<string | null> {
-    if (this.transcript.length < 18 && this.estimateTranscriptChars() < 18000) {
+    const tokenThreshold = 80_000;
+    if (this.transcript.length < 18 && this.sessionTokens.inputTokens < tokenThreshold) {
       return null;
     }
     return this.compactTranscript({ reason: "auto" });

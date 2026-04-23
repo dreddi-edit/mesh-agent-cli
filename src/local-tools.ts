@@ -151,6 +151,7 @@ export class LocalToolBackend implements ToolBackend {
       {
         name: "workspace.write_file",
         description: "Write content to a file, creating or overwriting it. Automatically creates parent directories.",
+        requiresApproval: true,
         inputSchema: {
           type: "object",
           required: ["path", "content"],
@@ -163,6 +164,7 @@ export class LocalToolBackend implements ToolBackend {
       {
         name: "workspace.run_command",
         description: "Run a shell command in the workspace and return its stdout and stderr.",
+        requiresApproval: true,
         inputSchema: {
           type: "object",
           required: ["command"],
