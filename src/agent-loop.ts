@@ -1,3 +1,5 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import pc from "picocolors";
@@ -12,6 +14,7 @@ import {
   ToolSpec
 } from "./llm-client.js";
 import { buildLlmSafeMeshContext } from "./mesh-gateway.js";
+import { PersistedSessionCapsule, SessionCapsuleStore } from "./session-capsule-store.js";
 import { ToolBackend, ToolDefinition } from "./tool-backend.js";
 
 const SYSTEM_PROMPT = [
@@ -29,7 +32,70 @@ interface WireTool {
 
 interface RunHooks {
   onToolStart?: (wireName: string, input: Record<string, unknown>) => void;
+  onToolEnd?: (wireName: string, ok: boolean, resultPreview: string) => void;
   askPermission?: (msg: string) => Promise<boolean>;
+}
+
+interface SessionCapsule extends PersistedSessionCapsule {}
+
+interface StructuredSessionCapsule {
+  summary: string;
+  decisions: string[];
+  openThreads: string[];
+  nextActions: string[];
+  filesTouched: string[];
+  toolActivity: string[];
+}
+
+interface SlashCommand {
+  name: string;
+  aliases?: string[];
+  usage: string;
+  description: string;
+}
+
+interface ModelOption {
+  label: string;
+  value: string;
+  aliases: string[];
+  note: string;
+}
+
+interface ParsedCommandArgs {
+  positionals: string[];
+  keyValues: Record<string, string>;
+}
+
+const MODEL_OPTIONS: ModelOption[] = [
+  {
+    label: "Claude Sonnet 4.6",
+    value: "us.anthropic.claude-sonnet-4-6",
+    aliases: ["sonnet4.6", "sonnet-4.6", "sonnet46", "claude-sonnet-4.6", "claude-sonnet-4-6"],
+    note: "default"
+  },
+  {
+    label: "Claude Sonnet 4.5",
+    value: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    aliases: ["sonnet4.5", "sonnet-4.5", "sonnet45"],
+    note: "legacy default"
+  },
+  {
+    label: "Claude 3.5 Haiku",
+    value: "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+    aliases: ["haiku", "haiku3.5"],
+    note: "fast"
+  },
+  {
+    label: "Claude 3 Opus",
+    value: "anthropic.claude-3-opus-20240229-v1:0",
+    aliases: ["opus", "opus3"],
+    note: "slower"
+  }
+];
+const ALLOWED_THEMES = new Set(["cyan", "magenta", "yellow", "green", "blue", "white"]);
+
+function uniqueLimited(values: string[], limit: number): string[] {
+  return Array.from(new Set(values.filter(Boolean))).slice(0, limit);
 }
 
 function sanitizeToolName(name: string): string {
@@ -82,13 +148,71 @@ function formatMultiline(prefix: string, message: string): string {
   return `${prefix}${lines[0]}\n${lines.slice(1).map((line) => `    ${line}`).join("\n")}`;
 }
 
+function shortModelName(id: string): string {
+  const match = MODEL_OPTIONS.find((option) => id.includes(option.value) || option.value.includes(id));
+  if (match) return match.label;
+  const parts = id.split(".");
+  const last = parts[parts.length - 1];
+  if (last.includes("claude-sonnet")) return "Claude Sonnet";
+  return id.split(":").pop() || id;
+}
+
+function normalizeModelInput(raw: string): string {
+  const value = raw.trim().toLowerCase();
+  if (!value) return "";
+  for (const option of MODEL_OPTIONS) {
+    if (option.aliases.includes(value) || value === option.value.toLowerCase()) {
+      return option.value;
+    }
+  }
+  return raw.trim();
+}
+
+function previewText(value: string, maxLen = 140): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  return normalized.length > maxLen ? `${normalized.slice(0, maxLen - 3)}...` : normalized;
+}
+
+function parseCommandArgs(args: string[]): ParsedCommandArgs {
+  const positionals: string[] = [];
+  const keyValues: Record<string, string> = {};
+  for (const arg of args) {
+    const eqIndex = arg.indexOf("=");
+    if (eqIndex > 0) {
+      const key = arg.slice(0, eqIndex).trim().toLowerCase();
+      const value = arg.slice(eqIndex + 1).trim();
+      if (key) keyValues[key] = value;
+    } else if (arg.trim()) {
+      positionals.push(arg.trim());
+    }
+  }
+  return { positionals, keyValues };
+}
+
+function resolveModelOption(raw: string): ModelOption | null {
+  const normalized = raw.trim().toLowerCase();
+  if (!normalized) return null;
+  return (
+    MODEL_OPTIONS.find(
+      (option) =>
+        option.value.toLowerCase() === normalized ||
+        option.aliases.includes(normalized) ||
+        option.label.toLowerCase() === normalized
+    ) ?? null
+  );
+}
+
 export class AgentLoop {
   private readonly llm: BedrockLlmClient;
   private readonly useAnsi = output.isTTY;
+  private readonly sessionStore: SessionCapsuleStore;
   private currentModelId: string;
   private transcript: ConverseMessage[] = [];
+  private sessionCapsule: SessionCapsule | null = null;
+  private lastToolEventAt: string | null = null;
   private sessionTokens = { inputTokens: 0, outputTokens: 0 };
-  private systemPrompt: string = SYSTEM_PROMPT;
+  private workspaceContext = "";
   private abortController: AbortController | null = null;
   private autoApproveTools = false;
   private themeColor: any = pc.cyan;
@@ -97,6 +221,7 @@ export class AgentLoop {
     private readonly config: AppConfig,
     private readonly backend: ToolBackend
   ) {
+    this.sessionStore = new SessionCapsuleStore(config.agent.workspaceRoot);
     this.currentModelId = config.bedrock.modelId;
     this.llm = new BedrockLlmClient({
       endpointBase: config.bedrock.endpointBase,
@@ -114,12 +239,14 @@ export class AgentLoop {
   }
 
   async runCli(initialPrompt?: string): Promise<void> {
+    this.sessionCapsule = await this.sessionStore.load();
+
     try {
       const { execSync } = await import("node:child_process");
       const gitBranch = execSync("git branch --show-current 2>/dev/null", { stdio: "pipe", cwd: this.config.agent.workspaceRoot }).toString().trim();
       const gitStatus = execSync("git status --short 2>/dev/null", { stdio: "pipe", cwd: this.config.agent.workspaceRoot }).toString().trim();
       if (gitBranch) {
-        this.systemPrompt += `\n\nWorkspace context:\n- Git branch: ${gitBranch}\n- Git status:\n${gitStatus || "clean"}`;
+        this.workspaceContext = `Workspace context:\n- Git branch: ${gitBranch}\n- Git status:\n${gitStatus || "clean"}`;
       }
     } catch {
       // Not a git repository or git not installed
@@ -132,93 +259,68 @@ export class AgentLoop {
     }
 
     this.printBanner();
-    const commands = ["/help", "/status", "/index", "/sync", "/setup", "/model", "/cost", "/compact", "/clear", "/exit"];
     const rl = readline.createInterface({
       input: input,
       output: output,
-      terminal: true,
-      completer: (line: string): [string[], string] => {
-        const hits = commands.filter((c) => c.startsWith(line));
-        return [hits.length ? hits : commands, line];
-      }
+      terminal: true
     });
 
+    let lastSigInt = 0;
     rl.on("SIGINT", () => {
       if (this.abortController) {
         this.abortController.abort();
         this.abortController = null;
         output.write("\n\n" + pc.dim("Request aborted. Returning to prompt.") + "\n");
       } else {
-        rl.close();
-        output.write("\n\n" + pc.dim("Aborted by user.") + "\n");
-        process.exit(0);
+        const now = Date.now();
+        if (now - lastSigInt < 2000) {
+          rl.close();
+          output.write("\n\n" + pc.dim("Aborted by user.") + "\n");
+          process.exit(0);
+        } else {
+          lastSigInt = now;
+          output.write("\n" + this.themeColor(pc.bold("Press Ctrl+C again within 2s to exit")) + "\n");
+        }
       }
     });
 
     while (true) {
       const prompt = this.useAnsi ? this.themeColor("\n> ") : "\n> ";
-      const userInput = (await rl.question(prompt)).trim();
+      let userInput = (await rl.question(prompt)).trim();
       if (!userInput) {
         continue;
       }
-      if (userInput.toLowerCase() === "exit" || userInput.toLowerCase() === "/exit") {
+
+      if (userInput.toLowerCase() === "exit") {
         break;
       }
-      if (userInput === "/help") {
-        this.printHelp();
-        continue;
-      }
-      if (userInput === "/status") {
-        await this.printStatus();
-        continue;
-      }
-      if (userInput === "/index") {
-        await this.runIndexing();
-        continue;
-      }
-      if (userInput === "/sync") {
-        await this.printSync();
-        continue;
-      }
-      if (userInput === "/setup") {
-        await this.runSetup(rl);
-        continue;
-      }
-      if (userInput === "/clear") {
-        output.write(this.useAnsi ? "\x1b[2J\x1b[H" : "\n");
-        this.printBanner();
-        continue;
-      }
-      if (userInput.startsWith("/model")) {
-        const nextModel = userInput.slice("/model".length).trim();
-        if (!nextModel) {
-          output.write(`\nmodel: ${this.currentModelId}\n`);
-        } else {
-          this.currentModelId = nextModel;
-          output.write(`\nmodel switched: ${this.currentModelId}\n`);
+
+      if (userInput.startsWith("/")) {
+        const handled = await this.handleSlashCommand(userInput, rl);
+        if (handled.shouldExit) {
+          break;
         }
-        continue;
-      }
-      if (userInput === "/cost") {
-        this.printCost();
-        continue;
-      }
-      if (userInput === "/compact") {
-        this.transcript = [];
-        output.write(this.themeColor("\nTranscript cleared. Context is now compact.\n"));
-        continue;
+        if (handled.wasHandled) {
+          continue;
+        }
       }
 
       try {
+        this.renderUserTurn(userInput);
         const spinner = this.useAnsi ? ora({ text: "Thinking...", color: "cyan" }).start() : undefined;
         
         const answer = await this.runSingleTurn(userInput, {
           onToolStart: (wireName, args) => {
             if (spinner) {
               spinner.text = `Running tool ${pc.cyan(wireName)} ${pc.dim(formatArgsPreview(args))}`;
-            } else {
-              output.write(`\ntool ${wireName} ${formatArgsPreview(args)}\n`);
             }
+            this.renderToolEvent("start", wireName, formatArgsPreview(args));
+          },
+          onToolEnd: (wireName, ok, resultPreview) => {
+            if (spinner) {
+              spinner.text = ok ? `Completed ${pc.cyan(wireName)}` : `Failed ${pc.cyan(wireName)}`;
+            }
+            this.renderToolEvent(ok ? "success" : "error", wireName, resultPreview);
           },
           askPermission: async (msg) => {
             if (spinner) spinner.stop();
@@ -238,19 +340,7 @@ export class AgentLoop {
         if (spinner) {
           spinner.stop();
         }
-        
-        if (this.useAnsi) {
-          output.write("\n" + boxen(answer, {
-            padding: 1,
-            margin: 1,
-            borderStyle: "round",
-            borderColor: this.config.agent.themeColor || "cyan",
-            title: "Mesh Agent",
-            titleAlignment: "center"
-          }) + "\n");
-        } else {
-          output.write(`\n${answer}\n`);
-        }
+        this.renderAssistantTurn(answer);
       } catch (error) {
         const errorLabel = this.useAnsi ? pc.red("error> ") : "error> ";
         output.write(
@@ -263,6 +353,11 @@ export class AgentLoop {
   }
 
   private async runSingleTurn(userInput: string, hooks?: RunHooks): Promise<string> {
+    const autoCompactMessage = await this.autoCompactIfNeeded();
+    if (autoCompactMessage) {
+      this.renderSystemMessage(autoCompactMessage);
+    }
+
     const tools = await this.backend.listTools();
     const wireTools = toWireTools(tools);
     const toolSpecs = toToolSpecs(wireTools);
@@ -278,7 +373,7 @@ export class AgentLoop {
         const response = await this.llm.converse(
           this.transcript,
           toolSpecs,
-          this.systemPrompt,
+          this.buildRuntimeSystemPrompt(),
           this.currentModelId,
           this.abortController.signal
         );
@@ -357,9 +452,11 @@ export class AgentLoop {
           hooks?.onToolStart?.(response.name, response.input);
           const raw = await this.backend.callTool(selectedTool.tool.name, response.input);
           resultText = await buildLlmSafeMeshContext(selectedTool.tool.name, response.input, raw);
+          hooks?.onToolEnd?.(response.name, true, this.normalizeCapsuleLine(resultText, 120));
         } catch (error) {
           resultText = `Tool execution failed: ${(error as Error).message}`;
           errored = true;
+          hooks?.onToolEnd?.(response.name, false, this.normalizeCapsuleLine(resultText, 120));
         }
 
         this.transcript.push({
@@ -391,6 +488,9 @@ export class AgentLoop {
   }
 
   private printBanner(): void {
+    const width = output.columns || 80;
+    const hr = "═".repeat(width);
+    
     const banner = [
       "  __  __   ______   _____   _    _ ",
       " |  \\/  | |  ____| / ____| | |  | |",
@@ -402,25 +502,28 @@ export class AgentLoop {
     ];
 
     if (!this.useAnsi) {
-      output.write("\n" + banner.join("\n") + "\n");
+      output.write("\n" + hr + "\n");
+      output.write(banner.join("\n") + "\n");
       output.write(
         [
           `mesh  ${this.config.agent.mode}  ${shortPathLabel(this.config.agent.workspaceRoot)}`,
-          `model: ${this.currentModelId}`,
-          "commands: /help /status /index /sync /setup /model /clear /exit"
+          `model: ${shortModelName(this.currentModelId)}`,
+          "commands: /help /status /capsule /model /clear /exit"
         ].join("\n") + "\n"
       );
       return;
     }
     
-    output.write("\n" + this.themeColor(banner.join("\n")) + "\n");
+    output.write("\n" + this.themeColor(hr) + "\n");
+    output.write(this.themeColor(banner.join("\n")) + "\n");
     output.write(
       [
         `${this.themeColor(pc.bold("mesh"))}  ${pc.dim(this.config.agent.mode)}  ${pc.dim(shortPathLabel(this.config.agent.workspaceRoot))}`,
-        `${pc.dim("model:")} ${this.themeColor(this.currentModelId)}`,
-        `${pc.dim("commands:")} ${pc.magenta("/help")} ${pc.magenta("/status")} ${pc.magenta("/index")} ${pc.magenta("/sync")} ${pc.magenta("/setup")} ${pc.magenta("/model")}`
+        `${pc.dim("model:")} ${this.themeColor(shortModelName(this.currentModelId))}`,
+        `${pc.dim("commands:")} ${pc.magenta("/help")} ${pc.magenta("/status")} ${pc.magenta("/capsule")} ${pc.magenta("/model")} ${pc.magenta("/clear")} ${pc.magenta("/exit")}`
       ].join("\n") + "\n"
     );
+    output.write(this.themeColor(hr) + "\n");
   }
 
   private async printSync(): Promise<void> {
@@ -442,6 +545,7 @@ export class AgentLoop {
 
   private async printStatus(): Promise<void> {
     const status: any = await this.backend.callTool("workspace.get_index_status", {});
+    const transcriptChars = this.estimateTranscriptChars();
     output.write(
       [
         "",
@@ -450,30 +554,64 @@ export class AgentLoop {
         `${pc.dim("model:")}     ${this.currentModelId}`,
         `${pc.dim("cloud:")}     ${this.config.agent.enableCloudCache ? pc.green("on") : pc.red("off")}`,
         `${pc.dim("index:")}     ${status.cachedFiles}/${status.totalFiles} files cached (${status.percent}%)`,
+        `${pc.dim("session:")}   ${this.transcript.length} messages / ${transcriptChars} chars`,
+        `${pc.dim("capsule:")}   ${this.sessionCapsule ? pc.green(`active (${this.sessionCapsule.sourceMessages} -> ${this.sessionCapsule.retainedMessages})`) : pc.dim("none")}`,
         ""
       ].join("\n")
     );
   }
 
   private async runSetup(rl: readline.Interface): Promise<void> {
-    output.write(this.themeColor("\n--- Mesh Setup Wizard ---\n"));
-    const current = await loadUserSettings();
+    output.write(this.themeColor("\n" + "═".repeat(40) + "\n"));
+    output.write(this.themeColor(pc.bold("  MESH SETUP WIZARD\n")));
+    output.write(this.themeColor("═".repeat(40) + "\n"));
     
-    const modelId = (await rl.question(`Default Model ID [${pc.dim(current.modelId)}]: `)).trim() || current.modelId;
-    const enableCloud = (await rl.question(`Enable Cloud Cache (L2) [${pc.dim(current.enableCloudCache ? "y" : "n")}]: `)).trim().toLowerCase();
-    const cloudCache = enableCloud === "" ? current.enableCloudCache : (enableCloud === "y" || enableCloud === "yes");
-    const customKey = (await rl.question(`Custom API Key (leave empty for proxy) [${pc.dim(current.customApiKey ? "****" : "none")}]: `)).trim();
-    const theme = (await rl.question(`Theme Color (cyan, magenta, yellow, green) [${pc.dim(current.themeColor)}]: `)).trim() || current.themeColor;
+    const current = await loadUserSettings();
+    const modelRaw = (
+      await rl.question(
+        `Default Model ID [${pc.dim(current.modelId)}] (alias: sonnet4.6): `
+      )
+    ).trim();
+    const cloudRaw = (
+      await rl.question(
+        `Enable Cloud (L2) sync? [${pc.dim(current.enableCloudCache ? "y" : "n")}]: `
+      )
+    ).trim().toLowerCase();
+    const themeRaw = (
+      await rl.question(
+        `Theme Color [${pc.dim(current.themeColor)}] (cyan/magenta/yellow/green/blue/white): `
+      )
+    ).trim();
+    const customKeyRaw = (
+      await rl.question(
+        `Custom API Key (empty = keep, '-' = clear) [${pc.dim(current.customApiKey ? "set" : "none")}]: `
+      )
+    ).trim();
+
+    const modelId = normalizeModelInput(modelRaw || current.modelId);
+    const cloudCache =
+      cloudRaw === ""
+        ? current.enableCloudCache
+        : cloudRaw === "y" || cloudRaw === "yes" || cloudRaw === "true" || cloudRaw === "1";
+    const allowedThemes = new Set(["cyan", "magenta", "yellow", "green", "blue", "white"]);
+    const theme = allowedThemes.has(themeRaw) ? themeRaw : current.themeColor;
+    const customKey =
+      customKeyRaw === ""
+        ? current.customApiKey
+        : customKeyRaw === "-"
+          ? undefined
+          : customKeyRaw;
 
     const newSettings: UserSettings = {
       modelId,
       enableCloudCache: cloudCache,
       themeColor: theme,
-      customApiKey: customKey || current.customApiKey
+      customApiKey: customKey
     };
 
     await saveUserSettings(newSettings);
-    output.write(pc.green("\nSettings saved! Restart mesh to apply all changes.\n"));
+    output.write(pc.green("\n✔ Settings saved! Restart mesh to apply changes.\n"));
+    output.write(this.themeColor("═".repeat(40) + "\n"));
   }
 
   private async runIndexing(): Promise<void> {
@@ -507,22 +645,629 @@ export class AgentLoop {
     );
   }
 
+  private renderUserTurn(text: string): void {
+    const label = this.useAnsi ? pc.bold(pc.white("you")) : "you";
+    output.write(`\n${label}> ${text}\n`);
+  }
+
+  private renderAssistantTurn(text: string): void {
+    if (this.useAnsi) {
+      output.write("\n" + boxen(text, {
+        padding: 1,
+        margin: 1,
+        borderStyle: "round",
+        borderColor: this.config.agent.themeColor || "cyan",
+        title: "assistant",
+        titleAlignment: "left"
+      }) + "\n");
+      return;
+    }
+    output.write(`\nassistant> ${text}\n`);
+  }
+
+  private renderSystemMessage(text: string): void {
+    const prefix = this.useAnsi ? pc.yellow("system>") : "system>";
+    output.write(`\n${prefix} ${text}\n`);
+  }
+
+  private renderToolEvent(kind: "start" | "success" | "error", wireName: string, detail: string): void {
+    this.lastToolEventAt = new Date().toISOString();
+    const label =
+      kind === "start"
+        ? pc.dim("tool>")
+        : kind === "success"
+          ? pc.green("tool<")
+          : pc.red("tool<");
+    output.write(`\n${label} ${pc.cyan(wireName)}${detail ? ` ${pc.dim(detail)}` : ""}\n`);
+  }
+
   private printHelp(): void {
+    const commands = this.getSlashCommands();
     output.write(
       [
         "",
-        `${pc.magenta("/help")}             show commands`,
-        `${pc.magenta("/status")}           show indexing status & runtime info`,
-        `${pc.magenta("/index")}            re-index workspace (generate capsules)`,
-        `${pc.magenta("/sync")}             check cloud (L2) cache synchronization`,
-        `${pc.magenta("/setup")}            interactive settings wizard`,
-        `${pc.magenta("/model")}            show current model`,
-        `${pc.magenta("/model <id>")}       switch model for next messages`,
-        `${pc.magenta("/cost")}             show token usage and approx cost`,
-        `${pc.magenta("/compact")}          clear transcript context`,
-        `${pc.magenta("/clear")}            clear terminal UI`,
-        `${pc.magenta("/exit")}             quit`
+        ...commands.map((command) => {
+          const names = [command.name, ...(command.aliases ?? [])].join(", ");
+          return `${pc.magenta(names.padEnd(24, " "))}${command.description}  ${pc.dim(command.usage)}`;
+        })
       ].join("\n") + "\n"
     );
+  }
+
+  private getSlashCommands(): SlashCommand[] {
+    return [
+      { name: "/help", aliases: ["/commands"], usage: "/help", description: "show commands" },
+      { name: "/status", usage: "/status", description: "show runtime, session, and index state" },
+      { name: "/capsule", aliases: ["/memory"], usage: "/capsule [show|compact|clear|export [path]|stats|path]", description: "inspect or manage session capsule" },
+      { name: "/index", usage: "/index", description: "re-index workspace and generate file capsules" },
+      { name: "/sync", usage: "/sync", description: "check cloud (L2) cache synchronization" },
+      { name: "/setup", usage: "/setup [noninteractive key=value ...]", description: "interactive or scripted settings" },
+      { name: "/model", usage: "/model [list|id|save]", description: "show, switch, list, or persist model selection" },
+      { name: "/cost", usage: "/cost", description: "show token usage and estimated cost" },
+      { name: "/approvals", usage: "/approvals [status|on|off]", description: "control tool auto-approval mode" },
+      { name: "/doctor", usage: "/doctor [brief|full]", description: "show runtime diagnostics" },
+      { name: "/compact", usage: "/compact", description: "compress transcript into session capsule" },
+      { name: "/clear", usage: "/clear", description: "clear terminal UI" },
+      { name: "/exit", aliases: ["/quit"], usage: "/exit", description: "quit" }
+    ];
+  }
+
+  private async handleSlashCommand(
+    rawInput: string,
+    rl: readline.Interface
+  ): Promise<{ wasHandled: boolean; shouldExit: boolean }> {
+    const [command, ...args] = rawInput.split(/\s+/g);
+
+    switch (command.toLowerCase()) {
+      case "/help":
+      case "/commands":
+        this.printHelp();
+        return { wasHandled: true, shouldExit: false };
+      case "/status":
+        await this.printStatus();
+        return { wasHandled: true, shouldExit: false };
+      case "/index":
+        await this.runIndexing();
+        return { wasHandled: true, shouldExit: false };
+      case "/sync":
+        await this.printSync();
+        return { wasHandled: true, shouldExit: false };
+      case "/setup":
+        await this.handleSetupCommand(args, rl);
+        return { wasHandled: true, shouldExit: false };
+      case "/clear":
+        output.write(this.useAnsi ? "\x1b[2J\x1b[H" : "\n");
+        this.printBanner();
+        return { wasHandled: true, shouldExit: false };
+      case "/model":
+        await this.handleModelCommand(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/cost":
+        this.printCost();
+        return { wasHandled: true, shouldExit: false };
+      case "/compact":
+        output.write(this.themeColor(`\n${await this.compactTranscript()}\n`));
+        return { wasHandled: true, shouldExit: false };
+      case "/capsule":
+      case "/memory":
+        await this.handleCapsuleCommand(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/approvals":
+        this.handleApprovalsCommand(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/doctor":
+        await this.runDoctor(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/exit":
+      case "exit":
+      case "/quit":
+        return { wasHandled: true, shouldExit: true };
+      default:
+        output.write(`\nUnknown command: ${rawInput}. Use /help.\n`);
+        return { wasHandled: true, shouldExit: false };
+    }
+  }
+
+  private async handleModelCommand(args: string[]): Promise<void> {
+    const parsed = parseCommandArgs(args);
+    const nextModel = [...parsed.positionals, parsed.keyValues.model ?? ""].join(" ").trim();
+    if (!nextModel) {
+      output.write(
+        [
+          "",
+          `current model: ${this.themeColor(shortModelName(this.currentModelId))}`,
+          `${pc.dim("id:")} ${this.currentModelId}`,
+          `${pc.dim("hint:")} /model sonnet4.6  or  /model us.anthropic.claude-sonnet-4-6`,
+          `${pc.dim("list:")} /model list`,
+          `${pc.dim("persist:")} /model save`,
+          ""
+        ].join("\n")
+      );
+      return;
+    }
+    if (nextModel === "list" || nextModel === "ls") {
+      output.write(
+        [
+          "",
+          `${this.themeColor(pc.bold("Available Models"))}`,
+          ...MODEL_OPTIONS.map((option) => {
+            const aliases = option.aliases.join(", ");
+            const active = option.value === this.currentModelId ? pc.green(" active") : "";
+            return `${option.label}  ${pc.dim(option.value)}${active}\n${pc.dim(`aliases: ${aliases} | ${option.note}`)}`;
+          }),
+          ""
+        ].join("\n")
+      );
+      return;
+    }
+    if (nextModel === "current") {
+      output.write(`\ncurrent model: ${this.currentModelId}\n`);
+      return;
+    }
+    if (nextModel === "save") {
+      const current = await loadUserSettings();
+      await saveUserSettings({ ...current, modelId: this.currentModelId });
+      output.write(`\ndefault model saved: ${this.themeColor(shortModelName(this.currentModelId))}\n`);
+      return;
+    }
+    const resolved = resolveModelOption(nextModel);
+    if (!resolved && nextModel.startsWith("/")) {
+      output.write(`\nInvalid model argument: ${nextModel}\n`);
+      return;
+    }
+    this.currentModelId = resolved?.value ?? normalizeModelInput(nextModel);
+    output.write(`\nmodel switched: ${this.themeColor(shortModelName(this.currentModelId))}\n`);
+  }
+
+  private async handleCapsuleCommand(args: string[]): Promise<void> {
+    const action = (args[0] || "show").toLowerCase();
+    if (action === "clear") {
+      this.sessionCapsule = null;
+      await this.sessionStore.clear();
+      output.write("\nSession capsule cleared.\n");
+      return;
+    }
+    if (action === "compact") {
+      output.write(this.themeColor(`\n${await this.compactTranscript()}\n`));
+      return;
+    }
+    if (action === "export") {
+      await this.exportSessionCapsule(args[1]);
+      return;
+    }
+    if (action === "path") {
+      output.write(`\n${this.getDefaultCapsuleExportPath()}\n`);
+      return;
+    }
+    if (!this.sessionCapsule) {
+      output.write("\nNo active session capsule.\n");
+      return;
+    }
+    const parsed = this.parseSessionCapsule(this.sessionCapsule.summary);
+    if (action === "stats") {
+      output.write(
+        [
+          "",
+          `${this.themeColor(pc.bold("Capsule Stats"))}`,
+          `${pc.dim("generated:")}    ${this.sessionCapsule.generatedAt}`,
+          `${pc.dim("scope:")}        ${this.sessionCapsule.sourceMessages} -> ${this.sessionCapsule.retainedMessages} messages`,
+          `${pc.dim("decisions:")}    ${parsed.decisions.length}`,
+          `${pc.dim("open threads:")} ${parsed.openThreads.length}`,
+          `${pc.dim("next actions:")} ${parsed.nextActions.length}`,
+          `${pc.dim("files:")}        ${parsed.filesTouched.length}`,
+          `${pc.dim("tools:")}        ${parsed.toolActivity.length}`,
+          ""
+        ].join("\n")
+      );
+      return;
+    }
+    output.write(
+      [
+        "",
+        `${this.themeColor(pc.bold("Session Capsule"))}`,
+        `${pc.dim("generated:")} ${this.sessionCapsule.generatedAt}`,
+        `${pc.dim("scope:")}     ${this.sessionCapsule.sourceMessages} -> ${this.sessionCapsule.retainedMessages} messages`,
+        "",
+        this.formatStructuredCapsule(parsed),
+        ""
+      ].join("\n")
+    );
+  }
+
+  private handleApprovalsCommand(args: string[]): void {
+    const action = (args[0] || "status").toLowerCase();
+    if (action === "on") {
+      this.autoApproveTools = true;
+      output.write("\nAuto-approval enabled for write/run tools.\n");
+      return;
+    }
+    if (action === "off") {
+      this.autoApproveTools = false;
+      output.write("\nAuto-approval disabled.\n");
+      return;
+    }
+    output.write(`\nAuto-approval: ${this.autoApproveTools ? "on" : "off"}\n`);
+  }
+
+  private async handleSetupCommand(args: string[], rl: readline.Interface): Promise<void> {
+    const parsed = parseCommandArgs(args);
+    if (parsed.positionals[0]?.toLowerCase() !== "noninteractive") {
+      await this.runSetup(rl);
+      return;
+    }
+
+    const current = await loadUserSettings();
+    const patch = parsed.keyValues;
+
+    if (Object.keys(patch).length === 0) {
+      output.write(
+        [
+          "",
+          "Usage: /setup noninteractive model=sonnet4.6 cloud=on theme=cyan key=- endpoint=-",
+          "Keys: model, cloud, theme, key, endpoint",
+          ""
+        ].join("\n")
+      );
+      return;
+    }
+
+    const resolvedModel = patch.model ? resolveModelOption(String(patch.model)) : null;
+    if (patch.model && !resolvedModel && !String(patch.model).includes(".")) {
+      output.write(`\nUnknown model alias: ${patch.model}. Use /model list.\n`);
+      return;
+    }
+    if (patch.theme && !ALLOWED_THEMES.has(String(patch.theme))) {
+      output.write(`\nInvalid theme: ${patch.theme}. Allowed: ${Array.from(ALLOWED_THEMES).join(", ")}\n`);
+      return;
+    }
+
+    const nextSettings: UserSettings = {
+      modelId: patch.model ? (resolvedModel?.value ?? normalizeModelInput(String(patch.model))) : current.modelId,
+      enableCloudCache: patch.cloud ? ["1", "true", "on", "yes", "y"].includes(String(patch.cloud).toLowerCase()) : current.enableCloudCache,
+      themeColor: patch.theme ? String(patch.theme) : current.themeColor,
+      customApiKey:
+        patch.key === "-"
+          ? undefined
+          : patch.key !== undefined
+            ? String(patch.key)
+            : current.customApiKey,
+      customEndpoint:
+        patch.endpoint === "-"
+          ? undefined
+          : patch.endpoint !== undefined
+            ? String(patch.endpoint)
+            : current.customEndpoint
+    };
+
+    await saveUserSettings(nextSettings);
+    output.write(
+      [
+        "",
+        `${pc.green("Settings updated.")}`,
+        `${pc.dim("model:")} ${shortModelName(nextSettings.modelId)}`,
+        `${pc.dim("cloud:")} ${nextSettings.enableCloudCache ? "on" : "off"}`,
+        `${pc.dim("theme:")} ${nextSettings.themeColor}`,
+        ""
+      ].join("\n")
+    );
+  }
+
+  private async runDoctor(args: string[] = []): Promise<void> {
+    const mode = (args[0] || "brief").toLowerCase();
+    const indexStatus: any = await this.backend.callTool("workspace.get_index_status", {});
+    const syncStatus: any = await this.backend.callTool("workspace.check_sync", {});
+    const transcriptChars = this.estimateTranscriptChars();
+    const capsule = this.sessionCapsule ? this.parseSessionCapsule(this.sessionCapsule.summary) : null;
+
+    const lines = [
+      "",
+      `${this.themeColor(pc.bold("Doctor"))}`,
+      `${pc.dim("workspace:")}    ${this.config.agent.workspaceRoot}`,
+      `${pc.dim("mode:")}         ${this.config.agent.mode}`,
+      `${pc.dim("model:")}        ${shortModelName(this.currentModelId)} ${pc.dim(`(${this.currentModelId})`)}`,
+      `${pc.dim("approvals:")}    ${this.autoApproveTools ? pc.green("on") : pc.yellow("off")}`,
+      `${pc.dim("cloud sync:")}   ${syncStatus.l2Enabled ? pc.green(`on (${syncStatus.l2Count} capsules)`) : pc.yellow("off")}`,
+      `${pc.dim("index:")}        ${indexStatus.cachedFiles}/${indexStatus.totalFiles} cached (${indexStatus.percent}%)`,
+      `${pc.dim("session:")}      ${this.transcript.length} messages / ${transcriptChars} chars`,
+      `${pc.dim("capsule:")}      ${this.sessionCapsule ? pc.green("loaded") : pc.dim("none")}`,
+      `${pc.dim("last tool:")}    ${this.lastToolEventAt ?? "none"}`
+    ];
+
+    if (mode === "full") {
+      lines.push(
+        `${pc.dim("capsule path:")} ${this.getDefaultCapsuleExportPath()}`,
+        `${pc.dim("theme:")}        ${this.config.agent.themeColor}`
+      );
+      if (capsule) {
+        lines.push(
+          `${pc.dim("decisions:")}    ${capsule.decisions.length ? capsule.decisions.join(" | ") : "-"}`,
+          `${pc.dim("open threads:")} ${capsule.openThreads.length ? capsule.openThreads.join(" | ") : "-"}`,
+          `${pc.dim("next actions:")} ${capsule.nextActions.length ? capsule.nextActions.join(" | ") : "-"}`
+        );
+      }
+    }
+
+    lines.push("");
+    output.write(lines.join("\n"));
+  }
+
+  private async exportSessionCapsule(requestedPath?: string): Promise<void> {
+    if (!this.sessionCapsule) {
+      output.write("\nNo active session capsule to export.\n");
+      return;
+    }
+
+    const targetPath = requestedPath
+      ? path.resolve(this.config.agent.workspaceRoot, requestedPath)
+      : this.getDefaultCapsuleExportPath();
+    const structured = this.parseSessionCapsule(this.sessionCapsule.summary);
+    const content = [
+      "# Session Capsule",
+      "",
+      `- Generated: ${this.sessionCapsule.generatedAt}`,
+      `- Workspace: ${this.config.agent.workspaceRoot}`,
+      `- Scope: ${this.sessionCapsule.sourceMessages} -> ${this.sessionCapsule.retainedMessages} messages`,
+      "",
+      this.formatStructuredCapsule(structured),
+      ""
+    ].join("\n");
+
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    await fs.writeFile(targetPath, content, "utf8");
+    output.write(`\nSession capsule exported to ${targetPath}\n`);
+  }
+
+  private buildRuntimeSystemPrompt(): string {
+    const sections = [SYSTEM_PROMPT];
+    if (this.workspaceContext) {
+      sections.push(this.workspaceContext);
+    }
+    if (this.sessionCapsule) {
+      sections.push(
+        [
+          "Session capsule:",
+          this.sessionCapsule.summary,
+          `Capsule metadata: generated_at=${this.sessionCapsule.generatedAt} source_messages=${this.sessionCapsule.sourceMessages} retained_messages=${this.sessionCapsule.retainedMessages}`
+        ].join("\n")
+      );
+    }
+    return sections.join("\n\n");
+  }
+
+  private async autoCompactIfNeeded(): Promise<string | null> {
+    if (this.transcript.length < 18 && this.estimateTranscriptChars() < 18000) {
+      return null;
+    }
+    return this.compactTranscript({ reason: "auto" });
+  }
+
+  private async compactTranscript(options?: { reason?: "manual" | "auto" }): Promise<string> {
+    if (this.transcript.length === 0) {
+      return "Transcript already empty. No compaction needed.";
+    }
+
+    const sourceMessages = this.transcript.length;
+    const retainedMessages = Math.min(6, sourceMessages);
+    const retained = this.transcript.slice(-retainedMessages);
+    const older = this.transcript.slice(0, Math.max(0, sourceMessages - retainedMessages));
+    const summary = this.buildSessionCapsuleSummary(older, retained);
+
+    this.sessionCapsule = {
+      summary,
+      generatedAt: new Date().toISOString(),
+      sourceMessages,
+      retainedMessages
+    };
+    this.transcript = retained;
+    await this.sessionStore.save(this.sessionCapsule);
+
+    const prefix = options?.reason === "auto" ? "Auto-compacted session." : "Session compacted.";
+    const saved = Math.max(0, sourceMessages - retainedMessages);
+    return `${prefix} Retained ${retainedMessages} recent messages, compressed ${saved} older messages into capsule.`;
+  }
+
+  private buildSessionCapsuleSummary(older: ConverseMessage[], retained: ConverseMessage[]): string {
+    const userRequests: string[] = [];
+    const assistantReplies: string[] = [];
+    const toolCalls: string[] = [];
+    const toolResults: string[] = [];
+    const filesTouched: string[] = [];
+
+    for (const message of older) {
+      for (const block of message.content) {
+        if ("text" in block && block.text.trim()) {
+          const normalized = this.normalizeCapsuleLine(block.text);
+          if (!normalized) continue;
+          if (message.role === "user") {
+            if (userRequests.length < 8) userRequests.push(normalized);
+          } else {
+            if (assistantReplies.length < 8) assistantReplies.push(normalized);
+          }
+        }
+        if ("toolUse" in block) {
+          const args = formatArgsPreview(block.toolUse.input);
+          toolCalls.push(`${block.toolUse.name} ${args}`);
+          const input = block.toolUse.input as Record<string, unknown>;
+          if (typeof input.path === "string" && input.path.trim()) {
+            filesTouched.push(input.path.trim());
+          }
+        }
+        if ("toolResult" in block) {
+          const firstText = block.toolResult.content.find((item) => "text" in item && typeof item.text === "string");
+          if (firstText && "text" in firstText) {
+            const normalized = this.normalizeCapsuleLine(firstText.text);
+            if (normalized) toolResults.push(normalized);
+          }
+        }
+      }
+    }
+
+    const previous = this.sessionCapsule ? this.parseSessionCapsule(this.sessionCapsule.summary) : null;
+    const structured: StructuredSessionCapsule = {
+      summary: this.normalizeCapsuleLine(
+        assistantReplies[assistantReplies.length - 1] || userRequests[userRequests.length - 1] || `Conversation progressed through ${older.length} summarized messages.`,
+        220
+      ),
+      decisions: uniqueLimited(
+        [
+          ...(previous?.decisions ?? []),
+          ...assistantReplies.slice(-4),
+          ...toolResults.filter((entry) => /saved|updated|created|switched|cleared|exported|connected|indexed/i.test(entry))
+        ].map((entry) => this.normalizeCapsuleLine(entry, 160)),
+        8
+      ),
+      openThreads: uniqueLimited(
+        [
+          ...(previous?.openThreads ?? []),
+          ...userRequests.slice(-5),
+          ...toolResults.filter((entry) => /error|failed|denied|omitted|unknown/i.test(entry))
+        ].map((entry) => this.normalizeCapsuleLine(entry, 160)),
+        8
+      ),
+      nextActions: uniqueLimited(
+        [
+          ...(previous?.nextActions ?? []),
+          ...assistantReplies.filter((entry) => /next|should|can|recommend|suggest/i.test(entry)),
+          retained.length ? `Continue from ${retained.length} preserved recent messages.` : ""
+        ].map((entry) => this.normalizeCapsuleLine(entry, 160)),
+        8
+      ),
+      filesTouched: uniqueLimited(
+        [
+          ...(previous?.filesTouched ?? []),
+          ...filesTouched
+        ].map((entry) => this.normalizeCapsuleLine(entry, 120)),
+        12
+      ),
+      toolActivity: uniqueLimited(
+        [
+          ...(previous?.toolActivity ?? []),
+          ...toolCalls.slice(-8),
+          ...toolResults.slice(-4)
+        ].map((entry) => this.normalizeCapsuleLine(entry, 160)),
+        12
+      )
+    };
+
+    return this.serializeStructuredCapsule(structured);
+  }
+
+  private serializeStructuredCapsule(capsule: StructuredSessionCapsule): string {
+    const sections = [
+      `summary: ${capsule.summary}`,
+      ...this.serializeCapsuleSection("decisions", capsule.decisions),
+      ...this.serializeCapsuleSection("open_threads", capsule.openThreads),
+      ...this.serializeCapsuleSection("next_actions", capsule.nextActions),
+      ...this.serializeCapsuleSection("files_touched", capsule.filesTouched),
+      ...this.serializeCapsuleSection("tool_activity", capsule.toolActivity)
+    ];
+    return sections.join("\n");
+  }
+
+  private serializeCapsuleSection(name: string, values: string[]): string[] {
+    return [
+      `${name}:`,
+      ...(values.length ? values.map((value) => `- ${value}`) : ["- none"])
+    ];
+  }
+
+  private parseSessionCapsule(raw: string): StructuredSessionCapsule {
+    const lines = String(raw || "").split("\n");
+    const result: StructuredSessionCapsule = {
+      summary: "",
+      decisions: [],
+      openThreads: [],
+      nextActions: [],
+      filesTouched: [],
+      toolActivity: []
+    };
+
+    let currentSection: keyof Omit<StructuredSessionCapsule, "summary"> | null = null;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      if (trimmed.startsWith("summary:")) {
+        result.summary = trimmed.slice("summary:".length).trim();
+        currentSection = null;
+        continue;
+      }
+      if (trimmed === "decisions:") {
+        currentSection = "decisions";
+        continue;
+      }
+      if (trimmed === "open_threads:") {
+        currentSection = "openThreads";
+        continue;
+      }
+      if (trimmed === "next_actions:") {
+        currentSection = "nextActions";
+        continue;
+      }
+      if (trimmed === "files_touched:") {
+        currentSection = "filesTouched";
+        continue;
+      }
+      if (trimmed === "tool_activity:") {
+        currentSection = "toolActivity";
+        continue;
+      }
+      if (trimmed.startsWith("- ") && currentSection) {
+        const value = trimmed.slice(2).trim();
+        if (value && value !== "none") {
+          result[currentSection].push(value);
+        }
+      }
+    }
+
+    if (!result.summary) {
+      result.summary = this.normalizeCapsuleLine(raw, 220);
+    }
+    return result;
+  }
+
+  private formatStructuredCapsule(capsule: StructuredSessionCapsule): string {
+    return [
+      `Summary: ${capsule.summary}`,
+      ...this.formatCapsuleSection("Decisions", capsule.decisions),
+      ...this.formatCapsuleSection("Open Threads", capsule.openThreads),
+      ...this.formatCapsuleSection("Next Actions", capsule.nextActions),
+      ...this.formatCapsuleSection("Files Touched", capsule.filesTouched),
+      ...this.formatCapsuleSection("Tool Activity", capsule.toolActivity)
+    ].join("\n");
+  }
+
+  private formatCapsuleSection(title: string, values: string[]): string[] {
+    return [
+      "",
+      title,
+      ...(values.length ? values.map((value) => `- ${value}`) : ["- none"])
+    ];
+  }
+
+  private getDefaultCapsuleExportPath(): string {
+    return path.join(this.config.agent.workspaceRoot, ".mesh", "session-capsule.md");
+  }
+
+  private normalizeCapsuleLine(text: string, maxLen = 180): string {
+    const singleLine = text.replace(/\s+/g, " ").trim();
+    if (!singleLine) return "";
+    return singleLine.length > maxLen ? `${singleLine.slice(0, maxLen - 3)}...` : singleLine;
+  }
+
+  private estimateTranscriptChars(): number {
+    return this.transcript.reduce((total, message) => {
+      return total + message.content.reduce((contentTotal, block) => {
+        if ("text" in block) {
+          return contentTotal + block.text.length;
+        }
+        if ("toolUse" in block) {
+          return contentTotal + JSON.stringify(block.toolUse.input).length + block.toolUse.name.length;
+        }
+        if ("toolResult" in block) {
+          return contentTotal + JSON.stringify(block.toolResult).length;
+        }
+        return contentTotal;
+      }, 0);
+    }, 0);
   }
 }

@@ -133,7 +133,7 @@ export class BedrockLlmClient {
       status === 400 &&
       body.includes("on-demand throughput isn’t supported")
     ) {
-      return ` | Hint: model '${modelId}' needs an inference profile id. Try '/model us.anthropic.claude-sonnet-4-5-20250929-v1:0'`;
+      return ` | Hint: model '${modelId}' needs an inference profile id. Try '/model us.anthropic.claude-sonnet-4-6'`;
     }
     if (status === 403 && body.includes("\"model_not_allowed\"")) {
       return " | Hint: this model is blocked by worker ALLOWED_MODELS.";

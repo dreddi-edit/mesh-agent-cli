@@ -18,7 +18,10 @@ const DEFAULT_ENDPOINT_BASE = "https://mesh-llm.edgar-baumann.workers.dev";
 /**
  * Default model id on Bedrock. Elmo can override via BEDROCK_MODEL_ID.
  */
-const DEFAULT_MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
+const DEFAULT_MODEL_ID = "us.anthropic.claude-sonnet-4-6";
+const LEGACY_DEFAULT_MODEL_IDS = new Set([
+  "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+]);
 
 export function shortPathLabel(fullPath: string): string {
   const normalized = fullPath.replace(/\\/g, "/");
@@ -116,7 +119,19 @@ const SETTINGS_PATH = path.join(os.homedir(), ".config", "mesh", "settings.json"
 export async function loadUserSettings(): Promise<UserSettings> {
   try {
     const raw = await fs.readFile(SETTINGS_PATH, "utf-8");
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw) as UserSettings;
+    const modelId =
+      !parsed.modelId || LEGACY_DEFAULT_MODEL_IDS.has(parsed.modelId)
+        ? DEFAULT_MODEL_ID
+        : parsed.modelId;
+    return {
+      modelId,
+      themeColor: parsed.themeColor || "cyan",
+      enableCloudCache:
+        typeof parsed.enableCloudCache === "boolean" ? parsed.enableCloudCache : true,
+      customApiKey: parsed.customApiKey,
+      customEndpoint: parsed.customEndpoint
+    };
   } catch {
     return {
       modelId: DEFAULT_MODEL_ID,
