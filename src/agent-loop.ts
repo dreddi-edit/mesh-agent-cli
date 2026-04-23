@@ -326,31 +326,43 @@ export class AgentLoop {
         } else {
           lastSigInt = now;
           output.write("\n" + this.themeColor(pc.bold("Press Ctrl+C again within 2s to exit")) + "\n");
-        }
-      }
-    });
-
-    this.setupGhostText(rl, input, output);
-
 
     while (true) {
+      const rl = readline.createInterface({
+        input: input,
+        output: output,
+        terminal: true,
+        completer: (line) => this.completeInput(line)
+      });
+      this.setupGhostText(rl, input, output);
+
       const prompt = this.buildPrompt();
       let userInput = "";
       try {
         userInput = (await rl.question(prompt)).trim();
       } catch (err) {
+        if (this.abortController?.signal.aborted) {
+          this.abortController = new AbortController();
+          rl.close();
+          continue;
+        }
+        rl.close();
         break;
       }
+      
       if (!userInput) {
+        rl.close();
         continue;
       }
 
-      if (userInput.toLowerCase() === "exit") {
+      if (userInput.toLowerCase() === "exit" || userInput.toLowerCase() === "quit") {
+        rl.close();
         break;
       }
 
       if (userInput.startsWith("/")) {
         const handled = await this.handleSlashCommand(userInput, rl);
+        rl.close();
         if (handled.shouldExit) {
           break;
         }
@@ -360,7 +372,6 @@ export class AgentLoop {
       }
 
       try {
-        // Remove redundant renderUserTurn(userInput) to fix double message issue
         const spinner = this.useAnsi ? ora({ text: "Thinking...", color: "cyan" }).start() : undefined;
         
         const answer = await this.runSingleTurn(userInput, {
@@ -760,14 +771,13 @@ export class AgentLoop {
       this.config.agent.themeColor = themeColor;
 
       output.write(pc.green("\n✔ Settings saved and applied!\n"));
-      output.write(this.themeColor("═".repeat(40) + "\n"));
       
-      // Crucial: Restore keypress listeners for main CLI
-      this.setupGhostText(rl, input, output);
+      // Immediate UI refresh with new colors
+      output.write(this.useAnsi ? "\x1b[2J\x1b[H" : "\n");
+      this.printBanner();
+      await this.printStatus();
     } catch {
-      (rl as any).resume();
       output.write(pc.dim("\nSetup cancelled.\n"));
-      this.setupGhostText(rl, input, output);
     }
   }
   private async checkInit(): Promise<void> {
@@ -1029,8 +1039,7 @@ export class AgentLoop {
     const nextModel = [...parsed.positionals, parsed.keyValues.model ?? ""].join(" ").trim();
     if (!nextModel || nextModel === "pick" || nextModel === "choose") {
       await this.chooseModelInteractive(rl);
-      output.write(pc.yellow("\nModel changed. Please restart mesh to continue.\n"));
-      return { shouldExit: true };
+      return { shouldExit: false };
     }
     if (nextModel === "list" || nextModel === "ls") {
       output.write(
@@ -1248,8 +1257,7 @@ export class AgentLoop {
     const parsed = parseCommandArgs(args);
     if (parsed.positionals[0]?.toLowerCase() !== "noninteractive") {
       await this.runSetup(rl);
-      output.write(pc.yellow("\nSettings updated. Please restart mesh to continue.\n"));
-      return { shouldExit: true };
+      return { shouldExit: false };
     }
 
     const current = await loadUserSettings();
