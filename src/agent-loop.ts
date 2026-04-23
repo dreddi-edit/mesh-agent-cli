@@ -526,45 +526,67 @@ export class AgentLoop {
         if (hooks?.onDelta) {
           let accumulatedText = "";
           let toolUse: any = null;
-          let stopReason = "end_turn";
+          try {
+            const stream = this.llm.converseStream(
+              this.transcript,
+              toolSpecs,
+              this.buildRuntimeSystemPrompt(),
+              this.currentModelId,
+              this.abortController.signal
+            );
 
-          const stream = this.llm.converseStream(
-            this.transcript,
-            toolSpecs,
-            this.buildRuntimeSystemPrompt(),
-            this.currentModelId,
-            this.abortController.signal
-          );
-
-          for await (const chunk of stream) {
-            if (chunk.kind === "text" && chunk.text) {
-              accumulatedText += chunk.text;
-              hooks.onDelta(chunk.text);
-            } else if (chunk.kind === "tool_use") {
-              toolUse = chunk.toolUse;
-            } else if (chunk.kind === "stop") {
-              if (chunk.usage) {
-                this.sessionTokens.inputTokens += chunk.usage.inputTokens ?? 0;
-                this.sessionTokens.outputTokens += chunk.usage.outputTokens ?? 0;
+            for await (const chunk of stream) {
+              if (chunk.kind === "text" && chunk.text) {
+                accumulatedText += chunk.text;
+                hooks.onDelta(chunk.text);
+              } else if (chunk.kind === "tool_use") {
+                toolUse = chunk.toolUse;
+              } else if (chunk.kind === "stop") {
+                if (chunk.usage) {
+                  this.sessionTokens.inputTokens += chunk.usage.inputTokens ?? 0;
+                  this.sessionTokens.outputTokens += chunk.usage.outputTokens ?? 0;
+                }
               }
             }
-          }
 
-          if (toolUse) {
-            response = {
-              kind: "tool_use",
-              toolUseId: toolUse.toolUseId,
-              name: toolUse.name,
-              input: toolUse.input as Record<string, unknown>,
-              text: accumulatedText || undefined,
-              stopReason: "tool_use"
-            };
-          } else {
-            response = {
-              kind: "text",
-              text: accumulatedText,
-              stopReason: "end_turn"
-            };
+            if (toolUse) {
+              response = {
+                kind: "tool_use",
+                toolUseId: toolUse.toolUseId,
+                name: toolUse.name,
+                input: toolUse.input as Record<string, unknown>,
+                text: accumulatedText || undefined,
+                stopReason: "tool_use"
+              };
+            } else {
+              response = {
+                kind: "text",
+                text: accumulatedText,
+                stopReason: "end_turn"
+              };
+            }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (!/LLM streaming failed \((404|405)\)/.test(message)) {
+              throw error;
+            }
+
+            response = await this.llm.converse(
+              this.transcript,
+              toolSpecs,
+              this.buildRuntimeSystemPrompt(),
+              this.currentModelId,
+              this.abortController.signal
+            );
+
+            if (response.usage) {
+              this.sessionTokens.inputTokens += response.usage.inputTokens ?? 0;
+              this.sessionTokens.outputTokens += response.usage.outputTokens ?? 0;
+            }
+
+            if (response.text) {
+              hooks.onDelta(response.text);
+            }
           }
         } else {
           response = await this.llm.converse(
