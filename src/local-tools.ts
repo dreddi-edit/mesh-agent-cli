@@ -141,6 +141,11 @@ export class LocalToolBackend implements ToolBackend {
             command: { type: "string" }
           }
         }
+      },
+      {
+        name: "workspace.get_index_status",
+        description: "Returns statistics about how many files are already cached.",
+        inputSchema: { type: "object", properties: {} }
       }
     ];
   }
@@ -159,6 +164,8 @@ export class LocalToolBackend implements ToolBackend {
         return this.writeFile(args);
       case "workspace.run_command":
         return this.runCommand(args);
+      case "workspace.get_index_status":
+        return this.getIndexStatus();
       default:
         throw new Error(`Unknown local tool: ${name}`);
     }
@@ -375,6 +382,50 @@ export class LocalToolBackend implements ToolBackend {
         stdout: trimOutput(error.stdout || ""),
         stderr: trimOutput(error.stderr || String(error))
       };
+    }
+  }
+
+  private async getIndexStatus(): Promise<unknown> {
+    const files = await collectFiles(this.workspaceRoot, 10000);
+    let cachedCount = 0;
+
+    for (const file of files) {
+      const rel = toPosixRelative(this.workspaceRoot, file);
+      const stat = await fs.stat(file);
+      const exists = await this.cache.getCapsule(rel, "medium", Math.floor(stat.mtimeMs));
+      if (exists) cachedCount++;
+    }
+
+    return {
+      ok: true,
+      totalFiles: files.length,
+      cachedFiles: cachedCount,
+      percent: files.length > 0 ? Math.round((cachedCount / files.length) * 100) : 100
+    };
+  }
+
+  public async *indexEverything(): AsyncGenerator<{ current: number; total: number; path: string }> {
+    const files = await collectFiles(this.workspaceRoot, 10000);
+    const total = files.length;
+
+    for (let i = 0; i < total; i++) {
+      const absolutePath = files[i];
+      const relativePath = toPosixRelative(this.workspaceRoot, absolutePath);
+      const stat = await fs.stat(absolutePath);
+      const mtimeMs = Math.floor(stat.mtimeMs);
+
+      const existing = await this.cache.getCapsule(relativePath, "medium", mtimeMs);
+      if (!existing) {
+        const raw = await fs.readFile(absolutePath, "utf8");
+        const TIERS = ["low", "medium", "high"] as const;
+        if (this.meshCore.isAvailable) {
+          const results = await this.meshCore.summarizeAllTiers(relativePath, raw);
+          await Promise.all(TIERS.map(t => this.cache.setCapsule(relativePath, t, results[t] || "", mtimeMs)));
+        } else {
+          await Promise.all(TIERS.map(t => this.cache.setCapsule(relativePath, t, raw.slice(0, 12000), mtimeMs)));
+        }
+      }
+      yield { current: i + 1, total, path: relativePath };
     }
   }
 }

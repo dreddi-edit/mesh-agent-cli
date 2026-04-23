@@ -130,7 +130,7 @@ export class AgentLoop {
     }
 
     this.printBanner();
-    const commands = ["/help", "/status", "/model", "/cost", "/compact", "/clear", "/exit"];
+    const commands = ["/help", "/status", "/index", "/model", "/cost", "/compact", "/clear", "/exit"];
     const rl = readline.createInterface({
       input,
       output,
@@ -166,7 +166,11 @@ export class AgentLoop {
         continue;
       }
       if (userInput === "/status") {
-        this.printStatus();
+        await this.printStatus();
+        continue;
+      }
+      if (userInput === "/index") {
+        await this.runIndexing();
         continue;
       }
       if (userInput === "/clear") {
@@ -378,38 +382,69 @@ export class AgentLoop {
   }
 
   private printBanner(): void {
+    const banner = [
+      "  __  __   ______   _____   _    _ ",
+      " |  \\/  | |  ____| / ____| | |  | |",
+      " | \\  / | | |__   | (___   | |__| |",
+      " | |\\/| | |  __|   \\___ \\  |  __  |",
+      " | |  | | | |____  ____) | | |  | |",
+      " |_|  |_| |______||_____/  |_|  |_|",
+      ""
+    ];
+
     if (!this.useAnsi) {
+      output.write("\n" + banner.join("\n") + "\n");
       output.write(
         [
-          "",
           `mesh-agent  ${this.config.agent.mode}  ${shortPathLabel(this.config.agent.workspaceRoot)}`,
           `model: ${this.currentModelId}`,
-          "commands: /help /status /model /model <id> /clear /exit"
+          "commands: /help /status /index /model /clear /exit"
         ].join("\n") + "\n"
       );
       return;
     }
     
+    output.write("\n" + pc.cyan(banner.join("\n")) + "\n");
     output.write(
       [
-        "",
-        `${pc.cyan(pc.bold("mesh-agent"))}  ${pc.dim(this.config.agent.mode)}  ${pc.dim(shortPathLabel(this.config.agent.workspaceRoot))}`,
+        `${pc.cyan(pc.bold("mesh"))}  ${pc.dim(this.config.agent.mode)}  ${pc.dim(shortPathLabel(this.config.agent.workspaceRoot))}`,
         `${pc.dim("model:")} ${pc.cyan(this.currentModelId)}`,
-        `${pc.dim("commands:")} ${pc.magenta("/help")} ${pc.magenta("/status")} ${pc.magenta("/model")} ${pc.magenta("/clear")} ${pc.magenta("/exit")}`
+        `${pc.dim("commands:")} ${pc.magenta("/help")} ${pc.magenta("/status")} ${pc.magenta("/index")} ${pc.magenta("/model")} ${pc.magenta("/cost")}`
       ].join("\n") + "\n"
     );
   }
 
-  private printStatus(): void {
+  private async printStatus(): Promise<void> {
+    const status: any = await this.backend.callTool("workspace.get_index_status", {});
+    
     output.write(
       [
         "",
-        `${pc.dim("mode:")} ${this.config.agent.mode}`,
-        `${pc.dim("workspace:")} ${this.config.agent.workspaceRoot}`,
-        `${pc.dim("model:")} ${this.currentModelId}`,
-        `${pc.dim("max-steps:")} ${this.config.agent.maxSteps}`
-      ].join("\n") + "\n"
+        `${pc.dim("mode:")}      ${this.config.agent.mode}`,
+        `${pc.dim("workspace:")} ${shortPathLabel(this.config.agent.workspaceRoot)}`,
+        `${pc.dim("model:")}     ${this.currentModelId}`,
+        `${pc.dim("index:")}     ${status.cachedFiles}/${status.totalFiles} files cached (${status.percent}%)`,
+        ""
+      ].join("\n")
     );
+  }
+
+  private async runIndexing(): Promise<void> {
+    if (!this.backend.indexEverything) {
+      output.write(pc.red("\nIndexing is only available in local mode.\n"));
+      return;
+    }
+
+    const spinner = ora({ text: "Scanning workspace...", color: "cyan" }).start();
+    
+    try {
+      for await (const progress of this.backend.indexEverything()) {
+        spinner.text = `Indexing [${progress.current}/${progress.total}] ${pc.dim(progress.path)}`;
+      }
+      spinner.succeed(pc.green("Workspace indexed successfully."));
+    } catch (err) {
+      spinner.fail(pc.red(`Indexing failed: ${(err as Error).message}`));
+    }
   }
 
   private printCost(): void {
@@ -433,7 +468,8 @@ export class AgentLoop {
       [
         "",
         `${pc.magenta("/help")}             show commands`,
-        `${pc.magenta("/status")}           show runtime status`,
+        `${pc.magenta("/status")}           show indexing status & runtime info`,
+        `${pc.magenta("/index")}            re-index workspace (generate capsules)`,
         `${pc.magenta("/model")}            show current model`,
         `${pc.magenta("/model <id>")}       switch model for next messages`,
         `${pc.magenta("/cost")}             show token usage and approx cost`,
