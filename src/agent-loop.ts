@@ -989,15 +989,15 @@ export class AgentLoop {
         await this.printSync();
         return { wasHandled: true, shouldExit: false };
       case "/setup":
-        await this.handleSetupCommand(args, rl);
-        return { wasHandled: true, shouldExit: false };
+        const setupResult = await this.handleSetupCommand(args, rl);
+        return { wasHandled: true, shouldExit: setupResult.shouldExit };
       case "/clear":
         output.write(this.useAnsi ? "\x1b[2J\x1b[H" : "\n");
         this.printBanner();
         return { wasHandled: true, shouldExit: false };
       case "/model":
-        await this.handleModelCommand(args, rl);
-        return { wasHandled: true, shouldExit: false };
+        const modelResult = await this.handleModelCommand(args, rl);
+        return { wasHandled: true, shouldExit: modelResult.shouldExit };
       case "/cost":
         this.printCost();
         return { wasHandled: true, shouldExit: false };
@@ -1024,12 +1024,13 @@ export class AgentLoop {
     }
   }
 
-  private async handleModelCommand(args: string[], rl: readline.Interface): Promise<void> {
+  private async handleModelCommand(args: string[], rl: readline.Interface): Promise<{ shouldExit: boolean }> {
     const parsed = parseCommandArgs(args);
     const nextModel = [...parsed.positionals, parsed.keyValues.model ?? ""].join(" ").trim();
     if (!nextModel || nextModel === "pick" || nextModel === "choose") {
       await this.chooseModelInteractive(rl);
-      return;
+      output.write(pc.yellow("\nModel changed. Please restart mesh to continue.\n"));
+      return { shouldExit: true };
     }
     if (nextModel === "list" || nextModel === "ls") {
       output.write(
@@ -1044,25 +1045,26 @@ export class AgentLoop {
           ""
         ].join("\n")
       );
-      return;
+      return { shouldExit: false };
     }
     if (nextModel === "current") {
       output.write(`\ncurrent model: ${this.currentModelId}\n`);
-      return;
+      return { shouldExit: false };
     }
     if (nextModel === "save") {
       const current = await loadUserSettings();
       await saveUserSettings({ ...current, modelId: this.currentModelId });
       output.write(`\ndefault model saved: ${this.themeColor(shortModelName(this.currentModelId))}\n`);
-      return;
+      return { shouldExit: false };
     }
     const resolved = resolveModelOption(nextModel);
     if (!resolved && nextModel.startsWith("/")) {
       output.write(`\nInvalid model argument: ${nextModel}\n`);
-      return;
+      return { shouldExit: false };
     }
     this.currentModelId = resolved?.value ?? normalizeModelInput(nextModel);
     output.write(`\nmodel switched: ${this.themeColor(shortModelName(this.currentModelId))}\n`);
+    return { shouldExit: false };
   }
 
   private async chooseModelInteractive(rl: readline.Interface): Promise<void> {
@@ -1242,11 +1244,12 @@ export class AgentLoop {
     output.write(`\nAuto-approval: ${this.autoApproveTools ? "on" : "off"}\n`);
   }
 
-  private async handleSetupCommand(args: string[], rl: readline.Interface): Promise<void> {
+  private async handleSetupCommand(args: string[], rl: readline.Interface): Promise<{ shouldExit: boolean }> {
     const parsed = parseCommandArgs(args);
     if (parsed.positionals[0]?.toLowerCase() !== "noninteractive") {
       await this.runSetup(rl);
-      return;
+      output.write(pc.yellow("\nSettings updated. Please restart mesh to continue.\n"));
+      return { shouldExit: true };
     }
 
     const current = await loadUserSettings();
@@ -1261,17 +1264,17 @@ export class AgentLoop {
           ""
         ].join("\n")
       );
-      return;
+      return { shouldExit: false };
     }
 
     const resolvedModel = patch.model ? resolveModelOption(String(patch.model)) : null;
     if (patch.model && !resolvedModel && !String(patch.model).includes(".")) {
       output.write(`\nUnknown model alias: ${patch.model}. Use /model list.\n`);
-      return;
+      return { shouldExit: false };
     }
     if (patch.theme && !ALLOWED_THEMES.has(String(patch.theme))) {
       output.write(`\nInvalid theme: ${patch.theme}. Allowed: ${Array.from(ALLOWED_THEMES).join(", ")}\n`);
-      return;
+      return { shouldExit: false };
     }
 
     const nextSettings: UserSettings = {
@@ -1303,6 +1306,7 @@ export class AgentLoop {
         ""
       ].join("\n")
     );
+    return { shouldExit: false };
   }
 
   private async runDoctor(args: string[] = []): Promise<void> {
