@@ -67,18 +67,6 @@ export class VoiceManager {
     if (configured && fsSync.existsSync(configured)) {
       return configured;
     }
-
-    const fallbackModels = [
-      "/opt/homebrew/share/whisper-cpp/for-tests-ggml-tiny.bin",
-      "/usr/local/share/whisper-cpp/for-tests-ggml-tiny.bin"
-    ];
-
-    for (const modelPath of fallbackModels) {
-      if (fsSync.existsSync(modelPath)) {
-        return modelPath;
-      }
-    }
-
     return configured ?? null;
   }
 
@@ -167,7 +155,9 @@ export class VoiceManager {
     const args = [
       "-m", whisperModel,
       "-f", filePath,
-      "-nt" // No timestamps
+      "-nt",
+      "-ng",
+      "-l", "auto"
     ];
     const whisperPath = this.resolveBinary(this.config.whisperPath!);
 
