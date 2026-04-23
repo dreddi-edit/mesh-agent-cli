@@ -1,5 +1,7 @@
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import pc from "picocolors";
+import ora from "ora";
 
 import { AppConfig } from "./config.js";
 import {
@@ -19,9 +21,43 @@ const SYSTEM_PROMPT = [
   "German or English: match the user."
 ].join(" ");
 
-function toToolSpecs(tools: ToolDefinition[]): ToolSpec[] {
-  return tools.map((tool) => ({
-    name: tool.name,
+interface WireTool {
+  wireName: string;
+  tool: ToolDefinition;
+}
+
+interface RunHooks {
+  onToolStart?: (wireName: string, input: Record<string, unknown>) => void;
+  askPermission?: (msg: string) => Promise<boolean>;
+}
+
+function sanitizeToolName(name: string): string {
+  const normalized = name.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return normalized.length > 0 ? normalized : "tool";
+}
+
+function toWireTools(tools: ToolDefinition[]): WireTool[] {
+  const used = new Set<string>();
+  const result: WireTool[] = [];
+
+  for (const tool of tools) {
+    const base = sanitizeToolName(tool.name);
+    let wireName = base;
+    let index = 2;
+    while (used.has(wireName)) {
+      wireName = `${base}_${index}`;
+      index += 1;
+    }
+    used.add(wireName);
+    result.push({ wireName, tool });
+  }
+
+  return result;
+}
+
+function toToolSpecs(wireTools: WireTool[]): ToolSpec[] {
+  return wireTools.map(({ wireName, tool }) => ({
+    name: wireName,
     description: tool.description ?? "",
     inputSchema:
       (tool.inputSchema as Record<string, unknown>) ?? {
@@ -31,16 +67,44 @@ function toToolSpecs(tools: ToolDefinition[]): ToolSpec[] {
   }));
 }
 
+function formatArgsPreview(args: Record<string, unknown>): string {
+  const raw = JSON.stringify(args);
+  if (!raw) return "{}";
+  return raw.length <= 100 ? raw : `${raw.slice(0, 97)}...`;
+}
+
+function formatMultiline(prefix: string, message: string): string {
+  const lines = String(message || "").split("\n");
+  if (lines.length <= 1) {
+    return `${prefix}${lines[0] ?? ""}`;
+  }
+  return `${prefix}${lines[0]}\n${lines.slice(1).map((line) => `    ${line}`).join("\n")}`;
+}
+
+function shortPathLabel(fullPath: string): string {
+  const normalized = fullPath.replace(/\\/g, "/");
+  const parts = normalized.split("/").filter(Boolean);
+  return parts.at(-1) || fullPath;
+}
+
 export class AgentLoop {
   private readonly llm: BedrockLlmClient;
+  private readonly useAnsi = output.isTTY;
+  private currentModelId: string;
+  private transcript: ConverseMessage[] = [];
+  private sessionTokens = { inputTokens: 0, outputTokens: 0 };
+  private systemPrompt: string = SYSTEM_PROMPT;
+  private abortController: AbortController | null = null;
+  private autoApproveTools = false;
 
   constructor(
     private readonly config: AppConfig,
     private readonly backend: ToolBackend
   ) {
+    this.currentModelId = config.bedrock.modelId;
     this.llm = new BedrockLlmClient({
       endpointBase: config.bedrock.endpointBase,
-      modelId: config.bedrock.modelId,
+      modelId: this.currentModelId,
       bearerToken: config.bedrock.bearerToken,
       temperature: config.bedrock.temperature,
       maxTokens: config.bedrock.maxTokens
@@ -48,32 +112,122 @@ export class AgentLoop {
   }
 
   async runCli(initialPrompt?: string): Promise<void> {
+    try {
+      const { execSync } = await import("node:child_process");
+      const gitBranch = execSync("git branch --show-current 2>/dev/null", { stdio: "pipe", cwd: this.config.agent.workspaceRoot }).toString().trim();
+      const gitStatus = execSync("git status --short 2>/dev/null", { stdio: "pipe", cwd: this.config.agent.workspaceRoot }).toString().trim();
+      if (gitBranch) {
+        this.systemPrompt += `\n\nWorkspace context:\n- Git branch: ${gitBranch}\n- Git status:\n${gitStatus || "clean"}`;
+      }
+    } catch {
+      // Not a git repository or git not installed
+    }
+
     if (initialPrompt?.trim()) {
       const result = await this.runSingleTurn(initialPrompt);
       output.write(`${result}\n`);
       return;
     }
 
-    output.write(
-      `mesh-agent ready (mode=${this.config.agent.mode}, workspace=${this.config.agent.workspaceRoot}). Type 'exit' to quit.\n`
-    );
-    const rl = readline.createInterface({ input, output });
+    this.printBanner();
+    const commands = ["/help", "/status", "/model", "/cost", "/compact", "/clear", "/exit"];
+    const rl = readline.createInterface({
+      input,
+      output,
+      completer: (line: string): [string[], string] => {
+        const hits = commands.filter((c) => c.startsWith(line));
+        return [hits.length ? hits : commands, line];
+      }
+    });
+
+    rl.on("SIGINT", () => {
+      if (this.abortController) {
+        this.abortController.abort();
+        this.abortController = null;
+        output.write("\n\n" + pc.dim("Request aborted. Returning to prompt.") + "\n");
+      } else {
+        rl.close();
+        output.write("\n\n" + pc.dim("Aborted by user.") + "\n");
+        process.exit(0);
+      }
+    });
 
     while (true) {
-      const userInput = (await rl.question("\nYou> ")).trim();
+      const prompt = this.useAnsi ? pc.cyan("\n> ") : "\n> ";
+      const userInput = (await rl.question(prompt)).trim();
       if (!userInput) {
         continue;
       }
-      if (userInput.toLowerCase() === "exit") {
+      if (userInput.toLowerCase() === "exit" || userInput.toLowerCase() === "/exit") {
         break;
+      }
+      if (userInput === "/help") {
+        this.printHelp();
+        continue;
+      }
+      if (userInput === "/status") {
+        this.printStatus();
+        continue;
+      }
+      if (userInput === "/clear") {
+        output.write(this.useAnsi ? "\x1b[2J\x1b[H" : "\n");
+        this.printBanner();
+        continue;
+      }
+      if (userInput.startsWith("/model")) {
+        const nextModel = userInput.slice("/model".length).trim();
+        if (!nextModel) {
+          output.write(`\nmodel: ${this.currentModelId}\n`);
+        } else {
+          this.currentModelId = nextModel;
+          output.write(`\nmodel switched: ${this.currentModelId}\n`);
+        }
+        continue;
+      }
+      if (userInput === "/cost") {
+        this.printCost();
+        continue;
+      }
+      if (userInput === "/compact") {
+        this.transcript = [];
+        output.write(pc.cyan("\nTranscript cleared. Context is now compact.\n"));
+        continue;
       }
 
       try {
-        const answer = await this.runSingleTurn(userInput);
-        output.write(`\nAgent> ${answer}\n`);
+        const spinner = this.useAnsi ? ora({ text: "Thinking...", color: "cyan" }).start() : undefined;
+        
+        const answer = await this.runSingleTurn(userInput, {
+          onToolStart: (wireName, args) => {
+            if (spinner) {
+              spinner.text = `Running tool ${pc.cyan(wireName)} ${pc.dim(formatArgsPreview(args))}`;
+            } else {
+              output.write(`\ntool ${wireName} ${formatArgsPreview(args)}\n`);
+            }
+          },
+          askPermission: async (msg) => {
+            if (spinner) spinner.stop();
+            const p = this.useAnsi ? pc.yellow(`\n[Action Required] ${msg} [y/N/A]: `) : `\n[Action Required] ${msg} [y/N/A]: `;
+            const ans = (await rl.question(p)).trim().toLowerCase();
+            if (ans === "a") {
+              this.autoApproveTools = true;
+              if (spinner) spinner.start();
+              return true;
+            }
+            const allowed = ans === "y" || ans === "yes";
+            if (spinner) spinner.start();
+            return allowed;
+          }
+        });
+        
+        if (spinner) {
+          spinner.stop();
+        }
+        output.write(`\n${answer}\n`);
       } catch (error) {
+        const errorLabel = this.useAnsi ? pc.red("error> ") : "error> ";
         output.write(
-          `\n[error] ${(error as Error).message}\n`
+          `\n${formatMultiline(errorLabel, (error as Error).message)}\n`
         );
       }
     }
@@ -81,22 +235,36 @@ export class AgentLoop {
     rl.close();
   }
 
-  private async runSingleTurn(userInput: string): Promise<string> {
+  private async runSingleTurn(userInput: string, hooks?: RunHooks): Promise<string> {
     const tools = await this.backend.listTools();
-    const toolSpecs = toToolSpecs(tools);
+    const wireTools = toWireTools(tools);
+    const toolSpecs = toToolSpecs(wireTools);
+    const wireToolMap = new Map(wireTools.map((item) => [item.wireName, item]));
 
-    const transcript: ConverseMessage[] = [
-      { role: "user", content: [{ text: userInput }] }
-    ];
+    this.transcript.push({ role: "user", content: [{ text: userInput }] });
 
     let lastAssistantText = "";
+    this.abortController = new AbortController();
 
-    for (let step = 0; step < this.config.agent.maxSteps; step += 1) {
-      const response = await this.llm.converse(transcript, toolSpecs, SYSTEM_PROMPT);
+    try {
+      for (let step = 0; step < this.config.agent.maxSteps; step += 1) {
+        const response = await this.llm.converse(
+          this.transcript,
+          toolSpecs,
+          this.systemPrompt,
+          this.currentModelId,
+          this.abortController.signal
+        );
 
-      if (response.kind === "text") {
-        return response.text || lastAssistantText || "(no answer)";
-      }
+        if (response.usage) {
+          this.sessionTokens.inputTokens += response.usage.inputTokens ?? 0;
+          this.sessionTokens.outputTokens += response.usage.outputTokens ?? 0;
+        }
+
+        if (response.kind === "text") {
+          this.transcript.push({ role: "assistant", content: [{ text: response.text }] });
+          return response.text || lastAssistantText || "(no answer)";
+        }
 
       lastAssistantText = response.text ?? lastAssistantText;
 
@@ -112,13 +280,13 @@ export class AgentLoop {
           input: response.input
         }
       });
-      transcript.push({ role: "assistant", content: assistantContent });
+      this.transcript.push({ role: "assistant", content: assistantContent });
 
       // Execute the tool (or report unknown tool) and push a user-turn tool result.
-      const toolExists = tools.some((tool) => tool.name === response.name);
+      const selectedTool = wireToolMap.get(response.name);
 
-      if (!toolExists) {
-        transcript.push({
+      if (!selectedTool) {
+        this.transcript.push({
           role: "user",
           content: [
             {
@@ -128,7 +296,7 @@ export class AgentLoop {
                 content: [
                   {
                     text: `Tool '${response.name}' is not available. Pick one of: ${tools
-                      .map((t) => t.name)
+                      .map((_, i) => wireTools[i]?.wireName ?? "tool")
                       .join(", ")}`
                   }
                 ]
@@ -141,15 +309,47 @@ export class AgentLoop {
 
       let resultText: string;
       let errored = false;
+
+      // --- Tool Security Check ---
+      if (selectedTool && (selectedTool.tool.name === "workspace.run_command" || selectedTool.tool.name === "workspace.write_file") && !this.autoApproveTools) {
+        if (hooks?.askPermission) {
+          const allowed = await hooks.askPermission(`Allow ${selectedTool.tool.name} to run?`);
+          if (!allowed) {
+            this.transcript.push({
+              role: "user",
+              content: [
+                {
+                  toolResult: {
+                    toolUseId: response.toolUseId,
+                    status: "error",
+                    content: [{ text: "User denied permission to run this tool." }]
+                  }
+                }
+              ]
+            });
+            continue;
+          }
+        }
+      }
+      // ---------------------------
+
       try {
-        const raw = await this.backend.callTool(response.name, response.input);
-        resultText = await buildLlmSafeMeshContext(response.name, response.input, raw);
+        hooks?.onToolStart?.(response.name, response.input);
+        const raw = await this.backend.callTool(
+          selectedTool.tool.name,
+          response.input
+        );
+        resultText = await buildLlmSafeMeshContext(
+          selectedTool.tool.name,
+          response.input,
+          raw
+        );
       } catch (error) {
         resultText = `Tool execution failed: ${(error as Error).message}`;
         errored = true;
       }
 
-      transcript.push({
+      this.transcript.push({
         role: "user",
         content: [
           {
@@ -161,11 +361,86 @@ export class AgentLoop {
           }
         ]
       });
+    } // end for loop
+    } catch (err: any) {
+      if (err.name === "AbortError" || err.message?.includes("aborted")) {
+        return lastAssistantText || "Request aborted.";
+      }
+      throw err;
+    } finally {
+      this.abortController = null;
     }
 
     return (
       lastAssistantText ||
       `Stopped after ${this.config.agent.maxSteps} tool steps without final answer.`
+    );
+  }
+
+  private printBanner(): void {
+    if (!this.useAnsi) {
+      output.write(
+        [
+          "",
+          `mesh-agent  ${this.config.agent.mode}  ${shortPathLabel(this.config.agent.workspaceRoot)}`,
+          `model: ${this.currentModelId}`,
+          "commands: /help /status /model /model <id> /clear /exit"
+        ].join("\n") + "\n"
+      );
+      return;
+    }
+    
+    output.write(
+      [
+        "",
+        `${pc.cyan(pc.bold("mesh-agent"))}  ${pc.dim(this.config.agent.mode)}  ${pc.dim(shortPathLabel(this.config.agent.workspaceRoot))}`,
+        `${pc.dim("model:")} ${pc.cyan(this.currentModelId)}`,
+        `${pc.dim("commands:")} ${pc.magenta("/help")} ${pc.magenta("/status")} ${pc.magenta("/model")} ${pc.magenta("/clear")} ${pc.magenta("/exit")}`
+      ].join("\n") + "\n"
+    );
+  }
+
+  private printStatus(): void {
+    output.write(
+      [
+        "",
+        `${pc.dim("mode:")} ${this.config.agent.mode}`,
+        `${pc.dim("workspace:")} ${this.config.agent.workspaceRoot}`,
+        `${pc.dim("model:")} ${this.currentModelId}`,
+        `${pc.dim("max-steps:")} ${this.config.agent.maxSteps}`
+      ].join("\n") + "\n"
+    );
+  }
+
+  private printCost(): void {
+    const inT = this.sessionTokens.inputTokens;
+    const outT = this.sessionTokens.outputTokens;
+    // Approx Claude 3.5 Sonnet pricing: $3.00 / 1M input, $15.00 / 1M output
+    const cost = (inT * 0.003 / 1000) + (outT * 0.015 / 1000);
+    
+    output.write(
+      [
+        "",
+        `${pc.dim("session usage:")} ${pc.cyan(inT.toLocaleString())} ${pc.dim("input /")} ${pc.cyan(outT.toLocaleString())} ${pc.dim("output tokens")}`,
+        `${pc.dim("session cost:")}  ${pc.green("$" + cost.toFixed(4))}`,
+        ""
+      ].join("\n")
+    );
+  }
+
+  private printHelp(): void {
+    output.write(
+      [
+        "",
+        `${pc.magenta("/help")}             show commands`,
+        `${pc.magenta("/status")}           show runtime status`,
+        `${pc.magenta("/model")}            show current model`,
+        `${pc.magenta("/model <id>")}       switch model for next messages`,
+        `${pc.magenta("/cost")}             show token usage and approx cost`,
+        `${pc.magenta("/compact")}          clear transcript context`,
+        `${pc.magenta("/clear")}            clear terminal UI`,
+        `${pc.magenta("/exit")}             quit`
+      ].join("\n") + "\n"
     );
   }
 }

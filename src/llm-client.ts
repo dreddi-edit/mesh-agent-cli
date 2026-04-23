@@ -89,9 +89,12 @@ export class BedrockLlmClient {
   async converse(
     messages: ConverseMessage[],
     tools: ToolSpec[],
-    systemPrompt: string
+    systemPrompt: string,
+    modelIdOverride?: string,
+    abortSignal?: AbortSignal
   ): Promise<LlmResponse> {
-    const url = this.buildUrl();
+    const activeModelId = modelIdOverride || this.options.modelId;
+    const url = this.buildUrl(activeModelId);
     const body = this.buildBody(messages, tools, systemPrompt);
 
     const headers: Record<string, string> = {
@@ -104,13 +107,15 @@ export class BedrockLlmClient {
     const response = await fetch(url, {
       method: "POST",
       headers,
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal: abortSignal
     });
 
     if (!response.ok) {
       const errBody = await response.text();
+      const hint = this.buildErrorHint(response.status, errBody, activeModelId);
       throw new Error(
-        `LLM request failed (${response.status}): ${errBody.slice(0, 500)}`
+        `LLM request failed (${response.status}): ${errBody.slice(0, 500)}${hint}`
       );
     }
 
@@ -118,10 +123,22 @@ export class BedrockLlmClient {
     return this.parseResponse(data);
   }
 
-  private buildUrl(): string {
+  private buildUrl(modelId: string): string {
     const base = this.options.endpointBase.replace(/\/+$/, "");
-    const modelId = encodeURIComponent(this.options.modelId);
-    return `${base}/model/${modelId}/converse`;
+    return `${base}/model/${encodeURIComponent(modelId)}/converse`;
+  }
+
+  private buildErrorHint(status: number, body: string, modelId: string): string {
+    if (
+      status === 400 &&
+      body.includes("on-demand throughput isn’t supported")
+    ) {
+      return ` | Hint: model '${modelId}' needs an inference profile id. Try '/model us.anthropic.claude-sonnet-4-5-20250929-v1:0'`;
+    }
+    if (status === 403 && body.includes("\"model_not_allowed\"")) {
+      return " | Hint: this model is blocked by worker ALLOWED_MODELS.";
+    }
+    return "";
   }
 
   private buildBody(

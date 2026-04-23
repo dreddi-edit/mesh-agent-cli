@@ -17,7 +17,7 @@ const DEFAULT_ENDPOINT_BASE = "https://mesh-llm.edgar-baumann.workers.dev";
 /**
  * Default model id on Bedrock. Elmo can override via BEDROCK_MODEL_ID.
  */
-const DEFAULT_MODEL_ID = "anthropic.claude-sonnet-4-5-20250929-v1:0";
+const DEFAULT_MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
 
 function optionalString(name: string, fallback: string): string {
   const value = process.env[name];
@@ -56,6 +56,21 @@ function parseMode(raw: string | undefined): "local" | "mcp" {
   return normalized === "mcp" ? "mcp" : "local";
 }
 
+function resolveBearerToken(): string | undefined {
+  const keys = [
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "BEDROCK_BEARER_TOKEN",
+    "BEDROCK_API_KEY"
+  ];
+  for (const key of keys) {
+    const value = process.env[key];
+    if (value && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
 export interface AppConfig {
   bedrock: {
     endpointBase: string;
@@ -73,6 +88,10 @@ export interface AppConfig {
     command?: string;
     args: string[];
   };
+  supabase: {
+    url?: string;
+    key?: string;
+  };
 }
 
 export function getConfig(): AppConfig {
@@ -87,7 +106,7 @@ export function getConfig(): AppConfig {
   return {
     bedrock: {
       endpointBase: optionalString("BEDROCK_ENDPOINT", DEFAULT_ENDPOINT_BASE),
-      bearerToken: process.env.AWS_BEARER_TOKEN_BEDROCK?.trim() || undefined,
+      bearerToken: resolveBearerToken(),
       modelId: optionalString("BEDROCK_MODEL_ID", DEFAULT_MODEL_ID),
       temperature: optionalNumber("BEDROCK_TEMPERATURE", 0),
       maxTokens: optionalNumber("BEDROCK_MAX_TOKENS", 1200)
@@ -100,6 +119,10 @@ export function getConfig(): AppConfig {
     mcp: {
       command: mcpCommand,
       args: parseJsonArray(mcpArgsRaw, "MESH_MCP_ARGS")
+    },
+    supabase: {
+      url: process.env.SUPABASE_URL?.trim() || undefined,
+      key: process.env.SUPABASE_KEY?.trim() || undefined
     }
   };
 }

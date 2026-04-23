@@ -1,8 +1,14 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { exec } from "node:child_process";
+import { promisify } from "node:util";
+
+const execAsync = promisify(exec);
 
 import { MeshCoreAdapter } from "./mesh-core-adapter.js";
+import { CacheManager } from "./cache-manager.js";
 import { ToolBackend, ToolDefinition } from "./tool-backend.js";
+import { AppConfig } from "./config.js";
 
 const SKIP_DIRS = new Set([".git", "node_modules", "dist"]);
 
@@ -57,8 +63,11 @@ async function collectFiles(start: string, limit: number): Promise<string[]> {
 
 export class LocalToolBackend implements ToolBackend {
   private readonly meshCore = new MeshCoreAdapter();
+  private readonly cache: CacheManager;
 
-  constructor(private readonly workspaceRoot: string) {}
+  constructor(private readonly workspaceRoot: string, config?: AppConfig) {
+    this.cache = new CacheManager(config ?? { agent: { workspaceRoot, maxSteps: 8, mode: "local" }, bedrock: { endpointBase: "", modelId: "", temperature: 0, maxTokens: 0 }, mcp: { args: [] }, supabase: {} });
+  }
 
   async listTools(): Promise<ToolDefinition[]> {
     return [
@@ -109,6 +118,29 @@ export class LocalToolBackend implements ToolBackend {
             path: { type: "string" }
           }
         }
+      },
+      {
+        name: "workspace.write_file",
+        description: "Write content to a file, creating or overwriting it. Automatically creates parent directories.",
+        inputSchema: {
+          type: "object",
+          required: ["path", "content"],
+          properties: {
+            path: { type: "string" },
+            content: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "workspace.run_command",
+        description: "Run a shell command in the workspace and return its stdout and stderr.",
+        inputSchema: {
+          type: "object",
+          required: ["command"],
+          properties: {
+            command: { type: "string" }
+          }
+        }
       }
     ];
   }
@@ -123,6 +155,10 @@ export class LocalToolBackend implements ToolBackend {
         return this.searchFiles(args);
       case "workspace.grep_content":
         return this.grepContent(args);
+      case "workspace.write_file":
+        return this.writeFile(args);
+      case "workspace.run_command":
+        return this.runCommand(args);
       default:
         throw new Error(`Unknown local tool: ${name}`);
     }
@@ -149,6 +185,7 @@ export class LocalToolBackend implements ToolBackend {
 
   private async readFile(args: Record<string, unknown>): Promise<unknown> {
     const requestedPath = String(args.path ?? "").trim();
+    const tier = String(args.tier ?? "medium").trim();
     if (!requestedPath) {
       throw new Error("workspace.read_file requires 'path'");
     }
@@ -163,16 +200,53 @@ export class LocalToolBackend implements ToolBackend {
       throw new Error(`Not a file: ${requestedPath}`);
     }
 
+    const mtimeMs = Math.floor(stat.mtimeMs);
+    const relativePath = toPosixRelative(this.workspaceRoot, absolutePath);
+
+    // Try cache first for the requested tier
+    const cached = await this.cache.getCapsule(relativePath, tier, mtimeMs);
+    if (cached) {
+      return {
+        ok: true,
+        path: relativePath,
+        bytes: stat.size,
+        tier,
+        capsule: cached.content,
+        source: "cache"
+      };
+    }
+
+    // Cache miss – read file and generate ALL tiers via mesh-core
     const raw = await fs.readFile(absolutePath, "utf8");
-    const summary = await this.meshCore.summarizeFile(requestedPath, raw);
+    const TIERS = ["low", "medium", "high"] as const;
+    let requestedContent = raw.slice(0, 12000); // fallback if mesh-core unavailable
+
+    if (this.meshCore.isAvailable) {
+      const results = await this.meshCore.summarizeAllTiers(relativePath, raw);
+      // Persist all tiers to L1 + L2 cache in parallel
+      await Promise.all(
+        TIERS.map((t) => {
+          const content = results[t] ?? "";
+          if (t === tier) requestedContent = content;
+          return this.cache.setCapsule(relativePath, t, content, mtimeMs);
+        })
+      );
+    } else {
+      // mesh-core not available – cache the raw content for all tiers
+      await Promise.all(
+        TIERS.map((t) =>
+          this.cache.setCapsule(relativePath, t, raw.slice(0, 12000), mtimeMs)
+        )
+      );
+    }
 
     return {
       ok: true,
-      path: toPosixRelative(this.workspaceRoot, absolutePath),
-      bytes: Buffer.byteLength(raw, "utf8"),
-      content: raw.slice(0, 12000),
-      truncated: raw.length > 12000,
-      mesh: summary
+      path: relativePath,
+      bytes: stat.size,
+      tier,
+      capsule: requestedContent,
+      source: "generated"
     };
   }
 
@@ -251,5 +325,56 @@ export class LocalToolBackend implements ToolBackend {
       count: matches.length,
       matches
     };
+  }
+
+  private async writeFile(args: Record<string, unknown>): Promise<unknown> {
+    const requestedPath = String(args.path ?? "").trim();
+    if (!requestedPath) {
+      throw new Error("workspace.write_file requires 'path'");
+    }
+
+    const content = typeof args.content === "string" ? args.content : String(args.content ?? "");
+    const absolutePath = ensureInsideRoot(this.workspaceRoot, requestedPath);
+
+    await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+    await fs.writeFile(absolutePath, content, "utf8");
+
+    return {
+      ok: true,
+      path: toPosixRelative(this.workspaceRoot, absolutePath),
+      bytesWritten: Buffer.byteLength(content, "utf8")
+    };
+  }
+
+  private async runCommand(args: Record<string, unknown>): Promise<unknown> {
+    const command = String(args.command ?? "").trim();
+    if (!command) {
+      throw new Error("workspace.run_command requires 'command'");
+    }
+
+    try {
+      const { stdout, stderr } = await execAsync(command, {
+        cwd: this.workspaceRoot,
+        maxBuffer: 5 * 1024 * 1024
+      });
+
+      const trimOutput = (str: string) => str.length > 15000 ? str.slice(0, 15000) + "\n...[TRUNCATED]" : str;
+
+      return {
+        ok: true,
+        command,
+        stdout: trimOutput(stdout),
+        stderr: trimOutput(stderr)
+      };
+    } catch (error: any) {
+      const trimOutput = (str: string) => str?.length > 15000 ? str.slice(0, 15000) + "\n...[TRUNCATED]" : str;
+      return {
+        ok: false,
+        command,
+        exitCode: error.code ?? 1,
+        stdout: trimOutput(error.stdout || ""),
+        stderr: trimOutput(error.stderr || String(error))
+      };
+    }
   }
 }

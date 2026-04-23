@@ -25,7 +25,8 @@ Interactive:
 mesh-agent
 ```
 
-Type `exit` to quit.
+Type `exit` to quit.  
+Use `/model` to show current model and `/model <bedrock-model-id>` to switch live.
 
 ## How it works
 
@@ -53,6 +54,7 @@ See `.env.example`. Common overrides:
 | `BEDROCK_MODEL_ID`    | Pick a different Bedrock model.            |
 | `BEDROCK_ENDPOINT`    | Point at your own proxy or Bedrock direct. |
 | `AWS_BEARER_TOKEN_BEDROCK` | Required for BYOK direct-to-Bedrock.  |
+| `BEDROCK_BEARER_TOKEN` / `BEDROCK_API_KEY` | Alias to pass the same bearer token. |
 | `BEDROCK_MAX_TOKENS`  | Cap per response.                          |
 | `WORKSPACE_ROOT`      | Override working dir for local tools.      |
 

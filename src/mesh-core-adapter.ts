@@ -71,6 +71,36 @@ export class MeshCoreAdapter {
     return this.safeSummarizeFile(filePath, text);
   }
 
+  async summarizeAllTiers(filePath: string, text: string): Promise<Record<"low" | "medium" | "high", string>> {
+    const content = String(text ?? "");
+    const fallback = content.slice(0, 12000);
+
+    if (!this.module || typeof this.module.buildWorkspaceFileRecord !== "function" || typeof this.module.buildWorkspaceFileView !== "function") {
+      return { low: fallback, medium: fallback, high: fallback };
+    }
+
+    try {
+      const record = await this.module.buildWorkspaceFileRecord(filePath, content, {
+        recordMode: "initial",
+        defaultCapsuleTier: "medium"
+      });
+
+      const [low, medium, high] = await Promise.all([
+        this.module.buildWorkspaceFileView(record, "capsule", { tier: "low" }),
+        this.module.buildWorkspaceFileView(record, "capsule", { tier: "medium" }),
+        this.module.buildWorkspaceFileView(record, "capsule", { tier: "high" })
+      ]);
+
+      return {
+        low: String(low.content ?? "").slice(0, 6000),
+        medium: String(medium.content ?? "").slice(0, 12000),
+        high: String(high.content ?? "").slice(0, 24000)
+      };
+    } catch {
+      return { low: fallback, medium: fallback, high: fallback };
+    }
+  }
+
   private async safeSummarizeFile(filePath: string, text: string): Promise<MeshFileSummary> {
     const content = String(text ?? "");
     const fallbackTokens = Math.max(1, Math.ceil(Buffer.byteLength(content, "utf8") / 4));

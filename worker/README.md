@@ -40,6 +40,8 @@ Request body is forwarded to `bedrock-runtime.<region>.amazonaws.com` as-is.
 Set `ALLOWED_MODELS` in `wrangler.toml` to restrict which Bedrock models can be called.
 Leave empty to allow everything.
 
+For Anthropic on Bedrock, prefer inference-profile ids (for example `us.anthropic.claude-sonnet-4-5-20250929-v1:0`) instead of bare model ids, otherwise Bedrock can return an on-demand throughput validation error.
+
 ## Rotating the Bedrock key
 
 ```bash

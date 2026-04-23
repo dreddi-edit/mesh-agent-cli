@@ -14,7 +14,7 @@
     "url": "https://github.com/dreddi-edit/mesh-agent-cli/issues"
   },
   "bin": {
-    "mesh-agent": "dist/index.js"
+    "mesh": "dist/index.js"
   },
   "files": [
     "dist",
@@ -35,7 +35,11 @@
     "node": ">=20.10.0"
   },
   "dependencies": {
-    "dotenv": "^16.4.7"
+    "@edgarelmo/mesh-agent-cli": "^0.2.8",
+    "@supabase/supabase-js": "^2.104.1",
+    "dotenv": "^16.4.7",
+    "ora": "^9.4.0",
+    "picocolors": "^1.1.1"
   },
   "devDependencies": {
     "@types/node": "^22.13.4",
