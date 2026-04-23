@@ -1,8 +1,0 @@
-{
-  "name": "swe-case-query-string-skip-empty",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "test": "node --test test/*.test.js"
-  }
-}

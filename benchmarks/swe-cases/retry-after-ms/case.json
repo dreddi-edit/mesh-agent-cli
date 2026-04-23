@@ -1,6 +1,0 @@
-{
-  "id": "retry-after-ms",
-  "title": "parseRetryAfterMs should convert seconds to milliseconds",
-  "issue": "parseRetryAfterMs currently returns retry-after values in seconds instead of milliseconds. Fix the conversion while keeping invalid values at 0, then verify the tests pass.",
-  "verifyCommand": "node --test test/*.test.js"
-}

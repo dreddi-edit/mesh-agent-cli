@@ -1,6 +1,0 @@
-{
-  "id": "open-items-filter",
-  "title": "getOpenItems should exclude done items",
-  "issue": "getOpenItems currently returns completed items along with open ones. Fix the filter logic so only non-done items remain, then verify the tests pass.",
-  "verifyCommand": "node --test test/*.test.js"
-}

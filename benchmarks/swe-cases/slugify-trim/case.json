@@ -1,6 +1,0 @@
-{
-  "id": "slugify-trim",
-  "title": "slugifyTitle should collapse repeated separators",
-  "issue": "slugifyTitle currently leaves repeated dashes in the output slug for titles with extra spaces. Fix it so the slug has single separators only, then verify the tests pass.",
-  "verifyCommand": "node --test test/*.test.js"
-}

@@ -1,6 +1,0 @@
-{
-  "id": "query-string-skip-empty",
-  "title": "buildQueryString should skip empty values",
-  "issue": "buildQueryString currently serializes empty string values into the query string. Update it so empty strings, null, and undefined are omitted while preserving normal values, then verify the tests pass.",
-  "verifyCommand": "node --test test/*.test.js"
-}
