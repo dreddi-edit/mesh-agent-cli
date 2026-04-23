@@ -521,11 +521,11 @@ export class AgentLoop {
     const hr = "═".repeat(width);
     
     const banner = [
-      " __  __ _____ ____  _   _           ╲          ╱",
-      "|  \\/  | ____/ ___|| | | |           ╲        ╱ ",
-      "| |\\/| |  _| \\___ \\| |_| |            ⟨      ⟩  ",
-      "| |  | | |___ ___) |  _  |           ╱        ╲ ",
-      "|_|  |_|_____|____/|_| |_|          ╱          ╲",
+      " __  __ _____ ____  _   _             ▟          ▙",
+      "|  \\/  | ____/ ___|| | | |            ▟            ▙ ",
+      "| |\\/| |  _| \\___ \\| |_| |           █              █  ",
+      "| |  | | |___ ___) |  _  |            ▜            ▛ ",
+      "|_|  |_|_____|____/|_| |_|             ▜          ▛",
       ""
     ];
 
@@ -850,11 +850,14 @@ export class AgentLoop {
     const prompt = new Select({
       name: "model",
       message: "Select an AI model",
-      choices
+      choices,
+      stdin: input,
+      stdout: output
     });
 
     try {
       const pickedValue = await prompt.run();
+      input.resume(); // Ensure stream stays alive
       const picked = MODEL_OPTIONS.find((o) => o.value === pickedValue)!;
       
       this.currentModelId = picked.value;
@@ -862,10 +865,13 @@ export class AgentLoop {
 
       const confirmPrompt = new Confirm({
         name: "save",
-        message: "Save as default model?"
+        message: "Save as default model?",
+        stdin: input,
+        stdout: output
       });
 
       const shouldSave = await confirmPrompt.run();
+      input.resume();
       if (shouldSave) {
         const current = await loadUserSettings();
         await saveUserSettings({ ...current, modelId: picked.value });
