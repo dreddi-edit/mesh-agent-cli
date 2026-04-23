@@ -7,7 +7,7 @@ import ora from "ora";
 import boxen from "boxen";
 import pkg from "enquirer";
 type EnquirerCtor = new (options: Record<string, unknown>) => { run(): Promise<unknown> };
-const { Select, Confirm } = pkg as unknown as { Select: EnquirerCtor; Confirm: EnquirerCtor };
+const { Select, Confirm, Input } = pkg as unknown as { Select: EnquirerCtor; Confirm: EnquirerCtor; Input: EnquirerCtor };
 
 import { AppConfig, loadUserSettings, saveUserSettings, shortPathLabel, UserSettings } from "./config.js";
 import {
@@ -680,50 +680,95 @@ export class AgentLoop {
     output.write(this.themeColor("═".repeat(40) + "\n"));
     
     const current = await loadUserSettings();
-    const modelRaw = (
-      await rl.question(
-        `Default Model ID [${pc.dim(current.modelId)}] (alias: sonnet4.6): `
-      )
-    ).trim();
-    const cloudRaw = (
-      await rl.question(
-        `Enable Cloud (L2) sync? [${pc.dim(current.enableCloudCache ? "y" : "n")}]: `
-      )
-    ).trim().toLowerCase();
-    const themeRaw = (
-      await rl.question(
-        `Theme Color [${pc.dim(current.themeColor)}] (cyan/magenta/yellow/green/blue/white): `
-      )
-    ).trim();
-    const customKeyRaw = (
-      await rl.question(
-        `Custom API Key (empty = keep, '-' = clear) [${pc.dim(current.customApiKey ? "set" : "none")}]: `
-      )
-    ).trim();
 
-    const modelId = normalizeModelInput(modelRaw || current.modelId);
-    const cloudCache =
-      cloudRaw === ""
-        ? current.enableCloudCache
-        : cloudRaw === "y" || cloudRaw === "yes" || cloudRaw === "true" || cloudRaw === "1";
-    const theme = ALLOWED_THEMES.has(themeRaw) ? themeRaw : current.themeColor;
-    const customKey =
-      customKeyRaw === ""
-        ? current.customApiKey
-        : customKeyRaw === "-"
-          ? undefined
-          : customKeyRaw;
+    try {
+      // 1. Default Model
+      const modelChoices = MODEL_OPTIONS.map(opt => ({
+        name: opt.value,
+        message: `${pc.bold(opt.label)} ${pc.dim(opt.note)}`,
+        hint: opt.value === current.modelId ? pc.green("(current)") : pc.dim(opt.value)
+      }));
 
-    const newSettings: UserSettings = {
-      modelId,
-      enableCloudCache: cloudCache,
-      themeColor: theme,
-      customApiKey: customKey
-    };
+      const modelPrompt = new Select({
+        name: "modelId",
+        message: "Select Default Model",
+        choices: modelChoices,
+        initial: MODEL_OPTIONS.findIndex(o => o.value === current.modelId),
+        stdin: input,
+        stdout: output
+      });
+      const modelId = await modelPrompt.run() as string;
+      (rl as any).resume();
 
-    await saveUserSettings(newSettings);
-    output.write(pc.green("\n✔ Settings saved! Restart mesh to apply changes.\n"));
-    output.write(this.themeColor("═".repeat(40) + "\n"));
+      // 2. Cloud Sync
+      const cloudPrompt = new Confirm({
+        name: "enableCloudCache",
+        message: "Enable Cloud (L2) Sync?",
+        initial: current.enableCloudCache,
+        stdin: input,
+        stdout: output
+      });
+      const enableCloudCache = await cloudPrompt.run() as boolean;
+      (rl as any).resume();
+
+      // 3. Theme Color
+      const themeChoices = Array.from(ALLOWED_THEMES).map(t => ({
+        name: t,
+        message: t,
+        hint: t === current.themeColor ? pc.green("(current)") : ""
+      }));
+
+      const themePrompt = new Select({
+        name: "themeColor",
+        message: "Select Theme Color",
+        choices: themeChoices,
+        initial: Array.from(ALLOWED_THEMES).indexOf(current.themeColor),
+        stdin: input,
+        stdout: output
+      });
+      const themeColor = await themePrompt.run() as string;
+      (rl as any).resume();
+
+      // 4. Custom API Key
+      const keyPrompt = new Input({
+        name: "customApiKey",
+        message: "Custom API Key (Enter to keep current, '-' to clear)",
+        initial: "",
+        stdin: input,
+        stdout: output
+      });
+      const keyRaw = await keyPrompt.run() as string;
+      (rl as any).resume();
+      const customApiKey = keyRaw === "" ? current.customApiKey : (keyRaw === "-" ? undefined : keyRaw);
+
+      const newSettings: UserSettings = {
+        modelId,
+        enableCloudCache,
+        themeColor,
+        customApiKey
+      };
+
+      await saveUserSettings(newSettings);
+      
+      // Apply changes to runtime state
+      this.currentModelId = modelId;
+      const colorFn = pc[themeColor as keyof typeof pc];
+      if (typeof colorFn === "function") {
+        this.themeColor = colorFn as (text: string) => string;
+      }
+      this.config.agent.enableCloudCache = enableCloudCache;
+      this.config.agent.themeColor = themeColor;
+
+      output.write(pc.green("\n✔ Settings saved and applied!\n"));
+      output.write(this.themeColor("═".repeat(40) + "\n"));
+      
+      // Crucial: Restore keypress listeners for main CLI
+      this.setupGhostText(rl, input, output);
+    } catch {
+      (rl as any).resume();
+      output.write(pc.dim("\nSetup cancelled.\n"));
+      this.setupGhostText(rl, input, output);
+    }
   }
   private async checkInit(): Promise<void> {
     const meshDir = path.join(this.config.agent.workspaceRoot, ".mesh");
@@ -1037,9 +1082,12 @@ export class AgentLoop {
 
     try {
       const pickedValue = await prompt.run();
-      this.setupGhostText(rl, input, output);
-      const picked = MODEL_OPTIONS.find((o) => o.value === pickedValue)!;
       
+      // Restore CLI state
+      (rl as any).resume();
+      this.setupGhostText(rl, input, output);
+      
+      const picked = MODEL_OPTIONS.find((o) => o.value === pickedValue)!;
       this.currentModelId = picked.value;
       output.write(`\nmodel switched: ${this.themeColor(picked.label)}\n`);
 
@@ -1051,13 +1099,19 @@ export class AgentLoop {
       });
 
       const shouldSave = await confirmPrompt.run();
+      
+      // Restore CLI state again
+      (rl as any).resume();
       this.setupGhostText(rl, input, output);
+
       if (shouldSave) {
         const current = await loadUserSettings();
         await saveUserSettings({ ...current, modelId: picked.value });
         output.write(pc.green("Default model saved.\n"));
       }
     } catch {
+      (rl as any).resume();
+      this.setupGhostText(rl, input, output);
       output.write(pc.dim("\nSelection cancelled.\n"));
     }
   }
