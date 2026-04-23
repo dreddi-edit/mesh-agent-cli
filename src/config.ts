@@ -2,9 +2,6 @@ import { config as loadDotEnv } from "dotenv";
 
 loadDotEnv();
 
-const TEST_BEDROCK_TOKEN =
-  "ABSKQmVkcm9ja0FQSUtleS0zbzE3LWF0LTk2MDU4Mzk3MzgyNToxRkdnM2dKaGJ2U1grSkdVWHdEWG5ZZGNaMUdIT2ZxSUNPTXEvYXZCZnBYWTBFNmEzYUdtTXlsck4zTT0=";
-
 function required(name: string): string {
   const value = process.env[name];
   if (!value || !value.trim()) {
@@ -60,7 +57,7 @@ export function getConfig(): AppConfig {
   return {
     bedrock: {
       endpoint: required("BEDROCK_ENDPOINT"),
-      bearerToken: process.env.AWS_BEARER_TOKEN_BEDROCK || TEST_BEDROCK_TOKEN,
+      bearerToken: process.env.AWS_BEARER_TOKEN_BEDROCK,
       modelId: process.env.BEDROCK_MODEL_ID,
       temperature: optionalNumber("BEDROCK_TEMPERATURE", 0),
       maxTokens: optionalNumber("BEDROCK_MAX_TOKENS", 1200)

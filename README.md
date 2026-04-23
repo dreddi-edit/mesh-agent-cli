@@ -38,12 +38,6 @@ Setze stattdessen `BEDROCK_ENDPOINT` auf einen zentralen Proxy-Service:
 2. Proxy haelt `AWS_BEARER_TOKEN_BEDROCK` serverseitig und setzt den Header.
 3. Optional: Proxy mit User-Auth, Rate-Limits, Audit-Logs.
 
-## Aktueller Testmodus
-
-Im Code ist derzeit ein fester Test-Token als Fallback hinterlegt
-(`src/config.ts`), damit alle User ohne lokale Token-Config testen koennen.
-Vor produktivem Einsatz entfernen und auf Proxy umstellen.
-
 ## Start
 
 Interaktiv:
