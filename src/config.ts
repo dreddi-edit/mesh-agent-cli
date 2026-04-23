@@ -87,6 +87,14 @@ export interface UserSettings {
   enableCloudCache: boolean;
   customApiKey?: string;
   customEndpoint?: string;
+  voice: VoiceSettings;
+}
+
+export interface VoiceSettings {
+  configured: boolean;
+  language: string;
+  speed: number;
+  voice: string;
 }
 
 export interface AppConfig {
@@ -103,6 +111,7 @@ export interface AppConfig {
     workspaceRoot: string;
     enableCloudCache: boolean;
     themeColor: string;
+    voice: VoiceSettings;
   };
   mcp: {
     command?: string;
@@ -115,6 +124,22 @@ export interface AppConfig {
 }
 
 const SETTINGS_PATH = path.join(os.homedir(), ".config", "mesh", "settings.json");
+const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
+  configured: false,
+  language: "auto",
+  speed: 260,
+  voice: "auto"
+};
+
+function normalizeVoiceSettings(value?: Partial<VoiceSettings> | null): VoiceSettings {
+  const speed = Number(value?.speed);
+  return {
+    configured: value?.configured === true,
+    language: value?.language?.trim() || DEFAULT_VOICE_SETTINGS.language,
+    speed: Number.isFinite(speed) ? speed : DEFAULT_VOICE_SETTINGS.speed,
+    voice: value?.voice?.trim() || DEFAULT_VOICE_SETTINGS.voice
+  };
+}
 
 export async function loadUserSettings(): Promise<UserSettings> {
   try {
@@ -130,13 +155,15 @@ export async function loadUserSettings(): Promise<UserSettings> {
       enableCloudCache:
         typeof parsed.enableCloudCache === "boolean" ? parsed.enableCloudCache : true,
       customApiKey: parsed.customApiKey,
-      customEndpoint: parsed.customEndpoint
+      customEndpoint: parsed.customEndpoint,
+      voice: normalizeVoiceSettings(parsed.voice)
     };
   } catch {
     return {
       modelId: DEFAULT_MODEL_ID,
       themeColor: "cyan",
-      enableCloudCache: true
+      enableCloudCache: true,
+      voice: DEFAULT_VOICE_SETTINGS
     };
   }
 }
@@ -181,7 +208,8 @@ export async function loadConfig(): Promise<AppConfig> {
       mode,
       workspaceRoot,
       enableCloudCache: localSettings.enableCloudCache ?? userSettings.enableCloudCache,
-      themeColor: localSettings.themeColor || userSettings.themeColor
+      themeColor: localSettings.themeColor || userSettings.themeColor,
+      voice: normalizeVoiceSettings(localSettings.voice ?? userSettings.voice)
     },
     mcp: {
       command: mcpCommand,

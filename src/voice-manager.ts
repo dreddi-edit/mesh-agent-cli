@@ -14,11 +14,20 @@ export interface VoiceConfig {
   whisperModel: string;
   piperPath: string;
   piperModel: string;
+  voiceLanguage: string;
+  voiceSpeed: number;
+  voiceName: string;
 }
 
 export interface VoiceTranscriptionResult {
   text: string;
   language: string;
+}
+
+export interface SystemVoiceOption {
+  name: string;
+  locale: string;
+  sample: string;
 }
 
 const MACOS_SAY_RATE = "260";
@@ -38,6 +47,16 @@ export class VoiceManager {
   constructor(private config: Partial<VoiceConfig> = {}) {
     this.config.whisperPath = config.whisperPath || "whisper-cpp";
     this.config.piperPath = config.piperPath || "piper";
+    this.config.voiceLanguage = config.voiceLanguage || "auto";
+    this.config.voiceSpeed = config.voiceSpeed || Number(MACOS_SAY_RATE);
+    this.config.voiceName = config.voiceName || "auto";
+  }
+
+  updateConfig(config: Partial<VoiceConfig>): void {
+    this.config = {
+      ...this.config,
+      ...config
+    };
   }
 
   private resolveBinary(command: string): string {
@@ -109,6 +128,27 @@ export class VoiceManager {
 
   hasWhisperModel(): boolean {
     return Boolean(this.resolveWhisperModel());
+  }
+
+  listSystemVoices(): SystemVoiceOption[] {
+    if (process.platform !== "darwin") {
+      return [];
+    }
+
+    try {
+      const raw = execFileSync("say", ["-v", "?"], { encoding: "utf8" });
+      return raw
+        .split("\n")
+        .map((line) => line.match(/^(.*?)\s+([a-z]{2}(?:_[A-Z0-9]+)?)\s+#\s*(.*)$/))
+        .filter((match): match is RegExpMatchArray => Boolean(match))
+        .map((match) => ({
+          name: match[1].trim(),
+          locale: match[2].trim(),
+          sample: match[3].trim()
+        }));
+    } catch {
+      return [];
+    }
   }
 
   async installWhisperModel(targetPath = this.config.whisperModel): Promise<string> {
@@ -278,6 +318,10 @@ export class VoiceManager {
   }
 
   private resolveSayVoice(language?: string): string | undefined {
+    const configuredVoice = this.config.voiceName?.trim();
+    if (configuredVoice && configuredVoice !== "auto") {
+      return configuredVoice;
+    }
     const normalized = this.normalizeLanguage(language);
     const baseLanguage = normalized.split("-")[0];
     return MACOS_VOICE_BY_LANGUAGE[normalized] || MACOS_VOICE_BY_LANGUAGE[baseLanguage];
@@ -285,9 +329,10 @@ export class VoiceManager {
 
   private speakWithMacOsSay(speechText: string, language?: string): void {
     const voice = this.resolveSayVoice(language);
+    const speed = String(this.config.voiceSpeed || Number(MACOS_SAY_RATE));
     const args = voice
-      ? ["-v", voice, "-r", MACOS_SAY_RATE, speechText]
-      : ["-r", MACOS_SAY_RATE, speechText];
+      ? ["-v", voice, "-r", speed, speechText]
+      : ["-r", speed, speechText];
     execFileSync("say", args, { stdio: "ignore" });
   }
 
@@ -300,9 +345,12 @@ export class VoiceManager {
       return;
     }
 
-    const normalizedLanguage = this.normalizeLanguage(language);
+    const configuredLanguage = this.normalizeLanguage(this.config.voiceLanguage);
+    const normalizedLanguage = configuredLanguage === "auto"
+      ? this.normalizeLanguage(language)
+      : configuredLanguage;
     const piperModel = this.resolvePiperModel();
-    const shouldUsePiper = Boolean(piperModel) && normalizedLanguage.startsWith("en");
+    const shouldUsePiper = process.platform !== "darwin" && Boolean(piperModel) && normalizedLanguage.startsWith("en");
 
     if (!shouldUsePiper) {
       if (process.platform === "darwin") {
