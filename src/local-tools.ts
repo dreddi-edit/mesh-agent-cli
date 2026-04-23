@@ -159,6 +159,77 @@ export class LocalToolBackend implements ToolBackend {
           }
         }
       },
+      {
+        name: "workspace.read_file_lines",
+        description: "Read specific lines from a file.",
+        inputSchema: {
+          type: "object",
+          required: ["path", "startLine", "endLine"],
+          properties: {
+            path: { type: "string" },
+            startLine: { type: "number" },
+            endLine: { type: "number" }
+          }
+        }
+      },
+      {
+        name: "workspace.list_directory",
+        description: "List contents of a specific directory (not recursive).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            path: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "workspace.get_file_info",
+        description: "Get detailed information about a file (size, mtime, etc).",
+        inputSchema: {
+          type: "object",
+          required: ["path"],
+          properties: {
+            path: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "workspace.move_file",
+        description: "Move or rename a file.",
+        inputSchema: {
+          type: "object",
+          required: ["sourcePath", "destinationPath"],
+          properties: {
+            sourcePath: { type: "string" },
+            destinationPath: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "workspace.delete_file",
+        description: "Delete a file from the workspace.",
+        inputSchema: {
+          type: "object",
+          required: ["path"],
+          properties: {
+            path: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "workspace.patch_file",
+        description: "Replace a specific block of text in a file.",
+        inputSchema: {
+          type: "object",
+          required: ["path", "search", "replace"],
+          properties: {
+            path: { type: "string" },
+            search: { type: "string" },
+            replace: { type: "string" }
+          }
+        }
+      },
+      { name: "workspace.git_status", description: "Get current git status (branch, changed files)." },
       { name: "workspace.check_sync", description: "Verify cloud (L2) synchronization status" },
       { name: "workspace.index_everything", description: "Explicitly trigger full workspace indexing (generate all capsules)" }
     ];
@@ -186,6 +257,20 @@ export class LocalToolBackend implements ToolBackend {
         return this.getIndexStatus();
       case "workspace.read_multiple_files":
         return this.readMultipleFiles(args);
+      case "workspace.read_file_lines":
+        return this.readFileLines(args);
+      case "workspace.list_directory":
+        return this.listDirectory(args);
+      case "workspace.get_file_info":
+        return this.getFileInfo(args);
+      case "workspace.move_file":
+        return this.moveFile(args);
+      case "workspace.delete_file":
+        return this.deleteFile(args);
+      case "workspace.patch_file":
+        return this.patchFile(args);
+      case "workspace.git_status":
+        return this.getGitStatus();
       default:
         throw new Error(`Unknown local tool: ${name}`);
     }
@@ -313,6 +398,121 @@ export class LocalToolBackend implements ToolBackend {
       count: matches.length,
       matches
     };
+  }
+
+  private async readFileLines(args: Record<string, unknown>): Promise<unknown> {
+    const requestedPath = String(args.path ?? "").trim();
+    const startLine = Math.max(1, Number(args.startLine) || 1);
+    const endLine = Number(args.endLine);
+    if (!requestedPath || !endLine) throw new Error("workspace.read_file_lines requires path and endLine");
+
+    const absolutePath = ensureInsideRoot(this.workspaceRoot, requestedPath);
+    const raw = await fs.readFile(absolutePath, "utf8");
+    const lines = raw.split(/\r?\n/g);
+    const slice = lines.slice(startLine - 1, endLine);
+
+    return {
+      ok: true,
+      path: toPosixRelative(this.workspaceRoot, absolutePath),
+      startLine,
+      endLine,
+      totalLines: lines.length,
+      content: slice.join("\n")
+    };
+  }
+
+  private async listDirectory(args: Record<string, unknown>): Promise<unknown> {
+    const requestedPath = typeof args.path === "string" ? args.path : ".";
+    const base = ensureInsideRoot(this.workspaceRoot, requestedPath);
+    const entries = await fs.readdir(base, { withFileTypes: true });
+
+    return {
+      ok: true,
+      path: requestedPath,
+      entries: entries.map(e => ({
+        name: e.name,
+        type: e.isDirectory() ? "directory" : "file"
+      })).sort((a, b) => {
+        if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      })
+    };
+  }
+
+  private async getFileInfo(args: Record<string, unknown>): Promise<unknown> {
+    const requestedPath = String(args.path ?? "").trim();
+    const absolutePath = ensureInsideRoot(this.workspaceRoot, requestedPath);
+    const stat = await fs.stat(absolutePath);
+    return {
+      ok: true,
+      path: toPosixRelative(this.workspaceRoot, absolutePath),
+      size: stat.size,
+      mtime: stat.mtime.toISOString(),
+      isDirectory: stat.isDirectory(),
+      isFile: stat.isFile()
+    };
+  }
+
+  private async moveFile(args: Record<string, unknown>): Promise<unknown> {
+    const src = String(args.sourcePath ?? "").trim();
+    const dst = String(args.destinationPath ?? "").trim();
+    if (!src || !dst) throw new Error("move_file requires sourcePath and destinationPath");
+
+    const absSrc = ensureInsideRoot(this.workspaceRoot, src);
+    const absDst = ensureInsideRoot(this.workspaceRoot, dst);
+
+    await fs.rename(absSrc, absDst);
+    // Invalidate cache for both
+    await this.cache.deleteCapsule(toPosixRelative(this.workspaceRoot, absSrc), "low");
+    await this.cache.deleteCapsule(toPosixRelative(this.workspaceRoot, absSrc), "medium");
+    await this.cache.deleteCapsule(toPosixRelative(this.workspaceRoot, absSrc), "high");
+
+    return { ok: true, source: src, destination: dst };
+  }
+
+  private async deleteFile(args: Record<string, unknown>): Promise<unknown> {
+    const requestedPath = String(args.path ?? "").trim();
+    const absolutePath = ensureInsideRoot(this.workspaceRoot, requestedPath);
+    await fs.unlink(absolutePath);
+    const rel = toPosixRelative(this.workspaceRoot, absolutePath);
+    await this.cache.deleteCapsule(rel, "low");
+    await this.cache.deleteCapsule(rel, "medium");
+    await this.cache.deleteCapsule(rel, "high");
+    return { ok: true, path: rel };
+  }
+
+  private async patchFile(args: Record<string, unknown>): Promise<unknown> {
+    const requestedPath = String(args.path ?? "").trim();
+    const search = String(args.search ?? "");
+    const replace = String(args.replace ?? "");
+    if (!requestedPath || !search) throw new Error("patch_file requires path and search string");
+
+    const absolutePath = ensureInsideRoot(this.workspaceRoot, requestedPath);
+    const content = await fs.readFile(absolutePath, "utf8");
+    if (!content.includes(search)) {
+      throw new Error(`Search string not found in ${requestedPath}`);
+    }
+
+    const newContent = content.replace(search, replace);
+    await fs.writeFile(absolutePath, newContent, "utf8");
+
+    // Invalidate cache
+    const rel = toPosixRelative(this.workspaceRoot, absolutePath);
+    await this.cache.deleteCapsule(rel, "low");
+    await this.cache.deleteCapsule(rel, "medium");
+    await this.cache.deleteCapsule(rel, "high");
+
+    return { ok: true, path: rel, patched: true };
+  }
+
+  private async getGitStatus(): Promise<unknown> {
+    try {
+      const { stdout } = await execAsync("git status --short", { cwd: this.workspaceRoot });
+      const { stdout: branch } = await execAsync("git branch --show-current", { cwd: this.workspaceRoot });
+      return { ok: true, branch: branch.trim(), status: stdout.trim() };
+    } catch (err) {
+      return { ok: false, error: "Not a git repository or git not installed" };
+    }
   }
 
   private async grepContent(args: Record<string, unknown>): Promise<unknown> {
