@@ -287,6 +287,7 @@ export class AgentLoop {
     let lastGhostText = "";
     input.on("keypress", (_, key) => {
       if (!this.useAnsi || !key) return;
+      if (key.name === "return" || key.name === "enter") return;
       
       // Short delay to let readline update its internal state
       setTimeout(() => {
@@ -857,7 +858,8 @@ export class AgentLoop {
 
     try {
       const pickedValue = await prompt.run();
-      input.resume(); // Ensure stream stays alive
+      if (input.isTTY) input.setRawMode(true);
+      input.resume();
       const picked = MODEL_OPTIONS.find((o) => o.value === pickedValue)!;
       
       this.currentModelId = picked.value;
@@ -871,6 +873,7 @@ export class AgentLoop {
       });
 
       const shouldSave = await confirmPrompt.run();
+      if (input.isTTY) input.setRawMode(true);
       input.resume();
       if (shouldSave) {
         const current = await loadUserSettings();
