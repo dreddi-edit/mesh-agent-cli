@@ -720,7 +720,6 @@ export class AgentLoop {
       };
       await fs.writeFile(workspaceMetaPath, JSON.stringify(meta, null, 2));
     }
-    }
   }
 
   private async runIndexing(): Promise<void> {
