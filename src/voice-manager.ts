@@ -59,6 +59,7 @@ export class VoiceManager {
 
     return new Promise((resolve, reject) => {
       const proc = spawn("ffmpeg", args);
+      proc.on("error", (err) => reject(new Error(`ffmpeg spawn failed: ${err.message}`)));
       proc.on("close", (code) => {
         if (code === 0) resolve(tempFile);
         else reject(new Error(`ffmpeg failed with code ${code}`));
@@ -83,6 +84,7 @@ export class VoiceManager {
     return new Promise((resolve, reject) => {
       let output = "";
       const proc = spawn(this.config.whisperPath!, args);
+      proc.on("error", (err) => reject(new Error(`whisper-cpp spawn failed: ${err.message}`)));
       proc.stdout.on("data", (data) => (output += data.toString()));
       proc.on("close", (code) => {
         if (code === 0) resolve(output.trim());
@@ -114,13 +116,16 @@ export class VoiceManager {
 
     return new Promise((resolve, reject) => {
       const proc = spawn(this.config.piperPath!, args);
+      proc.on("error", (err) => reject(new Error(`piper spawn failed: ${err.message}`)));
       proc.stdin.write(text);
       proc.stdin.end();
       
       proc.on("close", (code) => {
         if (code === 0) {
           // Play the file
-          spawn("afplay", [tempAudio]).on("close", () => {
+          const play = spawn("afplay", [tempAudio]);
+          play.on("error", (err) => reject(new Error(`afplay spawn failed: ${err.message}`)));
+          play.on("close", () => {
              fs.unlink(tempAudio).catch(() => {});
              resolve();
           });
