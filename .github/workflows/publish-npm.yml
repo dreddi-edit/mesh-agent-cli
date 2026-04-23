@@ -64,6 +64,15 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN || secrets.NPM }}
 
+      - name: Update Homebrew Tap
+        if: steps.version_check.outputs.exists == 'false'
+        run: |
+          # The package might take a few seconds to become available on NPM
+          sleep 10 
+          ./scripts/update-brew.sh
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_GITHUB_TOKEN }}
+
       - name: Already published
         if: steps.version_check.outputs.exists == 'true'
         run: echo "No publish needed for this version."
