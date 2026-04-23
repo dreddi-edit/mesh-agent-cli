@@ -6,3 +6,4 @@ dist
 supabase/
 .mesh/
 benchmarks/
+mesh-core/lib
