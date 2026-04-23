@@ -21,7 +21,9 @@ import {
   BedrockLlmClient,
   ConverseMessage,
   ContentBlock,
-  ToolSpec
+  ToolSpec,
+  LlmResponse,
+  ConverseUsage
 } from "./llm-client.js";
 import { buildLlmSafeMeshContext } from "./mesh-gateway.js";
 import { PersistedSessionCapsule, SessionCapsuleStore } from "./session-capsule-store.js";
@@ -49,6 +51,7 @@ interface RunHooks {
   onToolStart?: (wireName: string, input: Record<string, unknown>) => void;
   onToolEnd?: (wireName: string, ok: boolean, resultPreview: string) => void;
   askPermission?: (msg: string) => Promise<boolean>;
+  onDelta?: (delta: string) => void;
 }
 
 interface SessionCapsule extends PersistedSessionCapsule {}
@@ -419,6 +422,7 @@ export class AgentLoop {
       try {
         const spinner = this.useAnsi ? ora({ text: "Thinking...", color: "cyan", stream: output }).start() : undefined;
         let answer: string | undefined;
+        let currentSentence = "";
         try {
           answer = await this.runSingleTurn(userInput, {
             onToolStart: (wireName, args) => {
@@ -432,6 +436,20 @@ export class AgentLoop {
                 spinner.text = ok ? `Completed ${pc.cyan(wireName)}` : `Failed ${pc.cyan(wireName)}`;
               }
               this.renderToolEvent(ok ? "success" : "error", wireName, resultPreview);
+            },
+            onDelta: (delta) => {
+              if (spinner) {
+                spinner.stop();
+                spinner.clear();
+              }
+              process.stdout.write(delta);
+              if (this.voiceMode) {
+                currentSentence += delta;
+                if (/[.!?]\s*$/.test(delta)) {
+                  this.voiceManager.speak(currentSentence.trim()).catch(() => {});
+                  currentSentence = "";
+                }
+              }
             },
             askPermission: async (msg) => {
               if (spinner) spinner.stop();
@@ -451,6 +469,12 @@ export class AgentLoop {
               return allowed;
             }
           });
+          if (this.voiceMode && currentSentence.trim()) {
+            this.voiceManager.speak(currentSentence.trim()).catch(() => {});
+          }
+          if (answer && !spinner?.isSpinning) {
+            output.write("\n");
+          }
         } finally {
           if (spinner) {
             spinner.stop();
@@ -460,9 +484,6 @@ export class AgentLoop {
 
         if (answer) {
           this.renderAssistantTurn(answer);
-          if (this.voiceMode) {
-            await this.voiceManager.speak(answer);
-          }
         }
 
         const compactionMessage = await this.autoCompactIfNeeded();
@@ -496,17 +517,64 @@ export class AgentLoop {
 
     try {
       for (let step = 0; step < this.config.agent.maxSteps; step += 1) {
-        const response = await this.llm.converse(
-          this.transcript,
-          toolSpecs,
-          this.buildRuntimeSystemPrompt(),
-          this.currentModelId,
-          this.abortController.signal
-        );
+        let response: LlmResponse;
 
-        if (response.usage) {
-          this.sessionTokens.inputTokens += response.usage.inputTokens ?? 0;
-          this.sessionTokens.outputTokens += response.usage.outputTokens ?? 0;
+        if (hooks?.onDelta) {
+          let accumulatedText = "";
+          let toolUse: any = null;
+          let stopReason = "end_turn";
+
+          const stream = this.llm.converseStream(
+            this.transcript,
+            toolSpecs,
+            this.buildRuntimeSystemPrompt(),
+            this.currentModelId,
+            this.abortController.signal
+          );
+
+          for await (const chunk of stream) {
+            if (chunk.kind === "text" && chunk.text) {
+              accumulatedText += chunk.text;
+              hooks.onDelta(chunk.text);
+            } else if (chunk.kind === "tool_use") {
+              toolUse = chunk.toolUse;
+            } else if (chunk.kind === "stop") {
+              if (chunk.usage) {
+                this.sessionTokens.inputTokens += chunk.usage.inputTokens ?? 0;
+                this.sessionTokens.outputTokens += chunk.usage.outputTokens ?? 0;
+              }
+            }
+          }
+
+          if (toolUse) {
+            response = {
+              kind: "tool_use",
+              toolUseId: toolUse.toolUseId,
+              name: toolUse.name,
+              input: toolUse.input as Record<string, unknown>,
+              text: accumulatedText || undefined,
+              stopReason: "tool_use"
+            };
+          } else {
+            response = {
+              kind: "text",
+              text: accumulatedText,
+              stopReason: "end_turn"
+            };
+          }
+        } else {
+          response = await this.llm.converse(
+            this.transcript,
+            toolSpecs,
+            this.buildRuntimeSystemPrompt(),
+            this.currentModelId,
+            this.abortController.signal
+          );
+
+          if (response.usage) {
+            this.sessionTokens.inputTokens += response.usage.inputTokens ?? 0;
+            this.sessionTokens.outputTokens += response.usage.outputTokens ?? 0;
+          }
         }
 
         if (response.kind === "text") {

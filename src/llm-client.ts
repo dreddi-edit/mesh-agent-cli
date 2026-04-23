@@ -129,7 +129,7 @@ export class BedrockLlmClient {
     systemPrompt: string,
     modelIdOverride?: string,
     abortSignal?: AbortSignal
-  ): AsyncGenerator<string> {
+  ): AsyncGenerator<{ kind: "text" | "tool_use" | "stop"; text?: string; toolUse?: any; usage?: ConverseUsage }> {
     const activeModelId = modelIdOverride || this.options.modelId;
     const url = this.buildUrl(activeModelId).replace("/converse", "/converse-stream");
     const body = this.buildBody(messages, tools, systemPrompt);
@@ -170,7 +170,13 @@ export class BedrockLlmClient {
         try {
           const event = JSON.parse(line);
           if (event.contentBlockDelta?.delta?.text) {
-            yield event.contentBlockDelta.delta.text;
+            yield { kind: "text", text: event.contentBlockDelta.delta.text };
+          }
+          if (event.contentBlockStart?.start?.toolUse) {
+            yield { kind: "tool_use", toolUse: event.contentBlockStart.start.toolUse };
+          }
+          if (event.metadata?.usage) {
+            yield { kind: "stop", usage: event.metadata.usage };
           }
         } catch {
           // Fragmented JSON
