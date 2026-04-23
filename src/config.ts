@@ -1,5 +1,6 @@
+import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-
 import { config as loadDotEnv } from "dotenv";
 
 loadDotEnv();
@@ -77,6 +78,14 @@ function resolveBearerToken(): string | undefined {
   return undefined;
 }
 
+export interface UserSettings {
+  modelId: string;
+  themeColor: string;
+  enableCloudCache: boolean;
+  customApiKey?: string;
+  customEndpoint?: string;
+}
+
 export interface AppConfig {
   bedrock: {
     endpointBase: string;
@@ -89,6 +98,8 @@ export interface AppConfig {
     maxSteps: number;
     mode: "local" | "mcp";
     workspaceRoot: string;
+    enableCloudCache: boolean;
+    themeColor: string;
   };
   mcp: {
     command?: string;
@@ -100,7 +111,29 @@ export interface AppConfig {
   };
 }
 
-export function getConfig(): AppConfig {
+const SETTINGS_PATH = path.join(os.homedir(), ".config", "mesh", "settings.json");
+
+export async function loadUserSettings(): Promise<UserSettings> {
+  try {
+    const raw = await fs.readFile(SETTINGS_PATH, "utf-8");
+    return JSON.parse(raw);
+  } catch {
+    return {
+      modelId: DEFAULT_MODEL_ID,
+      themeColor: "cyan",
+      enableCloudCache: true
+    };
+  }
+}
+
+export async function saveUserSettings(settings: UserSettings): Promise<void> {
+  const dir = path.dirname(SETTINGS_PATH);
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(SETTINGS_PATH, JSON.stringify(settings, null, 2), "utf-8");
+}
+
+export async function loadConfig(): Promise<AppConfig> {
+  const userSettings = await loadUserSettings();
   const mode = parseMode(process.env.AGENT_MODE);
   const mcpArgsRaw = process.env.MESH_MCP_ARGS ?? "[]";
   const mcpCommand = process.env.MESH_MCP_COMMAND?.trim();
@@ -111,16 +144,18 @@ export function getConfig(): AppConfig {
 
   return {
     bedrock: {
-      endpointBase: optionalString("BEDROCK_ENDPOINT", DEFAULT_ENDPOINT_BASE),
-      bearerToken: resolveBearerToken(),
-      modelId: optionalString("BEDROCK_MODEL_ID", DEFAULT_MODEL_ID),
+      endpointBase: userSettings.customEndpoint || optionalString("BEDROCK_ENDPOINT", DEFAULT_ENDPOINT_BASE),
+      bearerToken: userSettings.customApiKey || resolveBearerToken(),
+      modelId: userSettings.modelId,
       temperature: optionalNumber("BEDROCK_TEMPERATURE", 0),
       maxTokens: optionalNumber("BEDROCK_MAX_TOKENS", 1200)
     },
     agent: {
       maxSteps: optionalNumber("AGENT_MAX_STEPS", 8),
       mode,
-      workspaceRoot: path.resolve(process.env.WORKSPACE_ROOT || process.cwd())
+      workspaceRoot: path.resolve(process.env.WORKSPACE_ROOT || process.cwd()),
+      enableCloudCache: userSettings.enableCloudCache,
+      themeColor: userSettings.themeColor
     },
     mcp: {
       command: mcpCommand,

@@ -2,13 +2,13 @@
 
 import { AgentLoop } from "./agent-loop.js";
 import { AuthManager } from "./auth.js";
-import { getConfig } from "./config.js";
+import { loadConfig } from "./config.js";
 import { LocalToolBackend } from "./local-tools.js";
 import { McpClient } from "./mcp-client.js";
 import { ToolBackend } from "./tool-backend.js";
 
 async function main(): Promise<void> {
-  const config = getConfig();
+  const config = await loadConfig();
   const auth = new AuthManager();
 
   // Handle `mesh logout` shorthand

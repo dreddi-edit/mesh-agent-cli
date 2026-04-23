@@ -66,7 +66,12 @@ export class LocalToolBackend implements ToolBackend {
   private readonly cache: CacheManager;
 
   constructor(private readonly workspaceRoot: string, config?: AppConfig) {
-    this.cache = new CacheManager(config ?? { agent: { workspaceRoot, maxSteps: 8, mode: "local" }, bedrock: { endpointBase: "", modelId: "", temperature: 0, maxTokens: 0 }, mcp: { args: [] }, supabase: {} });
+    this.cache = new CacheManager(config ?? { 
+      agent: { workspaceRoot, maxSteps: 8, mode: "local", enableCloudCache: true, themeColor: "cyan" }, 
+      bedrock: { endpointBase: "", modelId: "", temperature: 0, maxTokens: 0 }, 
+      mcp: { args: [] }, 
+      supabase: {} 
+    });
   }
 
   async listTools(): Promise<ToolDefinition[]> {

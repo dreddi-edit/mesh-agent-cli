@@ -4,7 +4,7 @@ import pc from "picocolors";
 import ora from "ora";
 import boxen from "boxen";
 
-import { AppConfig, shortPathLabel } from "./config.js";
+import { AppConfig, loadUserSettings, saveUserSettings, shortPathLabel, UserSettings } from "./config.js";
 import {
   BedrockLlmClient,
   ConverseMessage,
@@ -91,6 +91,7 @@ export class AgentLoop {
   private systemPrompt: string = SYSTEM_PROMPT;
   private abortController: AbortController | null = null;
   private autoApproveTools = false;
+  private themeColor: any = pc.cyan;
 
   constructor(
     private readonly config: AppConfig,
@@ -104,6 +105,12 @@ export class AgentLoop {
       temperature: config.bedrock.temperature,
       maxTokens: config.bedrock.maxTokens
     });
+    
+    // Set theme color from config
+    const colorStr = config.agent.themeColor || "cyan";
+    if ((pc as any)[colorStr]) {
+      this.themeColor = (pc as any)[colorStr];
+    }
   }
 
   async runCli(initialPrompt?: string): Promise<void> {
@@ -125,7 +132,7 @@ export class AgentLoop {
     }
 
     this.printBanner();
-    const commands = ["/help", "/status", "/index", "/sync", "/model", "/cost", "/compact", "/clear", "/exit"];
+    const commands = ["/help", "/status", "/index", "/sync", "/setup", "/model", "/cost", "/compact", "/clear", "/exit"];
     const rl = readline.createInterface({
       input: input,
       output: output,
@@ -149,7 +156,7 @@ export class AgentLoop {
     });
 
     while (true) {
-      const prompt = this.useAnsi ? pc.cyan("\n> ") : "\n> ";
+      const prompt = this.useAnsi ? this.themeColor("\n> ") : "\n> ";
       const userInput = (await rl.question(prompt)).trim();
       if (!userInput) {
         continue;
@@ -173,6 +180,10 @@ export class AgentLoop {
         await this.printSync();
         continue;
       }
+      if (userInput === "/setup") {
+        await this.runSetup(rl);
+        continue;
+      }
       if (userInput === "/clear") {
         output.write(this.useAnsi ? "\x1b[2J\x1b[H" : "\n");
         this.printBanner();
@@ -194,7 +205,7 @@ export class AgentLoop {
       }
       if (userInput === "/compact") {
         this.transcript = [];
-        output.write(pc.cyan("\nTranscript cleared. Context is now compact.\n"));
+        output.write(this.themeColor("\nTranscript cleared. Context is now compact.\n"));
         continue;
       }
 
@@ -233,7 +244,7 @@ export class AgentLoop {
             padding: 1,
             margin: 1,
             borderStyle: "round",
-            borderColor: "cyan",
+            borderColor: this.config.agent.themeColor || "cyan",
             title: "Mesh Agent",
             titleAlignment: "center"
           }) + "\n");
@@ -396,18 +407,18 @@ export class AgentLoop {
         [
           `mesh  ${this.config.agent.mode}  ${shortPathLabel(this.config.agent.workspaceRoot)}`,
           `model: ${this.currentModelId}`,
-          "commands: /help /status /index /sync /model /clear /exit"
+          "commands: /help /status /index /sync /setup /model /clear /exit"
         ].join("\n") + "\n"
       );
       return;
     }
     
-    output.write("\n" + pc.cyan(banner.join("\n")) + "\n");
+    output.write("\n" + this.themeColor(banner.join("\n")) + "\n");
     output.write(
       [
-        `${pc.cyan(pc.bold("mesh"))}  ${pc.dim(this.config.agent.mode)}  ${pc.dim(shortPathLabel(this.config.agent.workspaceRoot))}`,
-        `${pc.dim("model:")} ${pc.cyan(this.currentModelId)}`,
-        `${pc.dim("commands:")} ${pc.magenta("/help")} ${pc.magenta("/status")} ${pc.magenta("/index")} ${pc.magenta("/sync")} ${pc.magenta("/model")}`
+        `${this.themeColor(pc.bold("mesh"))}  ${pc.dim(this.config.agent.mode)}  ${pc.dim(shortPathLabel(this.config.agent.workspaceRoot))}`,
+        `${pc.dim("model:")} ${this.themeColor(this.currentModelId)}`,
+        `${pc.dim("commands:")} ${pc.magenta("/help")} ${pc.magenta("/status")} ${pc.magenta("/index")} ${pc.magenta("/sync")} ${pc.magenta("/setup")} ${pc.magenta("/model")}`
       ].join("\n") + "\n"
     );
   }
@@ -415,13 +426,13 @@ export class AgentLoop {
   private async printSync(): Promise<void> {
     const status: any = await this.backend.callTool("workspace.check_sync", {});
     if (!status.l2Enabled) {
-      output.write(pc.yellow("\nCloud (L2) cache is disabled. Check your SUPABASE_URL/KEY.\n"));
+      output.write(pc.yellow("\nCloud (L2) cache is disabled. Enable it in /setup.\n"));
       return;
     }
     output.write(
       [
         "",
-        `${pc.cyan(pc.bold("Cloud Sync Status"))}`,
+        `${this.themeColor(pc.bold("Cloud Sync Status"))}`,
         `${pc.dim("L2 Capsules:")} ${pc.green(status.l2Count)}`,
         `${pc.dim("L2 Status:")}   ${pc.green("Connected")}`,
         ""
@@ -437,10 +448,32 @@ export class AgentLoop {
         `${pc.dim("mode:")}      ${this.config.agent.mode}`,
         `${pc.dim("workspace:")} ${shortPathLabel(this.config.agent.workspaceRoot)}`,
         `${pc.dim("model:")}     ${this.currentModelId}`,
+        `${pc.dim("cloud:")}     ${this.config.agent.enableCloudCache ? pc.green("on") : pc.red("off")}`,
         `${pc.dim("index:")}     ${status.cachedFiles}/${status.totalFiles} files cached (${status.percent}%)`,
         ""
       ].join("\n")
     );
+  }
+
+  private async runSetup(rl: readline.Interface): Promise<void> {
+    output.write(this.themeColor("\n--- Mesh Setup Wizard ---\n"));
+    const current = await loadUserSettings();
+    
+    const modelId = (await rl.question(`Default Model ID [${pc.dim(current.modelId)}]: `)).trim() || current.modelId;
+    const enableCloud = (await rl.question(`Enable Cloud Cache (L2) [${pc.dim(current.enableCloudCache ? "y" : "n")}]: `)).trim().toLowerCase();
+    const cloudCache = enableCloud === "" ? current.enableCloudCache : (enableCloud === "y" || enableCloud === "yes");
+    const customKey = (await rl.question(`Custom API Key (leave empty for proxy) [${pc.dim(current.customApiKey ? "****" : "none")}]: `)).trim();
+    const theme = (await rl.question(`Theme Color (cyan, magenta, yellow, green) [${pc.dim(current.themeColor)}]: `)).trim() || current.themeColor;
+
+    const newSettings: UserSettings = {
+      modelId,
+      enableCloudCache: cloudCache,
+      themeColor: theme,
+      customApiKey: customKey || current.customApiKey
+    };
+
+    await saveUserSettings(newSettings);
+    output.write(pc.green("\nSettings saved! Restart mesh to apply all changes.\n"));
   }
 
   private async runIndexing(): Promise<void> {
@@ -467,7 +500,7 @@ export class AgentLoop {
     output.write(
       [
         "",
-        `${pc.dim("session usage:")} ${pc.cyan(inT.toLocaleString())} ${pc.dim("input /")} ${pc.cyan(outT.toLocaleString())} ${pc.dim("output tokens")}`,
+        `${pc.dim("session usage:")} ${this.themeColor(inT.toLocaleString())} ${pc.dim("input /")} ${this.themeColor(outT.toLocaleString())} ${pc.dim("output tokens")}`,
         `${pc.dim("session cost:")}  ${pc.green("$" + cost.toFixed(4))}`,
         ""
       ].join("\n")
@@ -482,6 +515,7 @@ export class AgentLoop {
         `${pc.magenta("/status")}           show indexing status & runtime info`,
         `${pc.magenta("/index")}            re-index workspace (generate capsules)`,
         `${pc.magenta("/sync")}             check cloud (L2) cache synchronization`,
+        `${pc.magenta("/setup")}            interactive settings wizard`,
         `${pc.magenta("/model")}            show current model`,
         `${pc.magenta("/model <id>")}       switch model for next messages`,
         `${pc.magenta("/cost")}             show token usage and approx cost`,
