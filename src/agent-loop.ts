@@ -885,6 +885,18 @@ export class AgentLoop {
     this.ghostTextListener = (_: any, key: any) => {
       if (!this.useAnsi || !key) return;
       if (key.name === "return" || key.name === "enter") return;
+
+      // Handle Tab or Right arrow to complete the ghost text
+      if (key.name === "tab" || (key.name === "right" && lastGhostText)) {
+        if (lastGhostText) {
+          // Clear the ghost text from screen first
+          output.write(" ".repeat(lastGhostText.length) + "\u001b[" + lastGhostText.length + "D");
+          // Write the suggestion into the actual readline buffer
+          rl.write(lastGhostText);
+          lastGhostText = "";
+          return;
+        }
+      }
       
       setTimeout(() => {
         const line = (rl as any).line || "";
@@ -975,29 +987,30 @@ export class AgentLoop {
     rawInput: string,
     rl: readline.Interface
   ): Promise<{ wasHandled: boolean; shouldExit: boolean }> {
-    const [rawCmd, ...args] = rawInput.trim().split(/\s+/g);
+    const trimmed = rawInput.trim();
+    if (!trimmed.startsWith("/")) {
+      return { wasHandled: false, shouldExit: false };
+    }
+
+    const [rawCmd, ...args] = trimmed.split(/\s+/g);
     const inputCmd = rawCmd.toLowerCase();
 
     const commandList = [
-      "/help", "/commands", "/status", "/index", "/sync", "/setup", 
-      "/clear", "/model", "/cost", "/compact", "/capsule", "/memory", 
-      "/approvals", "/doctor", "/exit", "/quit", "/reset", "/debug"
+      "/help", "/status", "/index", "/sync", "/setup", "/clear", 
+      "/model", "/cost", "/compact", "/capsule", "/memory", "/approvals", 
+      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands"
     ];
 
+    // Priority 1: Exact match
     let command = inputCmd;
-    if (inputCmd.startsWith("/")) {
+    if (commandList.includes(inputCmd)) {
+      command = inputCmd;
+    } else {
+      // Priority 2: Prefix match
       const matches = commandList.filter(c => c.startsWith(inputCmd));
-      if (matches.length === 1) {
+      if (matches.length > 0) {
+        // If multiple matches, pick the first one (they are prioritized by list order)
         command = matches[0];
-      } else if (matches.length > 1) {
-        // Prefer exact match if exists
-        const exact = matches.find(c => c === inputCmd);
-        if (exact) {
-          command = exact;
-        } else {
-          // Otherwise pick the shortest/most common one as a default logic
-          command = matches[0];
-        }
       }
     }
 
@@ -1050,7 +1063,7 @@ export class AgentLoop {
         output.write(pc.green("\nTranscript reset.\n"));
         return { wasHandled: true, shouldExit: false };
       default:
-        output.write(`\nUnknown command: ${rawInput}. Use /help.\n`);
+        output.write(`\nUnknown command: ${inputCmd} (resolved to ${command}). Use /help.\n`);
         return { wasHandled: true, shouldExit: false };
     }
   }
