@@ -4,6 +4,14 @@
   "private": false,
   "type": "module",
   "description": "Mesh terminal agent CLI with local mode and optional MCP backend.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dreddi-edit/mesh-agent-cli"
+  },
+  "homepage": "https://github.com/dreddi-edit/mesh-agent-cli",
+  "bugs": {
+    "url": "https://github.com/dreddi-edit/mesh-agent-cli/issues"
+  },
   "bin": {
     "mesh-agent": "dist/index.js"
   },
