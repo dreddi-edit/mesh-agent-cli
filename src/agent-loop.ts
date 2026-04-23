@@ -11,7 +11,7 @@ import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
 
 // Initialize marked with terminal renderer
-marked.use(markedTerminal());
+marked.use(markedTerminal() as any);
 
 type EnquirerCtor = new (options: Record<string, unknown>) => { run(): Promise<unknown> };
 const { Select, Confirm, Input } = pkg as unknown as { Select: EnquirerCtor; Confirm: EnquirerCtor; Input: EnquirerCtor };
