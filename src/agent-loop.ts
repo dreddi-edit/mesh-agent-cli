@@ -372,34 +372,39 @@ export class AgentLoop {
 
       try {
         const spinner = this.useAnsi ? ora({ text: "Thinking...", color: "cyan" }).start() : undefined;
-        
-        const answer = await this.runSingleTurn(userInput, {
-          onToolStart: (wireName, args) => {
-            if (spinner) {
-              spinner.text = `Running tool ${pc.cyan(wireName)} ${pc.dim(formatArgsPreview(args))}`;
-            }
-            this.renderToolEvent("start", wireName, formatArgsPreview(args));
-          },
-          onToolEnd: (wireName, ok, resultPreview) => {
-            if (spinner) {
-              spinner.text = ok ? `Completed ${pc.cyan(wireName)}` : `Failed ${pc.cyan(wireName)}`;
-            }
-            this.renderToolEvent(ok ? "success" : "error", wireName, resultPreview);
-          },
-          askPermission: async (msg) => {
-            if (spinner) spinner.stop();
-            const p = this.useAnsi ? pc.yellow(`\n[Action Required] ${msg} [y/N/A]: `) : `\n[Action Required] ${msg} [y/N/A]: `;
-            const ans = (await rl.question(p)).trim().toLowerCase();
-            if (ans === "a") {
-              this.autoApproveTools = true;
+        let answer: string | undefined;
+        try {
+          answer = await this.runSingleTurn(userInput, {
+            onToolStart: (wireName, args) => {
+              if (spinner) {
+                spinner.text = `Running tool ${pc.cyan(wireName)} ${pc.dim(formatArgsPreview(args))}`;
+              }
+              this.renderToolEvent("start", wireName, formatArgsPreview(args));
+            },
+            onToolEnd: (wireName, ok, resultPreview) => {
+              if (spinner) {
+                spinner.text = ok ? `Completed ${pc.cyan(wireName)}` : `Failed ${pc.cyan(wireName)}`;
+              }
+              this.renderToolEvent(ok ? "success" : "error", wireName, resultPreview);
+            },
+            askPermission: async (msg) => {
+              if (spinner) spinner.stop();
+              const p = this.useAnsi ? pc.yellow(`\n[Action Required] ${msg} [y/N/A]: `) : `\n[Action Required] ${msg} [y/N/A]: `;
+              const ans = (await rl.question(p)).trim().toLowerCase();
+              if (ans === "a") {
+                this.autoApproveTools = true;
+                if (spinner) spinner.start();
+                return true;
+              }
+              const allowed = ans === "y" || ans === "yes";
               if (spinner) spinner.start();
-              return true;
+              return allowed;
             }
-            const allowed = ans === "y" || ans === "yes";
-            if (spinner) spinner.start();
-            return allowed;
-          }
-        });
+          });
+        } finally {
+          if (spinner) spinner.stop();
+        }
+
         if (answer) {
           this.renderAssistantTurn(answer);
         }
