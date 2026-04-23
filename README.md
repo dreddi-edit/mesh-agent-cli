@@ -1,66 +1,76 @@
-# mesh-agent-cli
+# mesh-agent
 
-Eigenstaendiger Terminal-Agent als MCP-Client oder Local-Agent fuer Mesh.
+Terminal AI agent for Mesh. Like `claude` in your terminal, but with Mesh's
+compression logic on tool results so large workspaces stay within context.
 
-Flow:
-1. User-Eingabe im Terminal
-2. LLM-Entscheidung ueber naechsten Schritt
-3. Toolcall an lokales Tool-Backend (`local`) oder `mesh-mcp-dist` (`mcp`)
-4. Lokale Mesh-Kompression der Tool-Ergebnisse fuer den Agent-Kontext
-5. Finale Antwort im Terminal
+Zero config: installs, runs, done. No AWS credentials needed.
 
-## Modi
-
-- `local` (Default): Kein Server noetig, lokale Workspace-Tools im Prozess.
-- `mcp`: Nutzt `mesh-mcp-dist` als MCP-Tool-Backend via stdio.
-
-## Voraussetzungen
-
-- Node.js 20+
-- Bedrock Endpoint (direkt oder ueber Proxy)
-- Optional fuer `mcp`-Mode: aufrufbarer `mesh-mcp-dist` Prozess
-
-## Setup
+## Install
 
 ```bash
-cp .env.example .env
-npm install
+npm i -g @edgarelmo/mesh-agent-cli
 ```
 
-## Wichtige ENV Variablen
+## Use
 
-- `BEDROCK_ENDPOINT`: HTTP Endpoint fuer LLM Requests
-- `AWS_BEARER_TOKEN_BEDROCK`: optional fuer direkten Bedrock-Zugriff
-- `AGENT_MODE`: `local` oder `mcp` (default `local`)
-- `WORKSPACE_ROOT`: Root fuer lokale Datei-Tools in `local`-Mode
-- `MESH_MCP_COMMAND`: Startkommando fuer MCP-Server (nur `mcp`-Mode)
-- `MESH_MCP_ARGS`: JSON Array mit Args fuer das MCP-Kommando
-
-## Start
-
-Interaktiv:
+One-shot question:
 
 ```bash
-npm run dev
+mesh-agent "welche files liegen hier"
 ```
 
-Einmalige Frage:
+Interactive:
 
 ```bash
-npm run dev -- "Welche Tools stehen zur Verfuegung?"
+mesh-agent
 ```
 
-## Mesh-Core Integration
+Type `exit` to quit.
 
-Wenn `./mesh-core` vorhanden ist, nutzt `local`-Mode direkt Teile der Mesh-Core-Logik
-(z. B. File-Type-Erkennung, Token-Schaetzung, Capsule-Vorschau). Ohne `mesh-core`
-laeuft das CLI mit sauberem Fallback weiter.
+## How it works
 
-## npm Release Automation
+- User input → Bedrock Converse request through the shared Mesh LLM proxy.
+- Model decides: answer directly, or call a tool.
+- Tool runs locally in your workspace, result gets Mesh-compressed before
+  going back to the model.
+- Loop until the model returns a final answer.
 
-- Paketname: `@dreddi-edit/mesh-agent-cli`
-- Binary: `mesh-agent`
-- Bei jedem Push auf `main`:
-  1. Build
-  2. Laufzeit-Version aus GitHub-Run-Nummer
-  3. `npm publish`
+No Bedrock/AWS credentials live on your machine — the proxy (a Cloudflare
+Worker) injects the key server-side.
+
+## Modes
+
+- `local` (default): local workspace tools, in-process.
+- `mcp`: tool backend runs as an external MCP server (stdio). Set
+  `AGENT_MODE=mcp` and configure `MESH_MCP_COMMAND` / `MESH_MCP_ARGS`.
+
+## Config (all optional)
+
+See `.env.example`. Common overrides:
+
+| Env var               | Purpose                                    |
+| --------------------- | ------------------------------------------ |
+| `BEDROCK_MODEL_ID`    | Pick a different Bedrock model.            |
+| `BEDROCK_ENDPOINT`    | Point at your own proxy or Bedrock direct. |
+| `AWS_BEARER_TOKEN_BEDROCK` | Required for BYOK direct-to-Bedrock.  |
+| `BEDROCK_MAX_TOKENS`  | Cap per response.                          |
+| `WORKSPACE_ROOT`      | Override working dir for local tools.      |
+
+## BYOK (bring your own Bedrock key)
+
+If you want to bypass the shared proxy and pay your own Bedrock bill:
+
+```bash
+export BEDROCK_ENDPOINT=https://bedrock-runtime.us-east-1.amazonaws.com
+export AWS_BEARER_TOKEN_BEDROCK=<your-bedrock-api-key>
+mesh-agent
+```
+
+## Repository
+
+Source + Cloudflare Worker live here:
+https://github.com/dreddi-edit/mesh-agent-cli
+
+## License
+
+MIT

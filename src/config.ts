@@ -4,12 +4,27 @@ import { config as loadDotEnv } from "dotenv";
 
 loadDotEnv();
 
-function required(name: string): string {
+/**
+ * Default Mesh LLM proxy. The Cloudflare Worker injects the Bedrock API key
+ * server-side so end users need no AWS credentials.
+ *
+ * Override with BEDROCK_ENDPOINT to point at a different proxy, or at
+ * https://bedrock-runtime.<region>.amazonaws.com directly (BYOK, requires
+ * AWS_BEARER_TOKEN_BEDROCK).
+ */
+const DEFAULT_ENDPOINT_BASE = "https://mesh-llm.edgar-baumann.workers.dev";
+
+/**
+ * Default model id on Bedrock. Elmo can override via BEDROCK_MODEL_ID.
+ */
+const DEFAULT_MODEL_ID = "anthropic.claude-sonnet-4-5-20250929-v1:0";
+
+function optionalString(name: string, fallback: string): string {
   const value = process.env[name];
   if (!value || !value.trim()) {
-    throw new Error(`Missing required env var: ${name}`);
+    return fallback;
   }
-  return value;
+  return value.trim();
 }
 
 function optionalNumber(name: string, fallback: number): number {
@@ -43,9 +58,9 @@ function parseMode(raw: string | undefined): "local" | "mcp" {
 
 export interface AppConfig {
   bedrock: {
-    endpoint: string;
+    endpointBase: string;
     bearerToken?: string;
-    modelId?: string;
+    modelId: string;
     temperature: number;
     maxTokens: number;
   };
@@ -71,9 +86,9 @@ export function getConfig(): AppConfig {
 
   return {
     bedrock: {
-      endpoint: required("BEDROCK_ENDPOINT"),
-      bearerToken: process.env.AWS_BEARER_TOKEN_BEDROCK,
-      modelId: process.env.BEDROCK_MODEL_ID,
+      endpointBase: optionalString("BEDROCK_ENDPOINT", DEFAULT_ENDPOINT_BASE),
+      bearerToken: process.env.AWS_BEARER_TOKEN_BEDROCK?.trim() || undefined,
+      modelId: optionalString("BEDROCK_MODEL_ID", DEFAULT_MODEL_ID),
       temperature: optionalNumber("BEDROCK_TEMPERATURE", 0),
       maxTokens: optionalNumber("BEDROCK_MAX_TOKENS", 1200)
     },

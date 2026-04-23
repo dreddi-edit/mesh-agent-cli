@@ -1,9 +1,10 @@
 {
-  "name": "@dreddi-edit/mesh-agent-cli",
-  "version": "0.1.0",
+  "name": "@edgarelmo/mesh-agent-cli",
+  "version": "0.2.0",
   "private": false,
   "type": "module",
-  "description": "Mesh terminal agent CLI with local mode and optional MCP backend.",
+  "description": "Mesh terminal agent CLI. Zero-config: ships with a shared Mesh LLM proxy so no AWS credentials are needed.",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/dreddi-edit/mesh-agent-cli"

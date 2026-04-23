@@ -1,0 +1,21 @@
+name = "mesh-llm"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# Default vars — override per env below.
+[vars]
+BEDROCK_REGION = "us-east-1"
+ALLOWED_MODELS = "anthropic.claude-sonnet-4-5-20250929-v1:0,anthropic.claude-haiku-4-5-20251001-v1:0"
+RATE_LIMIT_PER_MIN = "30"
+
+# Enable the KV namespace for rate limiting.
+# Create once:  wrangler kv namespace create RATE_LIMIT
+# Then paste the generated id here.
+# [[kv_namespaces]]
+# binding = "RATE_LIMIT"
+# id = "PASTE_GENERATED_ID_HERE"
+
+# Custom domain (optional).
+# [[routes]]
+# pattern = "mesh-llm.yourdomain.com/*"
+# custom_domain = true
