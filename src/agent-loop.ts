@@ -424,6 +424,7 @@ export class AgentLoop {
         let answer: string | undefined;
         let currentSentence = "";
         try {
+          let hasStartedStreaming = false;
           answer = await this.runSingleTurn(userInput, {
             onToolStart: (wireName, args) => {
               if (spinner) {
@@ -442,7 +443,11 @@ export class AgentLoop {
                 spinner.stop();
                 spinner.clear();
               }
-              process.stdout.write(delta);
+              if (!hasStartedStreaming) {
+                hasStartedStreaming = true;
+                output.write("\n" + this.themeColor(pc.bold("assistant")) + pc.dim(" › ") + "\n");
+              }
+              output.write(delta);
               if (this.voiceMode) {
                 currentSentence += delta;
                 if (/[.!?]\s*$/.test(delta)) {
@@ -472,7 +477,7 @@ export class AgentLoop {
           if (this.voiceMode && currentSentence.trim()) {
             this.voiceManager.speak(currentSentence.trim()).catch(() => {});
           }
-          if (answer && !spinner?.isSpinning) {
+          if (hasStartedStreaming) {
             output.write("\n");
           }
         } finally {
@@ -482,9 +487,8 @@ export class AgentLoop {
           }
         }
 
-        if (answer) {
-          this.renderAssistantTurn(answer);
-        }
+        // Only render if we didn't stream it already
+        // answer is needed for possible post-processing, but transcript is handled inside.
 
         const compactionMessage = await this.autoCompactIfNeeded();
         if (compactionMessage) {
@@ -1009,12 +1013,18 @@ export class AgentLoop {
       // Handle Tab or Right arrow to complete the ghost text
       if (key.name === "tab" || (key.name === "right" && lastGhostText)) {
         if (lastGhostText) {
-          // Clear the ghost text from screen first
+          // Clear ghost text
           output.write(" ".repeat(lastGhostText.length) + "\u001b[" + lastGhostText.length + "D");
-          // Write the suggestion into the actual readline buffer
           rl.write(lastGhostText);
           lastGhostText = "";
           return;
+        }
+      }
+
+      if (key.name === "return" || key.name === "enter") {
+        if (lastGhostText) {
+          output.write(" ".repeat(lastGhostText.length) + "\u001b[" + lastGhostText.length + "D");
+          lastGhostText = "";
         }
       }
       
@@ -1120,7 +1130,7 @@ export class AgentLoop {
     const commandList = [
       "/help", "/status", "/index", "/sync", "/setup", "/clear", 
       "/model", "/cost", "/compact", "/capsule", "/memory", "/approvals", 
-      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands"
+      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice"
     ];
 
     // Priority 1: Exact match
@@ -1128,10 +1138,9 @@ export class AgentLoop {
     if (commandList.includes(inputCmd)) {
       command = inputCmd;
     } else {
-      // Priority 2: Prefix match
+      // Priority 2: Prefix match (use the order from commandList which is prioritized)
       const matches = commandList.filter(c => c.startsWith(inputCmd));
       if (matches.length > 0) {
-        // If multiple matches, pick the first one (they are prioritized by list order)
         command = matches[0];
       }
     }
@@ -1304,6 +1313,12 @@ export class AgentLoop {
 
     if (parts.length <= 1 && !line.endsWith(" ")) {
       const hits = commands.filter((item) => item.startsWith(cmd));
+      // If we have matches, return them. If multiple, it might jump, 
+      // but ghost text already showed the first one. 
+      // To avoid jump, we only return the best match if it's a prefix.
+      if (hits.length > 1) {
+        return [[hits[0]], cmd];
+      }
       return [hits.length ? hits : commands, cmd];
     }
 
