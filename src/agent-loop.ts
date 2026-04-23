@@ -200,6 +200,7 @@ function resolveModelOption(raw: string): ModelOption | null {
 }
 
 export class AgentLoop {
+  private ghostTextListener: any = null;
   private readonly llm: BedrockLlmClient;
   private readonly useAnsi = output.isTTY;
   private readonly sessionStore: SessionCapsuleStore;
@@ -672,9 +673,14 @@ export class AgentLoop {
 
   private setupGhostText(rl: readline.Interface, input: NodeJS.ReadableStream, output: NodeJS.WritableStream) {
     if (!this.useAnsi) return;
-    input.removeAllListeners("keypress");
+    
+    // Remove only our previous listener if it exists
+    if (this.ghostTextListener) {
+      input.removeListener("keypress", this.ghostTextListener);
+    }
+
     let lastGhostText = "";
-    input.on("keypress", (_, key) => {
+    this.ghostTextListener = (_: any, key: any) => {
       if (!this.useAnsi || !key) return;
       if (key.name === "return" || key.name === "enter") return;
       
@@ -698,7 +704,9 @@ export class AgentLoop {
           lastGhostText = "";
         }
       }, 5);
-    });
+    };
+
+    input.on("keypress", this.ghostTextListener);
   }
 
   private renderUserTurn(text: string): void {
