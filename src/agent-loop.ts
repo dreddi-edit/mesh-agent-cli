@@ -575,10 +575,10 @@ export class AgentLoop {
 
   private buildPrompt(): string {
     if (!this.useAnsi) {
-      return `\nmesh/${this.currentBranch}> `;
+      return `\n${pc.cyan("◈")} ${pc.bold("mesh")} // ${pc.dim(this.currentBranch)} ${pc.cyan("›")} `;
     }
-    const left = `${this.themeColor(pc.bold("mesh"))}${pc.dim("/")}${pc.dim(this.currentBranch)}`;
-    return `\n${left} ${this.themeColor(pc.bold("::"))} `;
+    const left = `${this.themeColor(pc.bold("◈ mesh"))} ${pc.dim("//")} ${pc.dim(this.currentBranch)}`;
+    return `\n${left} ${this.themeColor(pc.bold("›"))} `;
   }
 
   private async printSync(): Promise<void> {
@@ -669,28 +669,14 @@ export class AgentLoop {
   }
   private async checkInit(): Promise<void> {
     const meshDir = path.join(this.config.agent.workspaceRoot, ".mesh");
-    const exists = await fs.access(meshDir).then(() => true).catch(() => false);
-    if (exists) return;
+    const workspaceMetaPath = path.join(meshDir, "workspace.json");
+    const meshDirExists = await fs.access(meshDir).then(() => true).catch(() => false);
+    const metaExists = await fs.access(workspaceMetaPath).then(() => true).catch(() => false);
 
-    const prompt = new Confirm({
-      name: "init",
-      message: "Initialize Mesh for this project? (.mesh/ folder will be created)",
-      initial: true
-    });
-
-    const confirmed = await prompt.run();
-
-    if (confirmed) {
+    if (!meshDirExists) {
       await fs.mkdir(meshDir, { recursive: true });
       await fs.mkdir(path.join(meshDir, "index"), { recursive: true });
       await fs.mkdir(path.join(meshDir, "history"), { recursive: true });
-      
-      const config = {
-        modelId: this.config.bedrock.modelId,
-        themeColor: this.config.agent.themeColor,
-        enableCloudCache: this.config.agent.enableCloudCache
-      };
-      await fs.writeFile(path.join(meshDir, "config.json"), JSON.stringify(config, null, 2));
       
       const instructions = [
         "# Mesh Project Instructions 🛸",
@@ -698,8 +684,8 @@ export class AgentLoop {
         "This file defines the engineering soul of this project.",
         "",
         "## 🧠 System Architecture & Intelligence",
-        "*   **Capsule Cache:** All transient file summaries (L1 Cache) are stored outside this repository in the global temporary directory.",
-        "*   **Project Intelligence:** The `.mesh/` folder contains high-level artifacts like `dependency_graph.md` and `architecture.md`.",
+        "*   **Capsule Cache:** All transient file summaries (L1 Cache) are stored outside this repository.",
+        "*   **Project Intelligence:** The `.mesh/` folder contains high-level artifacts.",
         "",
         "## 📏 Coding Standards",
         "1.  **DRY & KISS:** Favor simplicity over clever abstractions.",
@@ -708,24 +694,32 @@ export class AgentLoop {
         ""
       ].join("\n");
       await fs.writeFile(path.join(meshDir, "instructions.md"), instructions);
+      
+      await fs.writeFile(path.join(meshDir, "architecture.md"), "# Architecture\n\n*Generated during indexing...*");
+      await fs.writeFile(path.join(meshDir, "dependency_graph.md"), "# Dependency Graph\n\n*Generated during indexing...*");
+    }
 
-      const architecturePlaceholder = [
-        "# Architecture",
-        "",
-        "Run `/index` to let Mesh populate this file, or document your architecture here manually.",
-        ""
-      ].join("\n");
-      await fs.writeFile(path.join(meshDir, "architecture.md"), architecturePlaceholder);
+    // Always update/create config.json
+    const config = {
+      modelId: this.config.bedrock.modelId,
+      themeColor: this.config.agent.themeColor,
+      enableCloudCache: this.config.agent.enableCloudCache,
+      updatedAt: new Date().toISOString()
+    };
+    await fs.writeFile(path.join(meshDir, "config.json"), JSON.stringify(config, null, 2));
 
-      const depGraphPlaceholder = [
-        "# Dependency Graph",
-        "",
-        "Run `/index` to let Mesh populate this file, or document key dependencies here manually.",
-        ""
-      ].join("\n");
-      await fs.writeFile(path.join(meshDir, "dependency_graph.md"), depGraphPlaceholder);
-
-      output.write(pc.green("✔ Workspace initialized. Check .mesh/instructions.md for customization.\n"));
+    // If meta doesn't exist, it's the first time -> Auto Index
+    if (!metaExists) {
+      output.write(`${pc.cyan("◈")} ${pc.bold("New workspace detected. Initializing intelligence...")}\n`);
+      await this.runIndexing();
+      
+      const meta = {
+        firstIndexedAt: new Date().toISOString(),
+        lastIndexedAt: new Date().toISOString(),
+        status: "indexed"
+      };
+      await fs.writeFile(workspaceMetaPath, JSON.stringify(meta, null, 2));
+    }
     }
   }
 
