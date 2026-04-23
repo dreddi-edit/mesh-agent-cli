@@ -103,6 +103,30 @@ export class CacheManager {
     }
   }
 
+  public async deleteCapsule(filePath: string, tier: string): Promise<void> {
+    // 1. Remove from L1
+    const l1Path = this.getL1Path(filePath, tier);
+    try {
+      await fs.unlink(l1Path);
+    } catch {
+      // Ignore if not exists
+    }
+
+    // 2. Remove from L2
+    if (this.supabase) {
+      try {
+        await this.supabase
+          .from("capsules")
+          .delete()
+          .eq("workspace_hash", this.workspaceHash)
+          .eq("file_path", filePath)
+          .eq("tier", tier);
+      } catch {
+        // Silently fail on L2 deletes
+      }
+    }
+  }
+
   public async getSyncStatus(): Promise<{ l2Count: number; l2Enabled: boolean }> {
     if (!this.supabase) return { l2Count: 0, l2Enabled: false };
     try {
