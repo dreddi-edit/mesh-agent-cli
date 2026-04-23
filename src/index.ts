@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import { AgentLoop } from "./agent-loop.js";
 import { getConfig } from "./config.js";
 import { McpClient } from "./mcp-client.js";

@@ -52,6 +52,16 @@ Einmalige Frage:
 npm run dev -- "Welche Tools stehen zur Verfuegung?"
 ```
 
+## npm Release Automation
+
+- Paketname: `@dreddi-edit/mesh-agent-cli`
+- Binary: `mesh-agent`
+- Bei jedem Push auf `main`:
+  1. Build
+  2. Automatischer Patch-Bump (`npm version patch`)
+  3. Git tag + push
+  4. `npm publish`
+
 ## Hinweis Architektur
 
 Dieses Repo ist bewusst nur der Agent-Client.
