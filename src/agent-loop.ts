@@ -26,6 +26,7 @@ import {
 import { buildLlmSafeMeshContext } from "./mesh-gateway.js";
 import { PersistedSessionCapsule, SessionCapsuleStore } from "./session-capsule-store.js";
 import { ToolBackend, ToolDefinition } from "./tool-backend.js";
+import { VoiceManager } from "./voice-manager.js";
 
 const SYSTEM_PROMPT = [
   "You are Mesh, a high-performance terminal AI coding agent designed by edgarelmo.",
@@ -254,6 +255,8 @@ export class AgentLoop {
   private themeColor: (text: string) => string = pc.cyan;
   private persistentHistory: string[] = [];
   private readonly historyPath = path.join(os.homedir(), ".mesh_history");
+  private voiceManager: VoiceManager;
+  private voiceMode = false;
 
   constructor(
     private readonly config: AppConfig,
@@ -274,6 +277,11 @@ export class AgentLoop {
     if (typeof colorFn === "function") {
       this.themeColor = colorFn as (text: string) => string;
     }
+
+    this.voiceManager = new VoiceManager({
+      whisperModel: path.join(config.agent.workspaceRoot, ".mesh", "models", "ggml-base.bin"),
+      piperModel: path.join(config.agent.workspaceRoot, ".mesh", "models", "en_US-lessac-medium.onnx")
+    });
   }
 
   async runCli(initialPrompt?: string): Promise<void> {
@@ -360,7 +368,22 @@ export class AgentLoop {
       const prompt = this.buildPrompt();
       let userInput = "";
       try {
-        userInput = (await rl.question(prompt)).trim();
+        if (this.voiceMode) {
+          output.write(this.themeColor(pc.bold("\n[LISTENING]")) + pc.dim(" (Speak for 5s...)\n"));
+          try {
+            const audioFile = await this.voiceManager.record(5);
+            output.write(pc.dim("Transcribing...\n"));
+            userInput = await this.voiceManager.transcribe(audioFile);
+            output.write(pc.bold(`❯ ${userInput}\n`));
+          } catch (err) {
+            output.write(pc.red(`Voice error: ${(err as Error).message}\n`));
+            this.voiceMode = false;
+            rl.close();
+            continue;
+          }
+        } else {
+          userInput = (await rl.question(prompt)).trim();
+        }
         // Update persistent history
         if (userInput && !userInput.startsWith("/") && userInput !== this.persistentHistory[this.persistentHistory.length - 1]) {
           this.persistentHistory.push(userInput);
@@ -437,6 +460,9 @@ export class AgentLoop {
 
         if (answer) {
           this.renderAssistantTurn(answer);
+          if (this.voiceMode) {
+            await this.voiceManager.speak(answer);
+          }
         }
 
         const compactionMessage = await this.autoCompactIfNeeded();
@@ -1006,6 +1032,7 @@ export class AgentLoop {
       { name: "/doctor", usage: "/doctor [brief|full]", description: "show runtime diagnostics" },
       { name: "/compact", usage: "/compact", description: "compress transcript into session capsule" },
       { name: "/clear", usage: "/clear", description: "clear terminal UI" },
+      { name: "/voice", usage: "/voice [on|off]", description: "toggle Speech-to-Speech mode" },
       { name: "/exit", aliases: ["/quit"], usage: "/exit", description: "quit" }
     ];
   }
@@ -1088,6 +1115,13 @@ export class AgentLoop {
       case "/reset":
         this.transcript = [];
         output.write(pc.green("\nTranscript reset.\n"));
+        return { wasHandled: true, shouldExit: false };
+      case "/voice":
+        const subVoice = args[0]?.toLowerCase();
+        if (subVoice === "on") this.voiceMode = true;
+        else if (subVoice === "off") this.voiceMode = false;
+        else this.voiceMode = !this.voiceMode;
+        output.write(`\nVoice mode: ${this.voiceMode ? pc.green("ON") : pc.red("OFF")}\n`);
         return { wasHandled: true, shouldExit: false };
       default:
         output.write(`\nUnknown command: ${inputCmd} (resolved to ${command}). Use /help.\n`);
@@ -1379,6 +1413,22 @@ export class AgentLoop {
   }
 
   private async runDoctor(args: string[] = []): Promise<void> {
+    const isFull = args.includes("full");
+    const isVoice = args.includes("voice");
+
+    if (isVoice) {
+      const voiceDeps = await this.voiceManager.checkDependencies();
+      output.write(this.themeColor(`\n${pc.bold("Voice Diagnostics")}\n`));
+      for (const dep of voiceDeps) {
+        const icon = dep.ok ? pc.green("✔") : pc.red("✘");
+        output.write(`${icon} ${dep.name.padEnd(15)} ${dep.ok ? pc.green("Available") : pc.red("Missing")}\n`);
+        if (!dep.ok && dep.hint) {
+          output.write(`   ${pc.dim(`Hint: ${dep.hint}`)}\n`);
+        }
+      }
+      return;
+    }
+
     const mode = (args[0] || "brief").toLowerCase();
     const indexStatus = await this.backend.callTool("workspace.get_index_status", {}) as IndexStatus;
     const syncStatus = await this.backend.callTool("workspace.check_sync", {}) as SyncStatus;

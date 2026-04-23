@@ -123,6 +123,62 @@ export class BedrockLlmClient {
     return this.parseResponse(data);
   }
 
+  async *converseStream(
+    messages: ConverseMessage[],
+    tools: ToolSpec[],
+    systemPrompt: string,
+    modelIdOverride?: string,
+    abortSignal?: AbortSignal
+  ): AsyncGenerator<string> {
+    const activeModelId = modelIdOverride || this.options.modelId;
+    const url = this.buildUrl(activeModelId).replace("/converse", "/converse-stream");
+    const body = this.buildBody(messages, tools, systemPrompt);
+
+    const headers: Record<string, string> = {
+      "content-type": "application/json"
+    };
+    if (this.options.bearerToken) {
+      headers.authorization = `Bearer ${this.options.bearerToken}`;
+    }
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: abortSignal
+    });
+
+    if (!response.ok) {
+      throw new Error(`LLM streaming failed (${response.status})`);
+    }
+
+    if (!response.body) return;
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line);
+          if (event.contentBlockDelta?.delta?.text) {
+            yield event.contentBlockDelta.delta.text;
+          }
+        } catch {
+          // Fragmented JSON
+        }
+      }
+    }
+  }
+
   private buildUrl(modelId: string): string {
     const base = this.options.endpointBase.replace(/\/+$/, "");
     return `${base}/model/${encodeURIComponent(modelId)}/converse`;
