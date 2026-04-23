@@ -5,7 +5,7 @@ compatibility_date = "2025-01-01"
 # Default vars — override per env below.
 [vars]
 BEDROCK_REGION = "us-east-1"
-ALLOWED_MODELS = "us.anthropic.claude-sonnet-4-5-20250929-v1:0,us.anthropic.claude-haiku-4-5-20251001-v1:0"
+ALLOWED_MODELS = "us.anthropic.claude-sonnet-4-5-20250929-v1:0,us.anthropic.claude-haiku-4-5-20251001-v1:0,us.anthropic.claude-sonnet-4-6,us.anthropic.claude-opus-4-6-v1,us.anthropic.claude-opus-4-7"
 RATE_LIMIT_PER_MIN = "30"
 
 # Enable the KV namespace for rate limiting.

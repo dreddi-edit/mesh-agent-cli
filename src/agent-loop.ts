@@ -70,8 +70,26 @@ const MODEL_OPTIONS: ModelOption[] = [
   {
     label: "Claude Sonnet 4.6",
     value: "us.anthropic.claude-sonnet-4-6",
-    aliases: ["sonnet4.6", "sonnet-4.6", "sonnet46", "claude-sonnet-4.6", "claude-sonnet-4-6"],
+    aliases: ["sonnet4.6", "sonnet-4.6", "sonnet46"],
     note: "default"
+  },
+  {
+    label: "Claude Opus 4.6",
+    value: "us.anthropic.claude-opus-4-6-v1",
+    aliases: ["opus4.6", "opus-4.6", "opus46"],
+    note: "powerful"
+  },
+  {
+    label: "Claude Opus 4.7",
+    value: "us.anthropic.claude-opus-4-7",
+    aliases: ["opus4.7", "opus-4.7", "opus47"],
+    note: "next-gen"
+  },
+  {
+    label: "Claude Haiku 4.5",
+    value: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    aliases: ["haiku4.5", "haiku-4.5", "haiku45"],
+    note: "modern fast"
   },
   {
     label: "Claude Sonnet 4.5",
