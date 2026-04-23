@@ -975,9 +975,33 @@ export class AgentLoop {
     rawInput: string,
     rl: readline.Interface
   ): Promise<{ wasHandled: boolean; shouldExit: boolean }> {
-    const [command, ...args] = rawInput.split(/\s+/g);
+    const [rawCmd, ...args] = rawInput.trim().split(/\s+/g);
+    const inputCmd = rawCmd.toLowerCase();
 
-    switch (command.toLowerCase()) {
+    const commandList = [
+      "/help", "/commands", "/status", "/index", "/sync", "/setup", 
+      "/clear", "/model", "/cost", "/compact", "/capsule", "/memory", 
+      "/approvals", "/doctor", "/exit", "/quit", "/reset", "/debug"
+    ];
+
+    let command = inputCmd;
+    if (inputCmd.startsWith("/")) {
+      const matches = commandList.filter(c => c.startsWith(inputCmd));
+      if (matches.length === 1) {
+        command = matches[0];
+      } else if (matches.length > 1) {
+        // Prefer exact match if exists
+        const exact = matches.find(c => c === inputCmd);
+        if (exact) {
+          command = exact;
+        } else {
+          // Otherwise pick the shortest/most common one as a default logic
+          command = matches[0];
+        }
+      }
+    }
+
+    switch (command) {
       case "/help":
       case "/commands":
         this.printHelp();
@@ -1021,6 +1045,10 @@ export class AgentLoop {
       case "exit":
       case "/quit":
         return { wasHandled: true, shouldExit: true };
+      case "/reset":
+        this.transcript = [];
+        output.write(pc.green("\nTranscript reset.\n"));
+        return { wasHandled: true, shouldExit: false };
       default:
         output.write(`\nUnknown command: ${rawInput}. Use /help.\n`);
         return { wasHandled: true, shouldExit: false };
