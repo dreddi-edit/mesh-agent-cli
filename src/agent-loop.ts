@@ -588,32 +588,20 @@ export class AgentLoop {
       return `\n${pc.cyan("◈")} ${pc.bold("mesh")} // ${pc.dim(this.currentBranch)} ${pc.cyan("›")} `;
     }
     const width = Math.max(48, Math.min(output.columns || 80, 140));
-    const promptLabel = ` mesh/${this.currentBranch} :: `;
-    const promptBar = fitTerminalLine(this.renderPromptBar(promptLabel, width), width);
+    const promptTop = fitTerminalLine(this.renderPromptTop(width), width);
+    const promptLine = fitTerminalLine(this.renderPromptLine(), width);
     const statusLine = fitTerminalLine(this.renderPromptStatus(width), width);
-    return `\n${promptBar}\x1b[s\n${statusLine}\x1b[u`;
+    return `\n${promptTop}\n${promptLine}\x1b[s\n${statusLine}\x1b[u`;
   }
 
-  private renderPromptBar(label: string, width: number): string {
-    const plainLabel = label;
-    const fill = Math.max(1, width - plainLabel.length);
-    const body = plainLabel + " ".repeat(fill);
+  private renderPromptTop(width: number): string {
+    const title = ` mesh input `;
+    const fill = Math.max(1, width - title.length - 2);
+    return `${this.themeColor("╭")}${this.themeColor("─".repeat(Math.floor(fill / 2)))}${pc.bold(title)}${this.themeColor("─".repeat(Math.ceil(fill / 2)))}${this.themeColor("╮")}`;
+  }
 
-    switch (this.config.agent.themeColor) {
-      case "magenta":
-        return pc.bgMagenta(pc.white(pc.bold(body)));
-      case "yellow":
-        return pc.bgYellow(pc.black(pc.bold(body)));
-      case "green":
-        return pc.bgGreen(pc.black(pc.bold(body)));
-      case "blue":
-        return pc.bgBlue(pc.white(pc.bold(body)));
-      case "white":
-        return pc.bgWhite(pc.black(pc.bold(body)));
-      case "cyan":
-      default:
-        return pc.bgCyan(pc.black(pc.bold(body)));
-    }
+  private renderPromptLine(): string {
+    return `${this.themeColor("│")} ${this.themeColor(pc.bold(`mesh/${this.currentBranch}`))} ${pc.dim("::")} `;
   }
 
   private renderPromptStatus(width: number): string {
@@ -624,10 +612,9 @@ export class AgentLoop {
       `${pc.dim("capsule")} ${this.sessionCapsule ? pc.green("active") : pc.dim("idle")}`,
       `${pc.dim("approvals")} ${this.autoApproveTools ? pc.green("auto") : pc.yellow("manual")}`
     ];
-    const raw = `  ${parts.join(pc.dim("  •  "))}`;
+    const raw = `${this.themeColor("╰─")} ${parts.join(pc.dim("  •  "))}`;
     const plain = stripAnsi(raw);
-    const padded = plain.length < width ? raw + " ".repeat(width - plain.length) : raw;
-    return pc.bgBlack(pc.white(padded));
+    return plain.length < width ? raw + " ".repeat(width - plain.length) : raw;
   }
 
   private async printSync(): Promise<void> {
