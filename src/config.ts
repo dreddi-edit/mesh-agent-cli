@@ -149,6 +149,17 @@ export async function saveUserSettings(settings: UserSettings): Promise<void> {
 
 export async function loadConfig(): Promise<AppConfig> {
   const userSettings = await loadUserSettings();
+  const workspaceRoot = path.resolve(process.env.WORKSPACE_ROOT || process.cwd());
+
+  // Try loading local workspace settings
+  let localSettings: Partial<UserSettings> = {};
+  try {
+    const localRaw = await fs.readFile(path.join(workspaceRoot, ".mesh", "config.json"), "utf-8");
+    localSettings = JSON.parse(localRaw);
+  } catch {
+    // No local settings, ignore
+  }
+
   const mode = parseMode(process.env.AGENT_MODE);
   const mcpArgsRaw = process.env.MESH_MCP_ARGS ?? "[]";
   const mcpCommand = process.env.MESH_MCP_COMMAND?.trim();
@@ -159,18 +170,18 @@ export async function loadConfig(): Promise<AppConfig> {
 
   return {
     bedrock: {
-      endpointBase: userSettings.customEndpoint || optionalString("BEDROCK_ENDPOINT", DEFAULT_ENDPOINT_BASE),
-      bearerToken: userSettings.customApiKey || resolveBearerToken(),
-      modelId: userSettings.modelId,
+      endpointBase: localSettings.customEndpoint || userSettings.customEndpoint || optionalString("BEDROCK_ENDPOINT", DEFAULT_ENDPOINT_BASE),
+      bearerToken: localSettings.customApiKey || userSettings.customApiKey || resolveBearerToken(),
+      modelId: localSettings.modelId || userSettings.modelId,
       temperature: optionalNumber("BEDROCK_TEMPERATURE", 0),
       maxTokens: optionalNumber("BEDROCK_MAX_TOKENS", 1200)
     },
     agent: {
       maxSteps: optionalNumber("AGENT_MAX_STEPS", 8),
       mode,
-      workspaceRoot: path.resolve(process.env.WORKSPACE_ROOT || process.cwd()),
-      enableCloudCache: userSettings.enableCloudCache,
-      themeColor: userSettings.themeColor
+      workspaceRoot,
+      enableCloudCache: localSettings.enableCloudCache ?? userSettings.enableCloudCache,
+      themeColor: localSettings.themeColor || userSettings.themeColor
     },
     mcp: {
       command: mcpCommand,

@@ -210,6 +210,7 @@ export class AgentLoop {
   private readonly sessionStore: SessionCapsuleStore;
   private currentModelId: string;
   private currentBranch = "nogit";
+  private localInstructions = "";
   private transcript: ConverseMessage[] = [];
   private sessionCapsule: SessionCapsule | null = null;
   private lastToolEventAt: string | null = null;
@@ -241,6 +242,7 @@ export class AgentLoop {
   }
 
   async runCli(initialPrompt?: string): Promise<void> {
+    await this.checkInit();
     this.sessionCapsule = await this.sessionStore.load();
 
     try {
@@ -253,6 +255,13 @@ export class AgentLoop {
       }
     } catch {
       // Not a git repository or git not installed
+    }
+
+    try {
+      const instrPath = path.join(this.config.agent.workspaceRoot, ".mesh", "instructions.md");
+      this.localInstructions = await fs.readFile(instrPath, "utf-8");
+    } catch {
+      // No local instructions
     }
 
     if (initialPrompt?.trim()) {
@@ -633,6 +642,45 @@ export class AgentLoop {
     await saveUserSettings(newSettings);
     output.write(pc.green("\n✔ Settings saved! Restart mesh to apply changes.\n"));
     output.write(this.themeColor("═".repeat(40) + "\n"));
+  }
+  private async checkInit(): Promise<void> {
+    const meshDir = path.join(this.config.agent.workspaceRoot, ".mesh");
+    const exists = await fs.access(meshDir).then(() => true).catch(() => false);
+    if (exists) return;
+
+    output.write(`\n${pc.cyan("?")} ${pc.bold("Initialize Mesh for this project?")} ${pc.dim("(.mesh/ folder will be created)")} (y/N) `);
+    const answer = await new Promise<string>(res => {
+      input.once("data", d => res(d.toString().trim().toLowerCase()));
+    });
+
+    if (answer === "y" || answer === "yes") {
+      await fs.mkdir(meshDir, { recursive: true });
+      await fs.mkdir(path.join(meshDir, "index"), { recursive: true });
+      await fs.mkdir(path.join(meshDir, "history"), { recursive: true });
+      
+      const config = {
+        modelId: this.config.bedrock.modelId,
+        themeColor: this.config.agent.themeColor,
+        enableCloudCache: this.config.agent.enableCloudCache
+      };
+      await fs.writeFile(path.join(meshDir, "config.json"), JSON.stringify(config, null, 2));
+      
+      const instructions = [
+        "# Project Instructions",
+        "",
+        "This file contains project-specific instructions for Mesh.",
+        "Add your coding standards, architecture patterns, and rules here.",
+        "",
+        "## Examples",
+        "- Use Tabs for indentation",
+        "- Follow Hexagonal Architecture",
+        "- Prefer functional programming patterns",
+        ""
+      ].join("\n");
+      await fs.writeFile(path.join(meshDir, "instructions.md"), instructions);
+      
+      output.write(pc.green("✔ Workspace initialized. Check .mesh/instructions.md for customization.\n"));
+    }
   }
 
   private async runIndexing(): Promise<void> {
@@ -1159,6 +1207,9 @@ export class AgentLoop {
 
   private buildRuntimeSystemPrompt(): string {
     const sections = [SYSTEM_PROMPT];
+    if (this.localInstructions) {
+      sections.push(`\nLocal Project Instructions:\n${this.localInstructions}`);
+    }
     if (this.workspaceContext) {
       sections.push(this.workspaceContext);
     }

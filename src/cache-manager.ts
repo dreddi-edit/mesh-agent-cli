@@ -18,7 +18,10 @@ export class CacheManager {
 
   constructor(config: AppConfig) {
     this.workspaceHash = crypto.createHash("md5").update(config.agent.workspaceRoot).digest("hex");
-    this.l1BasePath = path.join(os.tmpdir(), "mesh-agent-cache", this.workspaceHash);
+    
+    // Check for local .mesh directory in workspace root
+    const localMeshPath = path.join(config.agent.workspaceRoot, ".mesh", "index");
+    this.l1BasePath = localMeshPath;
 
     if (config.agent.enableCloudCache && config.supabase?.url && config.supabase?.key) {
       this.supabase = createClient(config.supabase.url, config.supabase.key);
