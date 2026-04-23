@@ -32,6 +32,11 @@ jobs:
         run: |
           node -e 'const fs=require("fs");const pkg=require("./package.json");const [major,minor]=String(pkg.version||"0.1.0").split(".");const run=process.env.GITHUB_RUN_NUMBER||"0";const attempt=process.env.GITHUB_RUN_ATTEMPT||"1";const version=`${major}.${minor}.${run}${attempt==="1"?"":`-run.${attempt}`}`;pkg.version=version;fs.writeFileSync("package.json", JSON.stringify(pkg,null,2)+"\n");console.log("Publishing version",version);'
 
+      - name: Align package scope with npm token owner
+        run: |
+          export NPM_USER="$(npm whoami)"
+          node -e 'const fs=require("fs");const pkg=require("./package.json");const user=process.env.NPM_USER;pkg.name=`@${user}/mesh-agent-cli`;fs.writeFileSync("package.json", JSON.stringify(pkg,null,2)+"\n");console.log("Publishing package",pkg.name);'
+
       - name: Publish to npm
         run: npm publish --provenance --access public
         env:

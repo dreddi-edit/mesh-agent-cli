@@ -10,7 +10,8 @@
   "files": [
     "dist",
     "README.md",
-    "mesh-core"
+    "mesh-core/src",
+    "mesh-core/package.json"
   ],
   "publishConfig": {
     "access": "public"
