@@ -257,7 +257,7 @@ export class AgentLoop {
     }
 
     this.printBanner();
-    const rl = readline.createInterface({
+    let rl = readline.createInterface({
       input: input,
       output: output,
       terminal: true,
@@ -283,38 +283,8 @@ export class AgentLoop {
       }
     });
 
-  private setupGhostText(rl: readline.Interface, input: NodeJS.ReadableStream, output: NodeJS.WritableStream) {
-    if (!this.useAnsi) return;
-    input.removeAllListeners("keypress");
-    let lastGhostText = "";
-    input.on("keypress", (_, key) => {
-      if (!this.useAnsi || !key) return;
-      if (key.name === "return" || key.name === "enter") return;
-      
-      setTimeout(() => {
-        const line = (rl as any).line || "";
-        if (line.startsWith("/") && !line.includes(" ")) {
-          const commands = this.getSlashCommands().flatMap(c => [c.name, ...(c.aliases || [])]);
-          const match = commands.find(c => c.startsWith(line) && c !== line);
-          if (match) {
-            const hint = match.slice(line.length);
-            if (hint !== lastGhostText) {
-              output.write(pc.dim(hint) + "\u001b[" + hint.length + "D");
-              lastGhostText = hint;
-            }
-          } else if (lastGhostText) {
-            output.write(" ".repeat(lastGhostText.length) + "\u001b[" + lastGhostText.length + "D");
-            lastGhostText = "";
-          }
-        } else if (lastGhostText) {
-          output.write(" ".repeat(lastGhostText.length) + "\u001b[" + lastGhostText.length + "D");
-          lastGhostText = "";
-        }
-      }, 5);
-    });
-  }
-
     this.setupGhostText(rl, input, output);
+
 
     while (true) {
       if ((rl as any).closed) {
@@ -698,6 +668,37 @@ export class AgentLoop {
         ""
       ].join("\n")
     );
+  }
+
+  private setupGhostText(rl: readline.Interface, input: NodeJS.ReadableStream, output: NodeJS.WritableStream) {
+    if (!this.useAnsi) return;
+    input.removeAllListeners("keypress");
+    let lastGhostText = "";
+    input.on("keypress", (_, key) => {
+      if (!this.useAnsi || !key) return;
+      if (key.name === "return" || key.name === "enter") return;
+      
+      setTimeout(() => {
+        const line = (rl as any).line || "";
+        if (line.startsWith("/") && !line.includes(" ")) {
+          const commands = this.getSlashCommands().flatMap(c => [c.name, ...(c.aliases || [])]);
+          const match = commands.find(c => c.startsWith(line) && c !== line);
+          if (match) {
+            const hint = match.slice(line.length);
+            if (hint !== lastGhostText) {
+              output.write(pc.dim(hint) + "\u001b[" + hint.length + "D");
+              lastGhostText = hint;
+            }
+          } else if (lastGhostText) {
+            output.write(" ".repeat(lastGhostText.length) + "\u001b[" + lastGhostText.length + "D");
+            lastGhostText = "";
+          }
+        } else if (lastGhostText) {
+          output.write(" ".repeat(lastGhostText.length) + "\u001b[" + lastGhostText.length + "D");
+          lastGhostText = "";
+        }
+      }, 5);
+    });
   }
 
   private renderUserTurn(text: string): void {
