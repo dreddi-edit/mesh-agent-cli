@@ -34,10 +34,9 @@ export class MeshCoreAdapter {
     const require = createRequire(import.meta.url);
     const moduleDir = path.dirname(fileURLToPath(import.meta.url));
     const candidates = [
-      path.resolve(process.cwd(), "mesh-core/lib/compression-core.cjs"),
-      path.resolve(process.cwd(), "mesh-core/src/compression-core.cjs"),
-      path.resolve(moduleDir, "../mesh-core/lib/compression-core.cjs"),
-      path.resolve(moduleDir, "../mesh-core/src/compression-core.cjs")
+      path.resolve(moduleDir, "./mesh-core/compression-core.cjs"), // When running from dist
+      path.resolve(moduleDir, "../mesh-core/lib/compression-core.cjs"), // When running from source
+      path.resolve(process.cwd(), "mesh-core/lib/compression-core.cjs")
     ];
 
     try {

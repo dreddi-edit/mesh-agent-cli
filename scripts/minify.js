@@ -59,8 +59,8 @@ async function main() {
   // 1. Minify dist/ (overwrite)
   await processDirectory("dist", "dist");
   
-  // 2. Minify mesh-core/src/ -> mesh-core/lib/
-  await processDirectory("mesh-core/src", "mesh-core/lib");
+  // 2. Minify mesh-core/src/ -> dist/mesh-core/
+  await processDirectory("mesh-core/src", "dist/mesh-core");
   
   console.log("Minification complete! ✅");
 }
