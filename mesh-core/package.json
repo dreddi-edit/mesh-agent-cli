@@ -4,6 +4,7 @@
   "description": "Core routing and compression engine for Mesh",
   "main": "src/server.js",
   "type": "module",
+  "license": "UNLICENSED",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js"

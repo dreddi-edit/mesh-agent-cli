@@ -18,4 +18,4 @@ mesh
 - `/index` - Optimize workspace indexing
 - `/status` - Check health & token usage
 
-MIT.
+All rights reserved.
