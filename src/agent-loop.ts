@@ -648,12 +648,15 @@ export class AgentLoop {
     const exists = await fs.access(meshDir).then(() => true).catch(() => false);
     if (exists) return;
 
-    output.write(`\n${pc.cyan("?")} ${pc.bold("Initialize Mesh for this project?")} ${pc.dim("(.mesh/ folder will be created)")} (y/N) `);
-    const answer = await new Promise<string>(res => {
-      input.once("data", d => res(d.toString().trim().toLowerCase()));
+    const prompt = new Confirm({
+      name: "init",
+      message: "Initialize Mesh for this project? (.mesh/ folder will be created)",
+      initial: true
     });
 
-    if (answer === "y" || answer === "yes") {
+    const confirmed = await prompt.run();
+
+    if (confirmed) {
       await fs.mkdir(meshDir, { recursive: true });
       await fs.mkdir(path.join(meshDir, "index"), { recursive: true });
       await fs.mkdir(path.join(meshDir, "history"), { recursive: true });
