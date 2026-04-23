@@ -35,7 +35,13 @@ jobs:
       - name: Align package scope with npm token owner
         run: |
           export NPM_USER="$(npm whoami)"
+          if [ -z "$NPM_USER" ]; then
+            echo "npm whoami returned empty user. Check NPM/NPM_TOKEN secret."
+            exit 1
+          fi
           node -e 'const fs=require("fs");const pkg=require("./package.json");const user=process.env.NPM_USER;pkg.name=`@${user}/mesh-agent-cli`;fs.writeFileSync("package.json", JSON.stringify(pkg,null,2)+"\n");console.log("Publishing package",pkg.name);'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN || secrets.NPM }}
 
       - name: Publish to npm
         run: npm publish --provenance --access public
