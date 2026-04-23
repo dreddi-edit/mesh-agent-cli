@@ -269,6 +269,7 @@ export class AgentLoop {
   private readonly historyPath = path.join(os.homedir(), ".mesh_history");
   private voiceManager: VoiceManager;
   private voiceMode = false;
+  private voiceLanguage = "en";
 
   constructor(
     private readonly config: AppConfig,
@@ -385,7 +386,9 @@ export class AgentLoop {
           try {
             const audioFile = await this.voiceManager.record(5);
             output.write(pc.dim("Transcribing...\n"));
-            userInput = await this.voiceManager.transcribe(audioFile);
+            const transcription = await this.voiceManager.transcribe(audioFile);
+            userInput = transcription.text;
+            this.voiceLanguage = transcription.language || this.voiceLanguage;
             output.write(pc.bold(`❯ ${userInput}\n`));
           } catch (err) {
             output.write(pc.red(`Voice error: ${(err as Error).message}\n`));
@@ -460,7 +463,7 @@ export class AgentLoop {
               if (this.voiceMode) {
                 currentSentence += delta;
                 if (/[.!?]\s*$/.test(delta)) {
-                  this.voiceManager.speak(currentSentence.trim()).catch(() => {});
+                  this.voiceManager.speak(currentSentence.trim(), this.voiceLanguage).catch(() => {});
                   currentSentence = "";
                 }
               }
@@ -484,7 +487,7 @@ export class AgentLoop {
             }
           });
           if (this.voiceMode && currentSentence.trim()) {
-            this.voiceManager.speak(currentSentence.trim()).catch(() => {});
+            this.voiceManager.speak(currentSentence.trim(), this.voiceLanguage).catch(() => {});
           }
           if (hasStartedStreaming) {
             output.write("\n");

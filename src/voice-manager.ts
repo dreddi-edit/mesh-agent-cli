@@ -16,7 +16,21 @@ export interface VoiceConfig {
   piperModel: string;
 }
 
+export interface VoiceTranscriptionResult {
+  text: string;
+  language: string;
+}
+
 const MACOS_SAY_RATE = "260";
+const MACOS_VOICE_BY_LANGUAGE: Record<string, string> = {
+  de: "Anna",
+  en: "Daniel",
+  es: "Mónica",
+  fr: "Jacques",
+  it: "Alice",
+  ja: "Kyoko",
+  pt: "Luciana"
+};
 
 export class VoiceManager {
   private isRecording = false;
@@ -195,7 +209,7 @@ export class VoiceManager {
   /**
    * Transcribe WAV using whisper-cpp
    */
-  async transcribe(filePath: string): Promise<string> {
+  async transcribe(filePath: string): Promise<VoiceTranscriptionResult> {
     const whisperModel = this.resolveWhisperModel();
     if (!whisperModel) {
       throw new Error(`Whisper model not found at ${this.config.whisperModel}.`);
@@ -218,8 +232,12 @@ export class VoiceManager {
       proc.stdout.on("data", (data) => (output += data.toString()));
       proc.stderr.on("data", (data) => (errorOutput += data.toString()));
       proc.on("close", (code) => {
-        if (code === 0) resolve(output.trim());
-        else {
+        if (code === 0) {
+          resolve({
+            text: output.trim(),
+            language: this.extractDetectedLanguage(errorOutput)
+          });
+        } else {
           const detail = errorOutput.trim().split("\n").slice(-3).join(" | ");
           reject(
             new Error(
@@ -247,30 +265,62 @@ export class VoiceManager {
       .trim();
   }
 
+  private extractDetectedLanguage(stderr: string): string {
+    const match = stderr.match(/auto-detected language:\s*([a-z]{2,3}(?:[-_][A-Z]{2})?)/i);
+    return match?.[1]?.toLowerCase() || "en";
+  }
+
+  private normalizeLanguage(language?: string): string {
+    return String(language || "en")
+      .trim()
+      .toLowerCase()
+      .replace(/_/g, "-");
+  }
+
+  private resolveSayVoice(language?: string): string | undefined {
+    const normalized = this.normalizeLanguage(language);
+    const baseLanguage = normalized.split("-")[0];
+    return MACOS_VOICE_BY_LANGUAGE[normalized] || MACOS_VOICE_BY_LANGUAGE[baseLanguage];
+  }
+
+  private speakWithMacOsSay(speechText: string, language?: string): void {
+    const voice = this.resolveSayVoice(language);
+    const args = voice
+      ? ["-v", voice, "-r", MACOS_SAY_RATE, speechText]
+      : ["-r", MACOS_SAY_RATE, speechText];
+    execFileSync("say", args, { stdio: "ignore" });
+  }
+
   /**
    * Speak text using Piper and afplay
    */
-  async speak(text: string): Promise<void> {
+  async speak(text: string, language = "en"): Promise<void> {
     const speechText = this.prepareSpeechText(text);
     if (!speechText) {
       return;
     }
 
+    const normalizedLanguage = this.normalizeLanguage(language);
     const piperModel = this.resolvePiperModel();
-    if (!piperModel) {
-      // Fallback to 'say' on Mac if piper is missing
+    const shouldUsePiper = Boolean(piperModel) && normalizedLanguage.startsWith("en");
+
+    if (!shouldUsePiper) {
       if (process.platform === "darwin") {
-        execFileSync("say", ["-r", MACOS_SAY_RATE, speechText], { stdio: "ignore" });
+        this.speakWithMacOsSay(speechText, normalizedLanguage);
         return;
       }
-      throw new Error("Piper model path not configured.");
+      if (!piperModel) {
+        throw new Error("Piper model path not configured.");
+      }
     }
+
+    const resolvedPiperModel = piperModel!;
 
     const tempAudio = path.join(os.tmpdir(), `mesh_speech_${Date.now()}.wav`);
     
     // piper -m model.onnx --output_file out.wav
     const args = [
-      "-m", piperModel,
+      "-m", resolvedPiperModel,
       "--output_file", tempAudio
     ];
     const piperPath = this.resolveBinary(this.config.piperPath!);
