@@ -326,11 +326,13 @@ export class AgentLoop {
           const now = Date.now();
           if (now - lastSigInt < 2000) {
             rl.close();
-            output.write("\n\n" + pc.dim("Aborted by user.") + "\n");
             process.exit(0);
           } else {
             lastSigInt = now;
             output.write("\n" + this.themeColor(pc.bold("Press Ctrl+C again within 2s to exit")) + "\n");
+            // Clear current line and trigger loop restart
+            (rl as any).line = "";
+            rl.write("\n");
           }
         }
       });
@@ -340,15 +342,10 @@ export class AgentLoop {
       try {
         userInput = (await rl.question(prompt)).trim();
       } catch (err) {
-        if (this.abortController?.signal.aborted) {
-          this.abortController = new AbortController();
-          rl.close();
-          continue;
-        }
         rl.close();
         break;
       }
-      
+
       if (!userInput) {
         rl.close();
         continue;
@@ -371,7 +368,7 @@ export class AgentLoop {
       }
 
       try {
-        const spinner = this.useAnsi ? ora({ text: "Thinking...", color: "cyan" }).start() : undefined;
+        const spinner = this.useAnsi ? ora({ text: "Thinking...", color: "cyan", stream: output }).start() : undefined;
         let answer: string | undefined;
         try {
           answer = await this.runSingleTurn(userInput, {
@@ -390,7 +387,11 @@ export class AgentLoop {
             askPermission: async (msg) => {
               if (spinner) spinner.stop();
               const p = this.useAnsi ? pc.yellow(`\n[Action Required] ${msg} [y/N/A]: `) : `\n[Action Required] ${msg} [y/N/A]: `;
-              const ans = (await rl.question(p)).trim().toLowerCase();
+              // Use a fresh RL for permission to avoid prompt conflicts
+              const tempRl = readline.createInterface({ input, output });
+              const ans = (await tempRl.question(p)).trim().toLowerCase();
+              tempRl.close();
+              
               if (ans === "a") {
                 this.autoApproveTools = true;
                 if (spinner) spinner.start();
@@ -402,7 +403,10 @@ export class AgentLoop {
             }
           });
         } finally {
-          if (spinner) spinner.stop();
+          if (spinner) {
+            spinner.stop();
+            spinner.clear();
+          }
         }
 
         if (answer) {
