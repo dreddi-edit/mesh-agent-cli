@@ -163,8 +163,10 @@ export class LocalToolBackend implements ToolBackend {
         return this.searchFiles(args);
       case "workspace.check_sync":
         return this.checkSync();
-      case "workspace.index_everything":
+      case "workspace.grep_content":
         return this.grepContent(args);
+      case "workspace.index_everything":
+        return this.indexEverything();
       case "workspace.write_file":
         return this.writeFile(args);
       case "workspace.run_command":

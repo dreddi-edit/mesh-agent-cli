@@ -283,13 +283,14 @@ export class AgentLoop {
       }
     });
 
-    // Ghost text / dynamic hint support
+  private setupGhostText(rl: readline.Interface, input: NodeJS.ReadableStream, output: NodeJS.WritableStream) {
+    if (!this.useAnsi) return;
+    input.removeAllListeners("keypress");
     let lastGhostText = "";
     input.on("keypress", (_, key) => {
       if (!this.useAnsi || !key) return;
       if (key.name === "return" || key.name === "enter") return;
       
-      // Short delay to let readline update its internal state
       setTimeout(() => {
         const line = (rl as any).line || "";
         if (line.startsWith("/") && !line.includes(" ")) {
@@ -298,12 +299,10 @@ export class AgentLoop {
           if (match) {
             const hint = match.slice(line.length);
             if (hint !== lastGhostText) {
-              // Move cursor forward, print hint in dim, then move back
               output.write(pc.dim(hint) + "\u001b[" + hint.length + "D");
               lastGhostText = hint;
             }
           } else if (lastGhostText) {
-            // Clear last hint
             output.write(" ".repeat(lastGhostText.length) + "\u001b[" + lastGhostText.length + "D");
             lastGhostText = "";
           }
@@ -313,10 +312,27 @@ export class AgentLoop {
         }
       }, 5);
     });
+  }
+
+    this.setupGhostText(rl, input, output);
 
     while (true) {
+      if ((rl as any).closed) {
+        rl = readline.createInterface({
+          input: input,
+          output: output,
+          terminal: true,
+          completer: (line) => this.completeInput(line)
+        });
+        this.setupGhostText(rl, input, output);
+      }
       const prompt = this.buildPrompt();
-      let userInput = (await rl.question(prompt)).trim();
+      let userInput = "";
+      try {
+        userInput = (await rl.question(prompt)).trim();
+      } catch {
+        break;
+      }
       if (!userInput) {
         continue;
       }
@@ -860,6 +876,7 @@ export class AgentLoop {
       const pickedValue = await prompt.run();
       if (input.isTTY) input.setRawMode(true);
       input.resume();
+      this.setupGhostText(rl, input, output);
       const picked = MODEL_OPTIONS.find((o) => o.value === pickedValue)!;
       
       this.currentModelId = picked.value;
@@ -875,6 +892,7 @@ export class AgentLoop {
       const shouldSave = await confirmPrompt.run();
       if (input.isTTY) input.setRawMode(true);
       input.resume();
+      this.setupGhostText(rl, input, output);
       if (shouldSave) {
         const current = await loadUserSettings();
         await saveUserSettings({ ...current, modelId: picked.value });
