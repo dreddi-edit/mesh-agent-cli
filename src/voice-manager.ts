@@ -1,4 +1,5 @@
-import { spawn, execSync } from "node:child_process";
+import { spawn, execFileSync, execSync } from "node:child_process";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
@@ -18,15 +19,66 @@ export class VoiceManager {
     this.config.piperPath = config.piperPath || "piper";
   }
 
+  private resolveBinary(command: string): string {
+    if (path.isAbsolute(command) || command.includes(path.sep)) {
+      return command;
+    }
+
+    const candidates = [
+      ...((process.env.PATH || "")
+        .split(path.delimiter)
+        .filter(Boolean)
+        .map((dir) => path.join(dir, command))),
+      path.join("/opt/homebrew/bin", command),
+      path.join("/usr/local/bin", command)
+    ];
+
+    for (const candidate of candidates) {
+      if (fsSync.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+
+    try {
+      return execFileSync("which", [command], { encoding: "utf8" }).trim() || command;
+    } catch {
+      return command;
+    }
+  }
+
+  hasHomebrew(): boolean {
+    return this.resolveBinary("brew") !== "brew";
+  }
+
+  async installCoreDependencies(packages: string[] = ["ffmpeg", "whisper-cpp"]): Promise<void> {
+    const brewPath = this.resolveBinary("brew");
+    if (brewPath === "brew") {
+      throw new Error("Homebrew not found. Install Homebrew first from https://brew.sh");
+    }
+
+    return new Promise((resolve, reject) => {
+      const proc = spawn(brewPath, ["install", ...packages], { stdio: "inherit" });
+      proc.on("error", (err) => reject(new Error(`brew spawn failed: ${err.message}`)));
+      proc.on("close", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`brew install failed with code ${code}`));
+      });
+    });
+  }
+
   /**
    * Check if necessary binaries are available
    */
   async checkDependencies(): Promise<{ name: string; ok: boolean; hint?: string }[]> {
+    const ffmpegPath = this.resolveBinary("ffmpeg");
+    const afplayPath = this.resolveBinary("afplay");
+    const whisperPath = this.resolveBinary(this.config.whisperPath!);
+    const piperPath = this.resolveBinary(this.config.piperPath!);
     const deps = [
-      { name: "ffmpeg", cmd: "ffmpeg -version", hint: "brew install ffmpeg" },
-      { name: "afplay", cmd: "afplay --help", hint: "Built-in on macOS" },
-      { name: "whisper-cpp", cmd: `${this.config.whisperPath} --help`, hint: "brew install whisper-cpp" },
-      { name: "piper", cmd: `${this.config.piperPath} --version`, hint: "Download from github.com/rhasspy/piper" }
+      { name: "ffmpeg", cmd: `${ffmpegPath} -version`, hint: "brew install ffmpeg" },
+      { name: "afplay", cmd: `${afplayPath} --help`, hint: "Built-in on macOS" },
+      { name: "whisper-cpp", cmd: `${whisperPath} --help`, hint: "brew install whisper-cpp" },
+      { name: "piper", cmd: `${piperPath} --version`, hint: "Download from github.com/rhasspy/piper" }
     ];
 
     const results = [];
@@ -80,10 +132,11 @@ export class VoiceManager {
       "-f", filePath,
       "-nt" // No timestamps
     ];
+    const whisperPath = this.resolveBinary(this.config.whisperPath!);
 
     return new Promise((resolve, reject) => {
       let output = "";
-      const proc = spawn(this.config.whisperPath!, args);
+      const proc = spawn(whisperPath, args);
       proc.on("error", (err) => reject(new Error(`whisper-cpp spawn failed: ${err.message}`)));
       proc.stdout.on("data", (data) => (output += data.toString()));
       proc.on("close", (code) => {
@@ -113,9 +166,10 @@ export class VoiceManager {
       "-m", this.config.piperModel,
       "--output_file", tempAudio
     ];
+    const piperPath = this.resolveBinary(this.config.piperPath!);
 
     return new Promise((resolve, reject) => {
-      const proc = spawn(this.config.piperPath!, args);
+      const proc = spawn(piperPath, args);
       proc.on("error", (err) => reject(new Error(`piper spawn failed: ${err.message}`)));
       proc.stdin.write(text);
       proc.stdin.end();

@@ -1107,7 +1107,7 @@ export class AgentLoop {
       { name: "/model", usage: "/model [pick|list|id|save]", description: "interactive chooser or switch model" },
       { name: "/cost", usage: "/cost", description: "show token usage and estimated cost" },
       { name: "/approvals", usage: "/approvals [status|on|off]", description: "control tool auto-approval mode" },
-      { name: "/doctor", usage: "/doctor [brief|full]", description: "show runtime diagnostics" },
+      { name: "/doctor", usage: "/doctor [brief|full|voice [fix]]", description: "show runtime diagnostics" },
       { name: "/compact", usage: "/compact", description: "compress transcript into session capsule" },
       { name: "/clear", usage: "/clear", description: "clear terminal UI" },
       { name: "/voice", usage: "/voice [on|off]", description: "toggle Speech-to-Speech mode" },
@@ -1331,7 +1331,7 @@ export class AgentLoop {
     ];
     const capsuleChoices = ["show", "compact", "clear", "export", "stats", "path"];
     const approvalsChoices = ["status", "on", "off"];
-    const doctorChoices = ["brief", "full"];
+    const doctorChoices = ["brief", "full", "voice", "fix"];
     const setupChoices = ["noninteractive", "model=", "cloud=", "theme=", "key=", "endpoint="];
 
     let pool: string[] = [];
@@ -1498,15 +1498,57 @@ export class AgentLoop {
   private async runDoctor(args: string[] = []): Promise<void> {
     const isFull = args.includes("full");
     const isVoice = args.includes("voice");
+    const wantsFix = args.includes("fix");
 
     if (isVoice) {
-      const voiceDeps = await this.voiceManager.checkDependencies();
+      let voiceDeps = await this.voiceManager.checkDependencies();
       output.write(this.themeColor(`\n${pc.bold("Voice Diagnostics")}\n`));
       for (const dep of voiceDeps) {
         const icon = dep.ok ? pc.green("✔") : pc.red("✘");
         output.write(`${icon} ${dep.name.padEnd(15)} ${dep.ok ? pc.green("Available") : pc.red("Missing")}\n`);
         if (!dep.ok && dep.hint) {
           output.write(`   ${pc.dim(`Hint: ${dep.hint}`)}\n`);
+        }
+      }
+
+      if (wantsFix) {
+        const missingCore = voiceDeps
+          .filter((dep) => !dep.ok && (dep.name === "ffmpeg" || dep.name === "whisper-cpp"))
+          .map((dep) => dep.name);
+
+        if (missingCore.length === 0) {
+          output.write(pc.green("\nCore voice dependencies are already installed.\n"));
+          return;
+        }
+
+        if (!this.voiceManager.hasHomebrew()) {
+          output.write(pc.red("\nHomebrew is not installed. Install it from https://brew.sh and rerun /doctor voice fix.\n"));
+          return;
+        }
+
+        const confirmPrompt = new Confirm({
+          name: "installVoiceDeps",
+          message: `Install missing voice dependencies with Homebrew? (${missingCore.join(", ")})`,
+          initial: true
+        });
+        const confirmed = Boolean(await confirmPrompt.run().catch(() => false));
+        if (!confirmed) {
+          output.write(pc.dim("\nInstallation cancelled.\n"));
+          return;
+        }
+
+        output.write(this.themeColor(`\nInstalling: ${missingCore.join(", ")}\n`));
+        try {
+          await this.voiceManager.installCoreDependencies(missingCore);
+          voiceDeps = await this.voiceManager.checkDependencies();
+          output.write(pc.green("\nVoice dependency installation complete.\n"));
+          for (const dep of voiceDeps) {
+            const icon = dep.ok ? pc.green("✔") : pc.red("✘");
+            output.write(`${icon} ${dep.name.padEnd(15)} ${dep.ok ? pc.green("Available") : pc.red("Missing")}\n`);
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          output.write(pc.red(`\nVoice dependency installation failed: ${message}\n`));
         }
       }
       return;
