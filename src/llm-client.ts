@@ -30,7 +30,7 @@ export class BedrockLlmClient {
   async decide(messages: LlmMessage[], tools: unknown[]): Promise<AgentDecision> {
     const systemContract = [
       "You are a terminal AI agent.",
-      "You can either answer directly or request exactly one MCP tool call.",
+      "You can either answer directly or request exactly one tool call.",
       "Return strict JSON only, no markdown, no prose outside JSON.",
       "Schema:",
       "{\"type\":\"final\",\"answer\":\"...\"}",

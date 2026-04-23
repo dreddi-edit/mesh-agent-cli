@@ -1,19 +1,24 @@
 # mesh-agent-cli
 
-Eigenstaendiger Terminal-Agent als MCP-Client fuer `mesh-mcp-dist`.
+Eigenstaendiger Terminal-Agent als MCP-Client oder Local-Agent fuer Mesh.
 
 Flow:
 1. User-Eingabe im Terminal
 2. LLM-Entscheidung ueber naechsten Schritt
-3. MCP Toolcall an `mesh-mcp-dist` (falls noetig)
+3. Toolcall an lokales Tool-Backend (`local`) oder `mesh-mcp-dist` (`mcp`)
 4. Lokale Mesh-Kompression der Tool-Ergebnisse fuer den Agent-Kontext
 5. Finale Antwort im Terminal
+
+## Modi
+
+- `local` (Default): Kein Server noetig, lokale Workspace-Tools im Prozess.
+- `mcp`: Nutzt `mesh-mcp-dist` als MCP-Tool-Backend via stdio.
 
 ## Voraussetzungen
 
 - Node.js 20+
-- Laufender/aufrufbarer MCP-Server (`mesh-mcp-dist`) via stdio
-- Entweder direkter Bedrock-Token oder zentraler Bedrock-Proxy
+- Bedrock Endpoint (direkt oder ueber Proxy)
+- Optional fuer `mcp`-Mode: aufrufbarer `mesh-mcp-dist` Prozess
 
 ## Setup
 
@@ -26,17 +31,10 @@ npm install
 
 - `BEDROCK_ENDPOINT`: HTTP Endpoint fuer LLM Requests
 - `AWS_BEARER_TOKEN_BEDROCK`: optional fuer direkten Bedrock-Zugriff
-- `MESH_MCP_COMMAND`: Startkommando fuer MCP-Server (z. B. `node`)
-- `MESH_MCP_ARGS`: JSON Array mit Args fuer das Kommando
-
-## Empfohlener Multi-User Betrieb
-
-Fuer mehrere Nutzer den Bedrock-Token **nicht** im CLI verteilen.
-Setze stattdessen `BEDROCK_ENDPOINT` auf einen zentralen Proxy-Service:
-
-1. CLI sendet Requests ohne lokalen Bedrock-Token.
-2. Proxy haelt `AWS_BEARER_TOKEN_BEDROCK` serverseitig und setzt den Header.
-3. Optional: Proxy mit User-Auth, Rate-Limits, Audit-Logs.
+- `AGENT_MODE`: `local` oder `mcp` (default `local`)
+- `WORKSPACE_ROOT`: Root fuer lokale Datei-Tools in `local`-Mode
+- `MESH_MCP_COMMAND`: Startkommando fuer MCP-Server (nur `mcp`-Mode)
+- `MESH_MCP_ARGS`: JSON Array mit Args fuer das MCP-Kommando
 
 ## Start
 
@@ -52,21 +50,17 @@ Einmalige Frage:
 npm run dev -- "Welche Tools stehen zur Verfuegung?"
 ```
 
+## Mesh-Core Integration
+
+Wenn `./mesh-core` vorhanden ist, nutzt `local`-Mode direkt Teile der Mesh-Core-Logik
+(z. B. File-Type-Erkennung, Token-Schaetzung, Capsule-Vorschau). Ohne `mesh-core`
+laeuft das CLI mit sauberem Fallback weiter.
+
 ## npm Release Automation
 
 - Paketname: `@dreddi-edit/mesh-agent-cli`
 - Binary: `mesh-agent`
 - Bei jedem Push auf `main`:
   1. Build
-  2. Automatischer Patch-Bump (`npm version patch`)
-  3. Git tag + push
-  4. `npm publish`
-
-## Hinweis Architektur
-
-Dieses Repo ist bewusst nur der Agent-Client.
-`mesh-mcp-dist` bleibt das Tool-Backend (MCP-Server).
-
-Zusatz:
-- Das CLI hat lokale Mesh-Gateway-Kompressionslogik (`src/mesh-gateway.ts`)
-  und komprimiert/glaettet grosse Tool-Payloads fuer den LLM-Kontext.
+  2. Laufzeit-Version aus GitHub-Run-Nummer
+  3. `npm publish`

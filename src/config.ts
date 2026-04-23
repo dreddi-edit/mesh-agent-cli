@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import { config as loadDotEnv } from "dotenv";
 
 loadDotEnv();
@@ -34,6 +36,11 @@ function parseJsonArray(raw: string, name: string): string[] {
   }
 }
 
+function parseMode(raw: string | undefined): "local" | "mcp" {
+  const normalized = String(raw || "local").trim().toLowerCase();
+  return normalized === "mcp" ? "mcp" : "local";
+}
+
 export interface AppConfig {
   bedrock: {
     endpoint: string;
@@ -44,15 +51,23 @@ export interface AppConfig {
   };
   agent: {
     maxSteps: number;
+    mode: "local" | "mcp";
+    workspaceRoot: string;
   };
   mcp: {
-    command: string;
+    command?: string;
     args: string[];
   };
 }
 
 export function getConfig(): AppConfig {
+  const mode = parseMode(process.env.AGENT_MODE);
   const mcpArgsRaw = process.env.MESH_MCP_ARGS ?? "[]";
+  const mcpCommand = process.env.MESH_MCP_COMMAND?.trim();
+
+  if (mode === "mcp" && !mcpCommand) {
+    throw new Error("Missing required env var in mcp mode: MESH_MCP_COMMAND");
+  }
 
   return {
     bedrock: {
@@ -63,10 +78,12 @@ export function getConfig(): AppConfig {
       maxTokens: optionalNumber("BEDROCK_MAX_TOKENS", 1200)
     },
     agent: {
-      maxSteps: optionalNumber("AGENT_MAX_STEPS", 8)
+      maxSteps: optionalNumber("AGENT_MAX_STEPS", 8),
+      mode,
+      workspaceRoot: path.resolve(process.env.WORKSPACE_ROOT || process.cwd())
     },
     mcp: {
-      command: required("MESH_MCP_COMMAND"),
+      command: mcpCommand,
       args: parseJsonArray(mcpArgsRaw, "MESH_MCP_ARGS")
     }
   };

@@ -1,0 +1,949 @@
+{
+  "folderName": "parity-workspace-worker",
+  "indexedAt": "2026-04-05T15:33:39.219Z",
+  "files": [
+    {
+      "formatVersion": 2,
+      "path": "parity-workspace-worker/dashboard/home.html",
+      "kind": "source",
+      "fileType": "markup/html",
+      "fileTypeInfo": {
+        "family": "markup",
+        "language": "html",
+        "capsuleType": "dom-outline",
+        "parserFamily": "tree-sitter",
+        "parserKey": "html",
+        "extension": "html"
+      },
+      "parserFamily": "heuristic",
+      "parseOk": false,
+      "capsuleMode": "emergency",
+      "rawStorage": {
+        "encoding": "utf8-base64",
+        "contentBase64": "PCFkb2N0eXBlIGh0bWw+CjxodG1sPjxib2R5PjxtYWluPkhvbWUgd29ya3NwYWNlIHBhZ2U8L21haW4+PC9ib2R5PjwvaHRtbD4K",
+        "rawBytes": 75,
+        "digest": "df671ff20efd22d8ad81325be4acead029c882b714142cc9bd3706bfc13b2041"
+      },
+      "capsuleBase": {
+        "sections": [],
+        "spanMap": {},
+        "parserFamily": "heuristic",
+        "parseOk": false,
+        "fallbackReason": "markup parsing fell back to regex outline"
+      },
+      "capsuleCache": {
+        "query": "",
+        "rendered": "CAPSULE v2 path=parity-workspace-worker/home.html\ntype=markup/html capsule=dom-outline mode=emergency parser=heuristic parse_ok=false\nraw_bytes=75 raw_tokens=19\nfallback_reason=markup parsing fell back to regex outline\n[summary]\n- Emergency capsule for home.html; use recovery for exact detail.",
+        "capsule": {
+          "version": 2,
+          "path": "parity-workspace-worker/home.html",
+          "fileType": "markup/html",
+          "family": "markup",
+          "language": "html",
+          "capsuleType": "dom-outline",
+          "parserFamily": "heuristic",
+          "parseOk": false,
+          "capsuleMode": "emergency",
+          "query": "",
+          "rawBytes": 75,
+          "rawTokenEstimate": 19,
+          "mustKeep": [
+            "summary"
+          ],
+          "sections": [
+            {
+              "name": "summary",
+              "priority": "P0",
+              "items": [
+                {
+                  "text": "Emergency capsule for home.html; use recovery for exact detail.",
+                  "spanIds": [],
+                  "priority": "P0"
+                }
+              ]
+            }
+          ],
+          "spanMap": {},
+          "totalItems": 0,
+          "focused": false,
+          "fallbackReason": "markup parsing fell back to regex outline",
+          "capsuleTokenEstimate": 74,
+          "budgetTokens": 3,
+          "budgetMet": false,
+          "recoveryEligible": false,
+          "capsuleBytes": 294,
+          "compressionRatio": 0.26
+        },
+        "updatedAt": "2026-04-05T15:33:39.161Z"
+      },
+      "focusedCapsuleCache": {},
+      "spanIndex": {},
+      "transportEnvelope": {
+        "envelopeVersion": "mesh-envelope-v2",
+        "contentEncoding": "zstd-chunked",
+        "rawBytes": 75,
+        "compressedBytes": 80,
+        "chunkSize": 32768,
+        "chunkCount": 1,
+        "spanCount": 0,
+        "digest": "df671ff20efd22d8ad81325be4acead029c882b714142cc9bd3706bfc13b2041",
+        "chunkIndex": [
+          {
+            "id": 0,
+            "rawOffset": 0,
+            "rawLength": 75,
+            "compressedBytes": 80,
+            "digest": "28668b4d7de22087633c9c9dcc4ebfba4aa02d21e40d850b0c867950a2ebda2a"
+          }
+        ],
+        "spanIndex": {},
+        "chunks": [
+          "KLUv/QBYPQIAtAM8IWRvY3R5cGUgaHRtbD4KPDxib2R5PjxtYWluPkhvbWUgd29ya3NwYWNlIHBhZ2U8LzwvL2h0bWw+CgMASg1Oz3vVliU="
+        ],
+        "manifestText": "mesh-envelope-v2\npath: parity-workspace-worker/home.html\ncontent-encoding: zstd-chunked\nraw-bytes: 75\ncompressed-bytes: 80\nchunk-size: 32768\nchunk-count: 1\nspan-count: 0\ndigest: df671ff20efd22d8ad81325be4acead029c882b714142cc9bd3706bfc13b2041\nchunks:\n- id=0 raw=0+75 compressed=80 digest=28668b4d7de22087633c9c9dcc4ebfba4aa02d21e40d850b0c867950a2ebda2a"
+      },
+      "compressionStats": {
+        "rawBytes": 75,
+        "capsuleBytes": 294,
+        "transportBytes": 80,
+        "rawTokenEstimate": 19,
+        "capsuleTokenEstimate": 74,
+        "compressionRatio": 0.26,
+        "budgetTokens": 3,
+        "budgetMet": false,
+        "recoveryEligible": false
+      },
+      "compressedBase64": "G0oAAERPlqrQhPJJXTAzgylgAw5cHmyx7cHyGDtDIs8SAu4PPT+soDRakpZ+Lt2fVt3ALE1tA5YD",
+      "originalSize": 75,
+      "compressedSize": 57
+    },
+    {
+      "path": "parity-workspace-worker/notes.md",
+      "formatVersion": 2,
+      "kind": "source",
+      "fileType": "docs/markdown",
+      "fileTypeInfo": {
+        "family": "docs",
+        "language": "markdown",
+        "capsuleType": "outline-evidence",
+        "parserFamily": "marked",
+        "extension": "md"
+      },
+      "parserFamily": "marked",
+      "parseOk": true,
+      "capsuleMode": "emergency",
+      "rawStorage": {
+        "encoding": "utf8-base64",
+        "contentBase64": "IyBOb3RlcwoKTWVzaCB3b3Jrc3BhY2Ugc3VtbWFyeS4K",
+        "rawBytes": 33,
+        "digest": "a48e876ecbece1301e20bea2bf730af5cdcfa2dbdf7a6d7fd312275c1475a9a5"
+      },
+      "capsuleBase": {
+        "sections": [
+          {
+            "name": "outline",
+            "priority": "P0",
+            "items": [
+              {
+                "text": "h1 Notes",
+                "spanIds": [
+                  "sp_heading_001"
+                ],
+                "priority": "P0"
+              }
+            ]
+          },
+          {
+            "name": "evidence",
+            "priority": "P1",
+            "items": [
+              {
+                "text": "Mesh workspace summary.",
+                "spanIds": [
+                  "sp_evidence_002"
+                ],
+                "priority": "P1"
+              }
+            ]
+          }
+        ],
+        "spanMap": {
+          "sp_heading_001": {
+            "spanId": "sp_heading_001",
+            "kind": "heading",
+            "label": "Notes",
+            "startByte": 0,
+            "endByte": 9,
+            "lineStart": 1,
+            "lineEnd": 3,
+            "columnStart": 1,
+            "columnEnd": 1,
+            "excerpt": "# Notes"
+          },
+          "sp_evidence_002": {
+            "spanId": "sp_evidence_002",
+            "kind": "evidence",
+            "label": "Mesh workspace summary.",
+            "startByte": 9,
+            "endByte": 33,
+            "lineStart": 3,
+            "lineEnd": 4,
+            "columnStart": 1,
+            "columnEnd": 1,
+            "excerpt": "Mesh workspace summary."
+          }
+        },
+        "parserFamily": "marked",
+        "parseOk": true,
+        "fallbackReason": ""
+      },
+      "capsuleCache": {
+        "query": "",
+        "rendered": "CAPSULE v2 path=parity-workspace-worker/notes.md\ntype=docs/markdown capsule=outline-evidence mode=emergency parser=marked parse_ok=true\nraw_bytes=33 raw_tokens=9\n[outline]\n- h1 Notes @sp_heading_001\n[evidence]\n- Mesh workspace summary. @sp_evidence_002",
+        "capsule": {
+          "version": 2,
+          "path": "parity-workspace-worker/notes.md",
+          "fileType": "docs/markdown",
+          "family": "docs",
+          "language": "markdown",
+          "capsuleType": "outline-evidence",
+          "parserFamily": "marked",
+          "parseOk": true,
+          "capsuleMode": "emergency",
+          "query": "",
+          "rawBytes": 33,
+          "rawTokenEstimate": 9,
+          "mustKeep": [
+            "outline"
+          ],
+          "sections": [
+            {
+              "name": "outline",
+              "priority": "P0",
+              "items": [
+                {
+                  "text": "h1 Notes",
+                  "spanIds": [
+                    "sp_heading_001"
+                  ],
+                  "priority": "P0"
+                }
+              ]
+            },
+            {
+              "name": "evidence",
+              "priority": "P1",
+              "items": [
+                {
+                  "text": "Mesh workspace summary.",
+                  "spanIds": [
+                    "sp_evidence_002"
+                  ],
+                  "priority": "P1"
+                }
+              ]
+            }
+          ],
+          "spanMap": {
+            "sp_heading_001": {
+              "spanId": "sp_heading_001",
+              "kind": "heading",
+              "label": "Notes",
+              "startByte": 0,
+              "endByte": 9,
+              "lineStart": 1,
+              "lineEnd": 3,
+              "columnStart": 1,
+              "columnEnd": 1,
+              "excerpt": "# Notes"
+            },
+            "sp_evidence_002": {
+              "spanId": "sp_evidence_002",
+              "kind": "evidence",
+              "label": "Mesh workspace summary.",
+              "startByte": 9,
+              "endByte": 33,
+              "lineStart": 3,
+              "lineEnd": 4,
+              "columnStart": 1,
+              "columnEnd": 1,
+              "excerpt": "Mesh workspace summary."
+            }
+          },
+          "totalItems": 2,
+          "focused": false,
+          "fallbackReason": "",
+          "capsuleTokenEstimate": 63,
+          "budgetTokens": 1,
+          "budgetMet": false,
+          "recoveryEligible": true,
+          "capsuleBytes": 252,
+          "compressionRatio": 0.14
+        },
+        "updatedAt": "2026-04-05T15:33:39.216Z"
+      },
+      "focusedCapsuleCache": {},
+      "spanIndex": {
+        "sp_heading_001": {
+          "spanId": "sp_heading_001",
+          "kind": "heading",
+          "label": "Notes",
+          "startByte": 0,
+          "endByte": 9,
+          "lineStart": 1,
+          "lineEnd": 3,
+          "columnStart": 1,
+          "columnEnd": 1,
+          "excerpt": "# Notes"
+        },
+        "sp_evidence_002": {
+          "spanId": "sp_evidence_002",
+          "kind": "evidence",
+          "label": "Mesh workspace summary.",
+          "startByte": 9,
+          "endByte": 33,
+          "lineStart": 3,
+          "lineEnd": 4,
+          "columnStart": 1,
+          "columnEnd": 1,
+          "excerpt": "Mesh workspace summary."
+        }
+      },
+      "transportEnvelope": {
+        "envelopeVersion": "mesh-envelope-v2",
+        "contentEncoding": "zstd-chunked",
+        "rawBytes": 33,
+        "compressedBytes": 42,
+        "chunkSize": 32768,
+        "chunkCount": 1,
+        "spanCount": 2,
+        "digest": "a48e876ecbece1301e20bea2bf730af5cdcfa2dbdf7a6d7fd312275c1475a9a5",
+        "chunkIndex": [
+          {
+            "id": 0,
+            "rawOffset": 0,
+            "rawLength": 33,
+            "compressedBytes": 42,
+            "digest": "97c0c0a79db4bdd1bf7918924c7a5adcf3106e8bd2dcb3c7cefe99750bf123e2"
+          }
+        ],
+        "spanIndex": {
+          "sp_heading_001": {
+            "startByte": 0,
+            "endByte": 9,
+            "lineStart": 1,
+            "lineEnd": 3,
+            "chunks": [
+              0
+            ]
+          },
+          "sp_evidence_002": {
+            "startByte": 9,
+            "endByte": 33,
+            "lineStart": 3,
+            "lineEnd": 4,
+            "chunks": [
+              0
+            ]
+          }
+        },
+        "chunks": [
+          "KLUv/QBYCQEAIyBOb3RlcwoKTWVzaCB3b3Jrc3BhY2Ugc3VtbWFyeS4K"
+        ],
+        "manifestText": "mesh-envelope-v2\npath: parity-workspace-worker/notes.md\ncontent-encoding: zstd-chunked\nraw-bytes: 33\ncompressed-bytes: 42\nchunk-size: 32768\nchunk-count: 1\nspan-count: 2\ndigest: a48e876ecbece1301e20bea2bf730af5cdcfa2dbdf7a6d7fd312275c1475a9a5\nchunks:\n- id=0 raw=0+33 compressed=42 digest=97c0c0a79db4bdd1bf7918924c7a5adcf3106e8bd2dcb3c7cefe99750bf123e2"
+      },
+      "compressionStats": {
+        "rawBytes": 33,
+        "capsuleBytes": 252,
+        "transportBytes": 42,
+        "rawTokenEstimate": 9,
+        "capsuleTokenEstimate": 63,
+        "compressionRatio": 0.14,
+        "budgetTokens": 1,
+        "budgetMet": false,
+        "recoveryEligible": true
+      },
+      "compressedBase64": "GyAAAERv+O+5Vn7Xx/Mp5VAo2YgkEwU2hN4XC1hs8nuK4E4B",
+      "originalSize": 33,
+      "compressedSize": 36
+    },
+    {
+      "formatVersion": 2,
+      "path": "parity-workspace-worker/assets/assistant.js",
+      "kind": "source",
+      "fileType": "code/javascript",
+      "fileTypeInfo": {
+        "family": "code",
+        "language": "javascript",
+        "capsuleType": "structure",
+        "parserFamily": "tree-sitter",
+        "parserKey": "javascript",
+        "extension": "js"
+      },
+      "parserFamily": "tree-sitter",
+      "parseOk": true,
+      "capsuleMode": "emergency",
+      "rawStorage": {
+        "encoding": "utf8-base64",
+        "contentBase64": "aW1wb3J0IHBhdGggZnJvbSAnbm9kZTpwYXRoJzsKZXhwb3J0IGNvbnN0IHRpdGxlID0gJ01lc2gnOwpleHBvcnQgZnVuY3Rpb24gcHJpbnRUaXRsZShwcmVmaXggPSAnd29ya3NwYWNlJykgewogIGNvbnN0IGZ1bGwgPSBgJHtwcmVmaXh9OiR7dGl0bGV9YDsKICBjb25zb2xlLmxvZyhmdWxsKTsKICByZXR1cm4gcGF0aC5iYXNlbmFtZShmdWxsKTsKfQo=",
+        "rawBytes": 200,
+        "digest": "588feb91b9bf1646b6d24e64f4d6e517cdc4f3a443642e33ae30db2539c0a830"
+      },
+      "capsuleBase": {
+        "sections": [
+          {
+            "name": "imports",
+            "priority": "P0",
+            "items": [
+              {
+                "text": "import path from 'node:path';",
+                "spanIds": [
+                  "sp_import_001"
+                ],
+                "priority": "P0"
+              }
+            ]
+          },
+          {
+            "name": "symbols",
+            "priority": "P0",
+            "items": [
+              {
+                "text": "lexical declaration const lines=1 sig=\"const title = 'Mesh';\" @sp_symbol_002",
+                "spanIds": [
+                  "sp_symbol_002"
+                ],
+                "priority": "P0"
+              },
+              {
+                "text": "function declaration printTitle lines=5 sig=\"function printTitle(prefix = 'workspace')\" @sp_symbol_003",
+                "spanIds": [
+                  "sp_symbol_003"
+                ],
+                "priority": "P0"
+              },
+              {
+                "text": "lexical declaration const lines=1 sig=\"const full = `$\" @sp_symbol_004",
+                "spanIds": [
+                  "sp_symbol_004"
+                ],
+                "priority": "P0"
+              }
+            ]
+          },
+          {
+            "name": "literals",
+            "priority": "P1",
+            "items": [
+              {
+                "text": "${prefix}:${title}",
+                "spanIds": [
+                  "sp_literal_005"
+                ],
+                "priority": "P1"
+              }
+            ]
+          },
+          {
+            "name": "elisions",
+            "priority": "P2",
+            "items": [
+              {
+                "text": "implementation elided; recover raw span for exact control flow @sp_symbol_002",
+                "spanIds": [
+                  "sp_symbol_002"
+                ],
+                "priority": "P2"
+              },
+              {
+                "text": "implementation elided; recover raw span for exact control flow @sp_symbol_003",
+                "spanIds": [
+                  "sp_symbol_003"
+                ],
+                "priority": "P2"
+              },
+              {
+                "text": "implementation elided; recover raw span for exact control flow @sp_symbol_004",
+                "spanIds": [
+                  "sp_symbol_004"
+                ],
+                "priority": "P2"
+              }
+            ]
+          }
+        ],
+        "spanMap": {
+          "sp_import_001": {
+            "spanId": "sp_import_001",
+            "kind": "import",
+            "label": "import path from 'node:path';",
+            "startByte": 0,
+            "endByte": 29,
+            "lineStart": 1,
+            "lineEnd": 1,
+            "columnStart": 1,
+            "columnEnd": 30,
+            "excerpt": "import path from 'node:path';"
+          },
+          "sp_symbol_002": {
+            "spanId": "sp_symbol_002",
+            "kind": "symbol",
+            "label": "lexical_declaration const",
+            "startByte": 37,
+            "endByte": 58,
+            "lineStart": 2,
+            "lineEnd": 2,
+            "columnStart": 8,
+            "columnEnd": 29,
+            "excerpt": "const title = 'Mesh';"
+          },
+          "sp_symbol_003": {
+            "spanId": "sp_symbol_003",
+            "kind": "symbol",
+            "label": "function_declaration printTitle",
+            "startByte": 66,
+            "endByte": 199,
+            "lineStart": 3,
+            "lineEnd": 7,
+            "columnStart": 8,
+            "columnEnd": 2,
+            "excerpt": "function printTitle(prefix = 'workspace') { const full = `${prefix}:${title}`; console.log(full); return path.basename(full); }"
+          },
+          "sp_symbol_004": {
+            "spanId": "sp_symbol_004",
+            "kind": "symbol",
+            "label": "lexical_declaration const",
+            "startByte": 112,
+            "endByte": 146,
+            "lineStart": 4,
+            "lineEnd": 4,
+            "columnStart": 3,
+            "columnEnd": 37,
+            "excerpt": "const full = `${prefix}:${title}`;"
+          },
+          "sp_literal_005": {
+            "spanId": "sp_literal_005",
+            "kind": "literal",
+            "label": "`${prefix}:${title}`",
+            "startByte": 125,
+            "endByte": 145,
+            "lineStart": 4,
+            "lineEnd": 4,
+            "columnStart": 16,
+            "columnEnd": 36,
+            "excerpt": "`${prefix}:${title}`"
+          }
+        },
+        "parserFamily": "tree-sitter",
+        "parseOk": true,
+        "fallbackReason": ""
+      },
+      "capsuleCache": {
+        "query": "",
+        "rendered": "CAPSULE v2 path=parity-workspace-worker/assets/app.js\ntype=code/javascript capsule=structure mode=emergency parser=tree-sitter parse_ok=true\nraw_bytes=200 raw_tokens=50\n[imports]\n- import path from 'node:path'; @sp_import_001\n[symbols]\n- lexical declaration const lines=1 sig=\"const title = 'Mesh';\" @sp_symbol_002 @sp_symbol_002\n- function declaration printTitle lines=5 sig=\"function printTitle(prefix = 'workspace')\" @sp_symbol_003 @sp_symbol_003",
+        "capsule": {
+          "version": 2,
+          "path": "parity-workspace-worker/assets/app.js",
+          "fileType": "code/javascript",
+          "family": "code",
+          "language": "javascript",
+          "capsuleType": "structure",
+          "parserFamily": "tree-sitter",
+          "parseOk": true,
+          "capsuleMode": "emergency",
+          "query": "",
+          "rawBytes": 200,
+          "rawTokenEstimate": 50,
+          "mustKeep": [
+            "imports",
+            "symbols"
+          ],
+          "sections": [
+            {
+              "name": "imports",
+              "priority": "P0",
+              "items": [
+                {
+                  "text": "import path from 'node:path';",
+                  "spanIds": [
+                    "sp_import_001"
+                  ],
+                  "priority": "P0"
+                }
+              ]
+            },
+            {
+              "name": "symbols",
+              "priority": "P0",
+              "items": [
+                {
+                  "text": "lexical declaration const lines=1 sig=\"const title = 'Mesh';\" @sp_symbol_002",
+                  "spanIds": [
+                    "sp_symbol_002"
+                  ],
+                  "priority": "P0"
+                },
+                {
+                  "text": "function declaration printTitle lines=5 sig=\"function printTitle(prefix = 'workspace')\" @sp_symbol_003",
+                  "spanIds": [
+                    "sp_symbol_003"
+                  ],
+                  "priority": "P0"
+                }
+              ]
+            }
+          ],
+          "spanMap": {
+            "sp_import_001": {
+              "spanId": "sp_import_001",
+              "kind": "import",
+              "label": "import path from 'node:path';",
+              "startByte": 0,
+              "endByte": 29,
+              "lineStart": 1,
+              "lineEnd": 1,
+              "columnStart": 1,
+              "columnEnd": 30,
+              "excerpt": "import path from 'node:path';"
+            },
+            "sp_symbol_002": {
+              "spanId": "sp_symbol_002",
+              "kind": "symbol",
+              "label": "lexical_declaration const",
+              "startByte": 37,
+              "endByte": 58,
+              "lineStart": 2,
+              "lineEnd": 2,
+              "columnStart": 8,
+              "columnEnd": 29,
+              "excerpt": "const title = 'Mesh';"
+            },
+            "sp_symbol_003": {
+              "spanId": "sp_symbol_003",
+              "kind": "symbol",
+              "label": "function_declaration printTitle",
+              "startByte": 66,
+              "endByte": 199,
+              "lineStart": 3,
+              "lineEnd": 7,
+              "columnStart": 8,
+              "columnEnd": 2,
+              "excerpt": "function printTitle(prefix = 'workspace') { const full = `${prefix}:${title}`; console.log(full); return path.basename(full); }"
+            },
+            "sp_symbol_004": {
+              "spanId": "sp_symbol_004",
+              "kind": "symbol",
+              "label": "lexical_declaration const",
+              "startByte": 112,
+              "endByte": 146,
+              "lineStart": 4,
+              "lineEnd": 4,
+              "columnStart": 3,
+              "columnEnd": 37,
+              "excerpt": "const full = `${prefix}:${title}`;"
+            },
+            "sp_literal_005": {
+              "spanId": "sp_literal_005",
+              "kind": "literal",
+              "label": "`${prefix}:${title}`",
+              "startByte": 125,
+              "endByte": 145,
+              "lineStart": 4,
+              "lineEnd": 4,
+              "columnStart": 16,
+              "columnEnd": 36,
+              "excerpt": "`${prefix}:${title}`"
+            }
+          },
+          "totalItems": 3,
+          "focused": false,
+          "fallbackReason": "",
+          "capsuleTokenEstimate": 113,
+          "budgetTokens": 10,
+          "budgetMet": false,
+          "recoveryEligible": true,
+          "capsuleBytes": 449,
+          "compressionRatio": 0.44
+        },
+        "updatedAt": "2026-04-05T15:33:39.161Z"
+      },
+      "focusedCapsuleCache": {
+        "0e28159551253213d52eda95": {
+          "query": "title console",
+          "rendered": "CAPSULE v2 path=parity-workspace-worker/assets/app.js\ntype=code/javascript capsule=structure mode=emergency parser=tree-sitter parse_ok=true\nraw_bytes=200 raw_tokens=50\nfocus_query=\"title console\"\n[imports]\n- import path from 'node:path'; @sp_import_001\n[symbols]\n- lexical declaration const lines=1 sig=\"const title = 'Mesh';\" @sp_symbol_002 @sp_symbol_002\n- function declaration printTitle lines=5 sig=\"function printTitle(prefix = 'workspace')\" @sp_symbol_003 @sp_symbol_003",
+          "capsule": {
+            "version": 2,
+            "path": "parity-workspace-worker/assets/app.js",
+            "fileType": "code/javascript",
+            "family": "code",
+            "language": "javascript",
+            "capsuleType": "structure",
+            "parserFamily": "tree-sitter",
+            "parseOk": true,
+            "capsuleMode": "emergency",
+            "query": "title console",
+            "rawBytes": 200,
+            "rawTokenEstimate": 50,
+            "mustKeep": [
+              "imports",
+              "symbols"
+            ],
+            "sections": [
+              {
+                "name": "imports",
+                "priority": "P0",
+                "items": [
+                  {
+                    "text": "import path from 'node:path';",
+                    "spanIds": [
+                      "sp_import_001"
+                    ],
+                    "priority": "P0"
+                  }
+                ]
+              },
+              {
+                "name": "symbols",
+                "priority": "P0",
+                "items": [
+                  {
+                    "text": "lexical declaration const lines=1 sig=\"const title = 'Mesh';\" @sp_symbol_002",
+                    "spanIds": [
+                      "sp_symbol_002"
+                    ],
+                    "priority": "P0"
+                  },
+                  {
+                    "text": "function declaration printTitle lines=5 sig=\"function printTitle(prefix = 'workspace')\" @sp_symbol_003",
+                    "spanIds": [
+                      "sp_symbol_003"
+                    ],
+                    "priority": "P0"
+                  }
+                ]
+              }
+            ],
+            "spanMap": {
+              "sp_import_001": {
+                "spanId": "sp_import_001",
+                "kind": "import",
+                "label": "import path from 'node:path';",
+                "startByte": 0,
+                "endByte": 29,
+                "lineStart": 1,
+                "lineEnd": 1,
+                "columnStart": 1,
+                "columnEnd": 30,
+                "excerpt": "import path from 'node:path';"
+              },
+              "sp_symbol_002": {
+                "spanId": "sp_symbol_002",
+                "kind": "symbol",
+                "label": "lexical_declaration const",
+                "startByte": 37,
+                "endByte": 58,
+                "lineStart": 2,
+                "lineEnd": 2,
+                "columnStart": 8,
+                "columnEnd": 29,
+                "excerpt": "const title = 'Mesh';"
+              },
+              "sp_symbol_003": {
+                "spanId": "sp_symbol_003",
+                "kind": "symbol",
+                "label": "function_declaration printTitle",
+                "startByte": 66,
+                "endByte": 199,
+                "lineStart": 3,
+                "lineEnd": 7,
+                "columnStart": 8,
+                "columnEnd": 2,
+                "excerpt": "function printTitle(prefix = 'workspace') { const full = `${prefix}:${title}`; console.log(full); return path.basename(full); }"
+              },
+              "sp_symbol_004": {
+                "spanId": "sp_symbol_004",
+                "kind": "symbol",
+                "label": "lexical_declaration const",
+                "startByte": 112,
+                "endByte": 146,
+                "lineStart": 4,
+                "lineEnd": 4,
+                "columnStart": 3,
+                "columnEnd": 37,
+                "excerpt": "const full = `${prefix}:${title}`;"
+              },
+              "sp_literal_005": {
+                "spanId": "sp_literal_005",
+                "kind": "literal",
+                "label": "`${prefix}:${title}`",
+                "startByte": 125,
+                "endByte": 145,
+                "lineStart": 4,
+                "lineEnd": 4,
+                "columnStart": 16,
+                "columnEnd": 36,
+                "excerpt": "`${prefix}:${title}`"
+              }
+            },
+            "totalItems": 3,
+            "focused": true,
+            "fallbackReason": "",
+            "capsuleTokenEstimate": 120,
+            "budgetTokens": 10,
+            "budgetMet": false,
+            "recoveryEligible": true,
+            "capsuleBytes": 477,
+            "compressionRatio": 0.42
+          },
+          "updatedAt": "2026-04-05T15:33:39.189Z"
+        }
+      },
+      "spanIndex": {
+        "sp_import_001": {
+          "spanId": "sp_import_001",
+          "kind": "import",
+          "label": "import path from 'node:path';",
+          "startByte": 0,
+          "endByte": 29,
+          "lineStart": 1,
+          "lineEnd": 1,
+          "columnStart": 1,
+          "columnEnd": 30,
+          "excerpt": "import path from 'node:path';"
+        },
+        "sp_symbol_002": {
+          "spanId": "sp_symbol_002",
+          "kind": "symbol",
+          "label": "lexical_declaration const",
+          "startByte": 37,
+          "endByte": 58,
+          "lineStart": 2,
+          "lineEnd": 2,
+          "columnStart": 8,
+          "columnEnd": 29,
+          "excerpt": "const title = 'Mesh';"
+        },
+        "sp_symbol_003": {
+          "spanId": "sp_symbol_003",
+          "kind": "symbol",
+          "label": "function_declaration printTitle",
+          "startByte": 66,
+          "endByte": 199,
+          "lineStart": 3,
+          "lineEnd": 7,
+          "columnStart": 8,
+          "columnEnd": 2,
+          "excerpt": "function printTitle(prefix = 'workspace') { const full = `${prefix}:${title}`; console.log(full); return path.basename(full); }"
+        },
+        "sp_symbol_004": {
+          "spanId": "sp_symbol_004",
+          "kind": "symbol",
+          "label": "lexical_declaration const",
+          "startByte": 112,
+          "endByte": 146,
+          "lineStart": 4,
+          "lineEnd": 4,
+          "columnStart": 3,
+          "columnEnd": 37,
+          "excerpt": "const full = `${prefix}:${title}`;"
+        },
+        "sp_literal_005": {
+          "spanId": "sp_literal_005",
+          "kind": "literal",
+          "label": "`${prefix}:${title}`",
+          "startByte": 125,
+          "endByte": 145,
+          "lineStart": 4,
+          "lineEnd": 4,
+          "columnStart": 16,
+          "columnEnd": 36,
+          "excerpt": "`${prefix}:${title}`"
+        }
+      },
+      "transportEnvelope": {
+        "envelopeVersion": "mesh-envelope-v2",
+        "contentEncoding": "zstd-chunked",
+        "rawBytes": 200,
+        "compressedBytes": 154,
+        "chunkSize": 32768,
+        "chunkCount": 1,
+        "spanCount": 5,
+        "digest": "588feb91b9bf1646b6d24e64f4d6e517cdc4f3a443642e33ae30db2539c0a830",
+        "chunkIndex": [
+          {
+            "id": 0,
+            "rawOffset": 0,
+            "rawLength": 200,
+            "compressedBytes": 154,
+            "digest": "1875986620e99f0ec4f22bbf800b117f174a97d7a9e5ce11732b68fe4580e0ee"
+          }
+        ],
+        "spanIndex": {
+          "sp_import_001": {
+            "startByte": 0,
+            "endByte": 29,
+            "lineStart": 1,
+            "lineEnd": 1,
+            "chunks": [
+              0
+            ]
+          },
+          "sp_symbol_002": {
+            "startByte": 37,
+            "endByte": 58,
+            "lineStart": 2,
+            "lineEnd": 2,
+            "chunks": [
+              0
+            ]
+          },
+          "sp_symbol_003": {
+            "startByte": 66,
+            "endByte": 199,
+            "lineStart": 3,
+            "lineEnd": 7,
+            "chunks": [
+              0
+            ]
+          },
+          "sp_symbol_004": {
+            "startByte": 112,
+            "endByte": 146,
+            "lineStart": 4,
+            "lineEnd": 4,
+            "chunks": [
+              0
+            ]
+          },
+          "sp_literal_005": {
+            "startByte": 125,
+            "endByte": 145,
+            "lineStart": 4,
+            "lineEnd": 4,
+            "chunks": [
+              0
+            ]
+          }
+        },
+        "chunks": [
+          "KLUv/QBYjQQAIokdHWBH3AbQ2r17vYKH9NMyOAEJ3sBAASXj71HQSbAE6EFGKToVUCi/Rv7RQWS+NQxsFph7JI8jGI8jJEee+daRcyKhopoj4C1IR96whdwGzGYArYzbdVkr+pbDQTpyzGb9drpKg+hIS6tmoMBqOrO8vrRqb97GsAgAQelsmduQ5hBDI00xqhNyAZRZhEuRAQ=="
+        ],
+        "manifestText": "mesh-envelope-v2\npath: parity-workspace-worker/assets/app.js\ncontent-encoding: zstd-chunked\nraw-bytes: 200\ncompressed-bytes: 154\nchunk-size: 32768\nchunk-count: 1\nspan-count: 5\ndigest: 588feb91b9bf1646b6d24e64f4d6e517cdc4f3a443642e33ae30db2539c0a830\nchunks:\n- id=0 raw=0+200 compressed=154 digest=1875986620e99f0ec4f22bbf800b117f174a97d7a9e5ce11732b68fe4580e0ee"
+      },
+      "compressionStats": {
+        "rawBytes": 200,
+        "capsuleBytes": 449,
+        "transportBytes": 154,
+        "rawTokenEstimate": 50,
+        "capsuleTokenEstimate": 113,
+        "compressionRatio": 0.44,
+        "budgetTokens": 10,
+        "budgetMet": false,
+        "recoveryEligible": true
+      },
+      "compressedBase64": "G8cAAMTcVl9JF4Rpka4YoqFrGAb9H/yHfxiD/7yFnH2O7U26TLpNkRVNbKBOHRhWhy/ZG2WIoDxIdfD6Kba5kvzEc3ZA/QLtjwbu8nprkfXZpXI9DlZ8fPpsWQcnGKGc9CUbIxgdXoK1mD4qeOmRfHRFnBSwRUod+e3rnpcQ7gQ=",
+      "originalSize": 200,
+      "compressedSize": 128
+    }
+  ]
+}

@@ -3,13 +3,14 @@
   "version": "0.1.0",
   "private": false,
   "type": "module",
-  "description": "Terminal agent client for mesh-mcp-dist using Bedrock-backed LLM routing.",
+  "description": "Mesh terminal agent CLI with local mode and optional MCP backend.",
   "bin": {
     "mesh-agent": "dist/index.js"
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "mesh-core"
   ],
   "publishConfig": {
     "access": "public"
