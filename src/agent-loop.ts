@@ -5,6 +5,8 @@ import { stdin as input, stdout as output } from "node:process";
 import pc from "picocolors";
 import ora from "ora";
 import boxen from "boxen";
+import pkg from "enquirer";
+const { Select, Confirm } = pkg as any;
 
 import { AppConfig, loadUserSettings, saveUserSettings, shortPathLabel, UserSettings } from "./config.js";
 import {
@@ -80,34 +82,10 @@ const MODEL_OPTIONS: ModelOption[] = [
     note: "powerful"
   },
   {
-    label: "Claude Opus 4.7",
-    value: "us.anthropic.claude-opus-4-7",
-    aliases: ["opus4.7", "opus-4.7", "opus47"],
-    note: "next-gen"
-  },
-  {
     label: "Claude Haiku 4.5",
     value: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     aliases: ["haiku4.5", "haiku-4.5", "haiku45"],
     note: "modern fast"
-  },
-  {
-    label: "Claude Sonnet 4.5",
-    value: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    aliases: ["sonnet4.5", "sonnet-4.5", "sonnet45"],
-    note: "legacy default"
-  },
-  {
-    label: "Claude 3.5 Haiku",
-    value: "us.anthropic.claude-3-5-haiku-20241022-v1:0",
-    aliases: ["haiku", "haiku3.5"],
-    note: "fast"
-  },
-  {
-    label: "Claude 3 Opus",
-    value: "anthropic.claude-3-opus-20240229-v1:0",
-    aliases: ["opus", "opus3"],
-    note: "slower"
   }
 ];
 const ALLOWED_THEMES = new Set(["cyan", "magenta", "yellow", "green", "blue", "white"]);
@@ -305,6 +283,36 @@ export class AgentLoop {
       }
     });
 
+    // Ghost text / dynamic hint support
+    let lastGhostText = "";
+    input.on("keypress", (_, key) => {
+      if (!this.useAnsi || !key) return;
+      
+      // Short delay to let readline update its internal state
+      setTimeout(() => {
+        const line = (rl as any).line || "";
+        if (line.startsWith("/") && !line.includes(" ")) {
+          const commands = this.getSlashCommands().flatMap(c => [c.name, ...(c.aliases || [])]);
+          const match = commands.find(c => c.startsWith(line) && c !== line);
+          if (match) {
+            const hint = match.slice(line.length);
+            if (hint !== lastGhostText) {
+              // Move cursor forward, print hint in dim, then move back
+              output.write(pc.dim(hint) + "\u001b[" + hint.length + "D");
+              lastGhostText = hint;
+            }
+          } else if (lastGhostText) {
+            // Clear last hint
+            output.write(" ".repeat(lastGhostText.length) + "\u001b[" + lastGhostText.length + "D");
+            lastGhostText = "";
+          }
+        } else if (lastGhostText) {
+          output.write(" ".repeat(lastGhostText.length) + "\u001b[" + lastGhostText.length + "D");
+          lastGhostText = "";
+        }
+      }, 5);
+    });
+
     while (true) {
       const prompt = this.buildPrompt();
       let userInput = (await rl.question(prompt)).trim();
@@ -327,7 +335,7 @@ export class AgentLoop {
       }
 
       try {
-        this.renderUserTurn(userInput);
+        // Remove redundant renderUserTurn(userInput) to fix double message issue
         const spinner = this.useAnsi ? ora({ text: "Thinking...", color: "cyan" }).start() : undefined;
         
         const answer = await this.runSingleTurn(userInput, {
@@ -682,14 +690,7 @@ export class AgentLoop {
 
   private renderAssistantTurn(text: string): void {
     if (this.useAnsi) {
-      output.write("\n" + boxen(text, {
-        padding: 1,
-        margin: 1,
-        borderStyle: "round",
-        borderColor: this.config.agent.themeColor || "cyan",
-        title: "assistant",
-        titleAlignment: "left"
-      }) + "\n");
+      output.write("\n" + this.themeColor(pc.bold("assistant")) + pc.dim(" › ") + text + "\n");
       return;
     }
     output.write(`\nassistant> ${text}\n`);
@@ -840,51 +841,38 @@ export class AgentLoop {
   }
 
   private async chooseModelInteractive(rl: readline.Interface): Promise<void> {
-    output.write(
-      [
-        "",
-        `${this.themeColor(pc.bold("Model Chooser"))}`,
-        ...MODEL_OPTIONS.map((option, index) => {
-          const marker = option.value === this.currentModelId ? pc.green("(active)") : "";
-          return `${String(index + 1).padStart(2, " ")}. ${option.label} ${pc.dim(option.note)} ${marker}\n    ${pc.dim(option.value)}`;
-        }),
-        ""
-      ].join("\n")
-    );
+    const choices = MODEL_OPTIONS.map((opt) => ({
+      name: opt.value,
+      message: `${pc.bold(opt.label)} ${pc.dim(opt.note)}`,
+      hint: opt.value === this.currentModelId ? pc.green("(active)") : pc.dim(opt.value)
+    }));
 
-    const choice = (
-      await rl.question(
-        this.useAnsi
-          ? this.themeColor("Select model number (Enter = keep current): ")
-          : "Select model number (Enter = keep current): "
-      )
-    ).trim();
+    const prompt = new Select({
+      name: "model",
+      message: "Select an AI model",
+      choices
+    });
 
-    if (!choice) {
-      output.write(`${pc.dim("\nKeeping current model.")}\n`);
-      return;
-    }
+    try {
+      const pickedValue = await prompt.run();
+      const picked = MODEL_OPTIONS.find((o) => o.value === pickedValue)!;
+      
+      this.currentModelId = picked.value;
+      output.write(`\nmodel switched: ${this.themeColor(picked.label)}\n`);
 
-    const pickedIndex = Number.parseInt(choice, 10);
-    if (!Number.isFinite(pickedIndex) || pickedIndex < 1 || pickedIndex > MODEL_OPTIONS.length) {
-      output.write(`\n${pc.red("Invalid selection.")} Use /model pick again.\n`);
-      return;
-    }
+      const confirmPrompt = new Confirm({
+        name: "save",
+        message: "Save as default model?"
+      });
 
-    const picked = MODEL_OPTIONS[pickedIndex - 1];
-    this.currentModelId = picked.value;
-    output.write(`\nmodel switched: ${this.themeColor(picked.label)}\n`);
-
-    const persist = (
-      await rl.question(
-        this.useAnsi ? this.themeColor("Save as default model? [y/N]: ") : "Save as default model? [y/N]: "
-      )
-    ).trim().toLowerCase();
-
-    if (persist === "y" || persist === "yes") {
-      const current = await loadUserSettings();
-      await saveUserSettings({ ...current, modelId: this.currentModelId });
-      output.write(`${pc.green("Default model saved.")}\n`);
+      const shouldSave = await confirmPrompt.run();
+      if (shouldSave) {
+        const current = await loadUserSettings();
+        await saveUserSettings({ ...current, modelId: picked.value });
+        output.write(pc.green("Default model saved.\n"));
+      }
+    } catch {
+      output.write(pc.dim("\nSelection cancelled.\n"));
     }
   }
 

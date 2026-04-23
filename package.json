@@ -1,6 +1,6 @@
 {
   "name": "@edgarelmo/mesh-agent-cli",
-  "version": "0.2.21",
+  "version": "0.2.22",
   "private": false,
   "type": "module",
   "description": "Mesh terminal agent CLI. Zero-config: ships with a shared Mesh LLM proxy so no AWS credentials are needed.",
@@ -38,6 +38,7 @@
     "@supabase/supabase-js": "^2.104.1",
     "boxen": "^8.0.1",
     "dotenv": "^16.4.7",
+    "enquirer": "^2.4.1",
     "ora": "^9.4.0",
     "picocolors": "^1.1.1"
   },
