@@ -148,6 +148,17 @@ export class LocalToolBackend implements ToolBackend {
         }
       },
       { name: "workspace.get_index_status", description: "Get current indexing progress and cache coverage" },
+      {
+        name: "workspace.read_multiple_files",
+        description: "Read multiple files from the workspace in a single call.",
+        inputSchema: {
+          type: "object",
+          required: ["paths"],
+          properties: {
+            paths: { type: "array", items: { type: "string" } }
+          }
+        }
+      },
       { name: "workspace.check_sync", description: "Verify cloud (L2) synchronization status" },
       { name: "workspace.index_everything", description: "Explicitly trigger full workspace indexing (generate all capsules)" }
     ];
@@ -173,6 +184,8 @@ export class LocalToolBackend implements ToolBackend {
         return this.runCommand(args);
       case "workspace.get_index_status":
         return this.getIndexStatus();
+      case "workspace.read_multiple_files":
+        return this.readMultipleFiles(args);
       default:
         throw new Error(`Unknown local tool: ${name}`);
     }
@@ -262,6 +275,20 @@ export class LocalToolBackend implements ToolBackend {
       capsule: requestedContent,
       source: "generated"
     };
+  }
+
+  private async readMultipleFiles(args: Record<string, unknown>): Promise<unknown> {
+    const paths = Array.isArray(args.paths) ? args.paths : [];
+    const results = await Promise.all(
+      paths.slice(0, 15).map(async (p) => {
+        try {
+          return await this.readFile({ path: p });
+        } catch (err) {
+          return { ok: false, path: p, error: (err as Error).message };
+        }
+      })
+    );
+    return { ok: true, count: results.length, results };
   }
 
   private async searchFiles(args: Record<string, unknown>): Promise<unknown> {
@@ -419,9 +446,10 @@ export class LocalToolBackend implements ToolBackend {
   public async *indexEverything(): AsyncGenerator<{ current: number; total: number; path: string }> {
     const files = await collectFiles(this.workspaceRoot, 10000);
     const total = files.length;
+    const CONCURRENCY = 5;
+    let completed = 0;
 
-    for (let i = 0; i < total; i++) {
-      const absolutePath = files[i];
+    const processFile = async (absolutePath: string) => {
       const relativePath = toPosixRelative(this.workspaceRoot, absolutePath);
       const stat = await fs.stat(absolutePath);
       const mtimeMs = Math.floor(stat.mtimeMs);
@@ -437,7 +465,16 @@ export class LocalToolBackend implements ToolBackend {
           await Promise.all(TIERS.map(t => this.cache.setCapsule(relativePath, t, raw.slice(0, 12000), mtimeMs)));
         }
       }
-      yield { current: i + 1, total, path: relativePath };
+      return relativePath;
+    };
+
+    for (let i = 0; i < total; i += CONCURRENCY) {
+      const chunk = files.slice(i, i + CONCURRENCY);
+      const results = await Promise.all(chunk.map(processFile));
+      for (let j = 0; j < results.length; j++) {
+        completed++;
+        yield { current: completed, total, path: results[j] };
+      }
     }
   }
 }
