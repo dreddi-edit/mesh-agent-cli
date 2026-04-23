@@ -208,6 +208,7 @@ export class AgentLoop {
   private readonly useAnsi = output.isTTY;
   private readonly sessionStore: SessionCapsuleStore;
   private currentModelId: string;
+  private currentBranch = "nogit";
   private transcript: ConverseMessage[] = [];
   private sessionCapsule: SessionCapsule | null = null;
   private lastToolEventAt: string | null = null;
@@ -246,6 +247,7 @@ export class AgentLoop {
       const gitBranch = execSync("git branch --show-current 2>/dev/null", { stdio: "pipe", cwd: this.config.agent.workspaceRoot }).toString().trim();
       const gitStatus = execSync("git status --short 2>/dev/null", { stdio: "pipe", cwd: this.config.agent.workspaceRoot }).toString().trim();
       if (gitBranch) {
+        this.currentBranch = gitBranch;
         this.workspaceContext = `Workspace context:\n- Git branch: ${gitBranch}\n- Git status:\n${gitStatus || "clean"}`;
       }
     } catch {
@@ -262,7 +264,8 @@ export class AgentLoop {
     const rl = readline.createInterface({
       input: input,
       output: output,
-      terminal: true
+      terminal: true,
+      completer: (line) => this.completeInput(line)
     });
 
     let lastSigInt = 0;
@@ -285,7 +288,7 @@ export class AgentLoop {
     });
 
     while (true) {
-      const prompt = this.useAnsi ? this.themeColor("\n> ") : "\n> ";
+      const prompt = this.buildPrompt();
       let userInput = (await rl.question(prompt)).trim();
       if (!userInput) {
         continue;
@@ -492,12 +495,11 @@ export class AgentLoop {
     const hr = "═".repeat(width);
     
     const banner = [
-      "  __  __   ______   _____   _    _ ",
-      " |  \\/  | |  ____| / ____| | |  | |",
-      " | \\  / | | |__   | (___   | |__| |",
-      " | |\\/| | |  __|   \\___ \\  |  __  |",
-      " | |  | | | |____  ____) | | |  | |",
-      " |_|  |_| |______||_____/  |_|  |_|",
+      " __  __ _____ ____  _   _      [##] ",
+      "|  \\/  | ____/ ___|| | | |    [o  o]",
+      "| |\\/| |  _| \\___ \\| |_| |    | -- |",
+      "| |  | | |___ ___) |  _  |    [____]",
+      "|_|  |_|_____|____/|_| |_|",
       ""
     ];
 
@@ -507,8 +509,9 @@ export class AgentLoop {
       output.write(
         [
           `mesh  ${this.config.agent.mode}  ${shortPathLabel(this.config.agent.workspaceRoot)}`,
-          `model: ${shortModelName(this.currentModelId)}`,
-          "commands: /help /status /capsule /model /clear /exit"
+          `branch: ${this.currentBranch}   model: ${shortModelName(this.currentModelId)}`,
+          "commands: /help /status /capsule /model /setup /clear /exit",
+          "tip: press TAB for slash-command autocomplete"
         ].join("\n") + "\n"
       );
       return;
@@ -519,11 +522,20 @@ export class AgentLoop {
     output.write(
       [
         `${this.themeColor(pc.bold("mesh"))}  ${pc.dim(this.config.agent.mode)}  ${pc.dim(shortPathLabel(this.config.agent.workspaceRoot))}`,
-        `${pc.dim("model:")} ${this.themeColor(shortModelName(this.currentModelId))}`,
-        `${pc.dim("commands:")} ${pc.magenta("/help")} ${pc.magenta("/status")} ${pc.magenta("/capsule")} ${pc.magenta("/model")} ${pc.magenta("/clear")} ${pc.magenta("/exit")}`
+        `${pc.dim("branch:")} ${this.themeColor(this.currentBranch)}   ${pc.dim("model:")} ${this.themeColor(shortModelName(this.currentModelId))}`,
+        `${pc.dim("commands:")} ${pc.magenta("/help")} ${pc.magenta("/status")} ${pc.magenta("/capsule")} ${pc.magenta("/model pick")} ${pc.magenta("/setup")} ${pc.magenta("/clear")} ${pc.magenta("/exit")}`,
+        `${pc.dim("tip:")} ${pc.dim("Type / and press TAB for command completion")}`
       ].join("\n") + "\n"
     );
     output.write(this.themeColor(hr) + "\n");
+  }
+
+  private buildPrompt(): string {
+    if (!this.useAnsi) {
+      return `\nmesh/${this.currentBranch}> `;
+    }
+    const left = `${this.themeColor(pc.bold("mesh"))}${pc.dim("/")}${pc.dim(this.currentBranch)}`;
+    return `\n${left} ${this.themeColor(pc.bold("::"))} `;
   }
 
   private async printSync(): Promise<void> {
@@ -702,7 +714,7 @@ export class AgentLoop {
       { name: "/index", usage: "/index", description: "re-index workspace and generate file capsules" },
       { name: "/sync", usage: "/sync", description: "check cloud (L2) cache synchronization" },
       { name: "/setup", usage: "/setup [noninteractive key=value ...]", description: "interactive or scripted settings" },
-      { name: "/model", usage: "/model [list|id|save]", description: "show, switch, list, or persist model selection" },
+      { name: "/model", usage: "/model [pick|list|id|save]", description: "interactive chooser or switch model" },
       { name: "/cost", usage: "/cost", description: "show token usage and estimated cost" },
       { name: "/approvals", usage: "/approvals [status|on|off]", description: "control tool auto-approval mode" },
       { name: "/doctor", usage: "/doctor [brief|full]", description: "show runtime diagnostics" },
@@ -740,7 +752,7 @@ export class AgentLoop {
         this.printBanner();
         return { wasHandled: true, shouldExit: false };
       case "/model":
-        await this.handleModelCommand(args);
+        await this.handleModelCommand(args, rl);
         return { wasHandled: true, shouldExit: false };
       case "/cost":
         this.printCost();
@@ -768,21 +780,11 @@ export class AgentLoop {
     }
   }
 
-  private async handleModelCommand(args: string[]): Promise<void> {
+  private async handleModelCommand(args: string[], rl: readline.Interface): Promise<void> {
     const parsed = parseCommandArgs(args);
     const nextModel = [...parsed.positionals, parsed.keyValues.model ?? ""].join(" ").trim();
-    if (!nextModel) {
-      output.write(
-        [
-          "",
-          `current model: ${this.themeColor(shortModelName(this.currentModelId))}`,
-          `${pc.dim("id:")} ${this.currentModelId}`,
-          `${pc.dim("hint:")} /model sonnet4.6  or  /model us.anthropic.claude-sonnet-4-6`,
-          `${pc.dim("list:")} /model list`,
-          `${pc.dim("persist:")} /model save`,
-          ""
-        ].join("\n")
-      );
+    if (!nextModel || nextModel === "pick" || nextModel === "choose") {
+      await this.chooseModelInteractive(rl);
       return;
     }
     if (nextModel === "list" || nextModel === "ls") {
@@ -817,6 +819,111 @@ export class AgentLoop {
     }
     this.currentModelId = resolved?.value ?? normalizeModelInput(nextModel);
     output.write(`\nmodel switched: ${this.themeColor(shortModelName(this.currentModelId))}\n`);
+  }
+
+  private async chooseModelInteractive(rl: readline.Interface): Promise<void> {
+    output.write(
+      [
+        "",
+        `${this.themeColor(pc.bold("Model Chooser"))}`,
+        ...MODEL_OPTIONS.map((option, index) => {
+          const marker = option.value === this.currentModelId ? pc.green("(active)") : "";
+          return `${String(index + 1).padStart(2, " ")}. ${option.label} ${pc.dim(option.note)} ${marker}\n    ${pc.dim(option.value)}`;
+        }),
+        ""
+      ].join("\n")
+    );
+
+    const choice = (
+      await rl.question(
+        this.useAnsi
+          ? this.themeColor("Select model number (Enter = keep current): ")
+          : "Select model number (Enter = keep current): "
+      )
+    ).trim();
+
+    if (!choice) {
+      output.write(`${pc.dim("\nKeeping current model.")}\n`);
+      return;
+    }
+
+    const pickedIndex = Number.parseInt(choice, 10);
+    if (!Number.isFinite(pickedIndex) || pickedIndex < 1 || pickedIndex > MODEL_OPTIONS.length) {
+      output.write(`\n${pc.red("Invalid selection.")} Use /model pick again.\n`);
+      return;
+    }
+
+    const picked = MODEL_OPTIONS[pickedIndex - 1];
+    this.currentModelId = picked.value;
+    output.write(`\nmodel switched: ${this.themeColor(picked.label)}\n`);
+
+    const persist = (
+      await rl.question(
+        this.useAnsi ? this.themeColor("Save as default model? [y/N]: ") : "Save as default model? [y/N]: "
+      )
+    ).trim().toLowerCase();
+
+    if (persist === "y" || persist === "yes") {
+      const current = await loadUserSettings();
+      await saveUserSettings({ ...current, modelId: this.currentModelId });
+      output.write(`${pc.green("Default model saved.")}\n`);
+    }
+  }
+
+  private completeInput(line: string): [string[], string] {
+    const commands = this.getSlashCommands().flatMap((command) => [command.name, ...(command.aliases ?? [])]);
+    const trimmed = line.trimStart();
+
+    if (!trimmed.startsWith("/")) {
+      return [[], line];
+    }
+
+    const parts = trimmed.split(/\s+/g);
+    const cmd = parts[0].toLowerCase();
+    const partial = parts[parts.length - 1]?.toLowerCase() ?? "";
+
+    if (parts.length <= 1 && !line.endsWith(" ")) {
+      const hits = commands.filter((item) => item.startsWith(cmd));
+      return [hits.length ? hits : commands, cmd];
+    }
+
+    const modelChoices = [
+      "list",
+      "current",
+      "save",
+      "pick",
+      ...MODEL_OPTIONS.flatMap((option) => option.aliases)
+    ];
+    const capsuleChoices = ["show", "compact", "clear", "export", "stats", "path"];
+    const approvalsChoices = ["status", "on", "off"];
+    const doctorChoices = ["brief", "full"];
+    const setupChoices = ["noninteractive", "model=", "cloud=", "theme=", "key=", "endpoint="];
+
+    let pool: string[] = [];
+    switch (cmd) {
+      case "/model":
+        pool = modelChoices;
+        break;
+      case "/capsule":
+      case "/memory":
+        pool = capsuleChoices;
+        break;
+      case "/approvals":
+        pool = approvalsChoices;
+        break;
+      case "/doctor":
+        pool = doctorChoices;
+        break;
+      case "/setup":
+        pool = setupChoices;
+        break;
+      default:
+        pool = [];
+    }
+
+    const token = line.endsWith(" ") ? "" : partial;
+    const hits = pool.filter((item) => item.toLowerCase().startsWith(token));
+    return [hits.length ? hits : pool, token];
   }
 
   private async handleCapsuleCommand(args: string[]): Promise<void> {
