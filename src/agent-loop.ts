@@ -304,28 +304,9 @@ export class AgentLoop {
     }
 
     this.printBanner();
-    let rl = readline.createInterface({
-      input: input,
-      output: output,
-      terminal: true,
-      completer: (line) => this.completeInput(line)
-    });
+    await this.printStatus();
 
     let lastSigInt = 0;
-    rl.on("SIGINT", () => {
-      if (this.abortController) {
-        this.abortController.abort();
-        this.abortController = null;
-        output.write("\n\n" + pc.dim("Request aborted. Returning to prompt.") + "\n");
-      } else {
-        const now = Date.now();
-        if (now - lastSigInt < 2000) {
-          rl.close();
-          output.write("\n\n" + pc.dim("Aborted by user.") + "\n");
-          process.exit(0);
-        } else {
-          lastSigInt = now;
-          output.write("\n" + this.themeColor(pc.bold("Press Ctrl+C again within 2s to exit")) + "\n");
 
     while (true) {
       const rl = readline.createInterface({
@@ -335,6 +316,24 @@ export class AgentLoop {
         completer: (line) => this.completeInput(line)
       });
       this.setupGhostText(rl, input, output);
+
+      rl.on("SIGINT", () => {
+        if (this.abortController) {
+          this.abortController.abort();
+          this.abortController = null;
+          output.write("\n\n" + pc.dim("Request aborted. Returning to prompt.") + "\n");
+        } else {
+          const now = Date.now();
+          if (now - lastSigInt < 2000) {
+            rl.close();
+            output.write("\n\n" + pc.dim("Aborted by user.") + "\n");
+            process.exit(0);
+          } else {
+            lastSigInt = now;
+            output.write("\n" + this.themeColor(pc.bold("Press Ctrl+C again within 2s to exit")) + "\n");
+          }
+        }
+      });
 
       const prompt = this.buildPrompt();
       let userInput = "";
@@ -401,20 +400,20 @@ export class AgentLoop {
             return allowed;
           }
         });
-        
-        if (spinner) {
-          spinner.stop();
+        if (answer) {
+          this.renderAssistantTurn(answer);
         }
-        this.renderAssistantTurn(answer);
-      } catch (error) {
-        const errorLabel = this.useAnsi ? pc.red("error> ") : "error> ";
-        output.write(
-          `\n${formatMultiline(errorLabel, (error as Error).message)}\n`
-        );
+
+        const compactionMessage = await this.autoCompactIfNeeded();
+        if (compactionMessage) {
+          this.renderSystemMessage(compactionMessage);
+        }
+      } catch (err) {
+        this.renderSystemMessage(pc.red(`Error: ${(err as Error).message}`));
+      } finally {
+        rl.close();
       }
     }
-
-    rl.close();
   }
 
   private async runSingleTurn(userInput: string, hooks?: RunHooks): Promise<string> {
