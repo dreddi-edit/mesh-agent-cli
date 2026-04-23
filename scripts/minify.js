@@ -41,11 +41,7 @@ async function processDirectory(srcDir, destDir) {
     try {
       const result = await minify(content, MINIFY_CONFIG);
       if (result.code) {
-        // Keep shebang if present
-        const finalCode = content.startsWith("#!") 
-          ? content.split("\n")[0] + "\n" + result.code 
-          : result.code;
-        await fs.writeFile(destPath, finalCode, "utf8");
+        await fs.writeFile(destPath, result.code, "utf8");
       }
     } catch (err) {
       console.error(`Failed to minify ${file}:`, err);
