@@ -6,8 +6,27 @@ import os from "node:os";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
-const DEFAULT_WHISPER_MODEL_URL =
-  "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
+const WHISPER_MODEL_CATALOG = {
+  base: {
+    name: "base",
+    filename: "ggml-base.bin",
+    sizeLabel: "~141 MB",
+    url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
+  },
+  small: {
+    name: "small",
+    filename: "ggml-small.bin",
+    sizeLabel: "~466 MB",
+    url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+  },
+  medium: {
+    name: "medium",
+    filename: "ggml-medium.bin",
+    sizeLabel: "~1.5 GB",
+    url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin"
+  }
+} as const;
+const DEFAULT_WHISPER_MODEL_NAME = "small";
 
 export interface VoiceConfig {
   whisperPath: string;
@@ -17,6 +36,8 @@ export interface VoiceConfig {
   voiceLanguage: string;
   voiceSpeed: number;
   voiceName: string;
+  voiceInput: string;
+  transcriptionModel: string;
 }
 
 export interface VoiceTranscriptionResult {
@@ -28,6 +49,18 @@ export interface SystemVoiceOption {
   name: string;
   locale: string;
   sample: string;
+}
+
+export interface AudioInputOption {
+  id: string;
+  name: string;
+}
+
+export interface WhisperModelOption {
+  name: string;
+  filename: string;
+  sizeLabel: string;
+  url: string;
 }
 
 const MACOS_SAY_RATE = "260";
@@ -50,6 +83,8 @@ export class VoiceManager {
     this.config.voiceLanguage = config.voiceLanguage || "auto";
     this.config.voiceSpeed = config.voiceSpeed || Number(MACOS_SAY_RATE);
     this.config.voiceName = config.voiceName || "auto";
+    this.config.voiceInput = config.voiceInput || "default";
+    this.config.transcriptionModel = this.normalizeTranscriptionModel(config.transcriptionModel);
   }
 
   updateConfig(config: Partial<VoiceConfig>): void {
@@ -130,6 +165,10 @@ export class VoiceManager {
     return Boolean(this.resolveWhisperModel());
   }
 
+  getWhisperModelInfo(): WhisperModelOption {
+    return this.getWhisperModelInfoFor(this.config.transcriptionModel);
+  }
+
   listSystemVoices(): SystemVoiceOption[] {
     if (process.platform !== "darwin") {
       return [];
@@ -151,18 +190,68 @@ export class VoiceManager {
     }
   }
 
-  async installWhisperModel(targetPath = this.config.whisperModel): Promise<string> {
+  listAudioInputDevices(): AudioInputOption[] {
+    if (process.platform !== "darwin") {
+      return [];
+    }
+
+    let raw = "";
+    try {
+      execFileSync("ffmpeg", ["-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+    } catch (error) {
+      const ffmpegError = error as { stdout?: string | Buffer; stderr?: string | Buffer };
+      raw = `${ffmpegError.stdout?.toString?.() ?? ""}\n${ffmpegError.stderr?.toString?.() ?? ""}`;
+    }
+
+    const devices = new Map<string, AudioInputOption>();
+    let inAudioSection = false;
+
+    for (const line of raw.split(/\r?\n/)) {
+      if (line.includes("AVFoundation audio devices")) {
+        inAudioSection = true;
+        continue;
+      }
+      if (line.includes("AVFoundation video devices")) {
+        inAudioSection = false;
+        continue;
+      }
+      if (!inAudioSection) {
+        continue;
+      }
+
+      const match = line.match(/\[(\d+)\]\s+(.+)$/);
+      if (!match) {
+        continue;
+      }
+
+      const [, id, name] = match;
+      if (!devices.has(id)) {
+        devices.set(id, { id, name: name.trim() });
+      }
+    }
+
+    return Array.from(devices.values());
+  }
+
+  async installWhisperModel(
+    targetPath = this.config.whisperModel,
+    transcriptionModel = this.config.transcriptionModel
+  ): Promise<string> {
     if (!targetPath) {
       throw new Error("Whisper model path not configured.");
     }
+    const modelInfo = this.getWhisperModelInfoFor(transcriptionModel);
 
     await fs.mkdir(path.dirname(targetPath), { recursive: true });
     const tempPath = `${targetPath}.download`;
 
     try {
-      const response = await fetch(DEFAULT_WHISPER_MODEL_URL);
+      const response = await fetch(modelInfo.url);
       if (!response.ok || !response.body) {
-        throw new Error(`HTTP ${response.status} while downloading Whisper model`);
+        throw new Error(`HTTP ${response.status} while downloading Whisper ${modelInfo.name} model`);
       }
 
       await pipeline(
@@ -225,19 +314,25 @@ export class VoiceManager {
    */
   async record(durationSeconds: number = 5): Promise<string> {
     const tempFile = path.join(os.tmpdir(), `mesh_voice_${Date.now()}.wav`);
-    
-    // On Mac, we use avfoundation. ":0" is usually the default microphone.
+    const ffmpegPath = this.resolveBinary("ffmpeg");
+    const inputId = this.resolveAudioInputId();
+
     const args = [
+      "-hide_banner",
+      "-loglevel", "error",
       "-f", "avfoundation",
-      "-i", ":0",
+      "-i", `:${inputId}`,
       "-t", durationSeconds.toString(),
       "-ar", "16000",
       "-ac", "1",
+      "-c:a", "pcm_s16le",
+      "-af", "volume=1.8",
+      "-y",
       tempFile
     ];
 
     return new Promise((resolve, reject) => {
-      const proc = spawn("ffmpeg", args);
+      const proc = spawn(ffmpegPath, args);
       proc.on("error", (err) => reject(new Error(`ffmpeg spawn failed: ${err.message}`)));
       proc.on("close", (code) => {
         if (code === 0) resolve(tempFile);
@@ -262,6 +357,7 @@ export class VoiceManager {
       "-f", filePath,
       "-nt",
       "-ng",
+      "-sns",
       "-l", whisperLanguage
     ];
     const whisperPath = this.resolveBinary(this.config.whisperPath!);
@@ -317,6 +413,29 @@ export class VoiceManager {
       .trim()
       .toLowerCase()
       .replace(/_/g, "-");
+  }
+
+  private normalizeTranscriptionModel(model?: string): string {
+    const normalized = String(model || DEFAULT_WHISPER_MODEL_NAME).trim().toLowerCase();
+    if (normalized in WHISPER_MODEL_CATALOG) {
+      return normalized;
+    }
+    return DEFAULT_WHISPER_MODEL_NAME;
+  }
+
+  private getWhisperModelInfoFor(model?: string): WhisperModelOption {
+    const spec =
+      WHISPER_MODEL_CATALOG[this.normalizeTranscriptionModel(model) as keyof typeof WHISPER_MODEL_CATALOG] ??
+      WHISPER_MODEL_CATALOG[DEFAULT_WHISPER_MODEL_NAME];
+    return { ...spec };
+  }
+
+  private resolveAudioInputId(): string {
+    const configured = String(this.config.voiceInput || "default").trim();
+    if (!configured || configured === "default") {
+      return "0";
+    }
+    return configured;
   }
 
   private resolveSayVoice(language?: string): string | undefined {

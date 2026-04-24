@@ -73,7 +73,14 @@ export class LocalToolBackend implements ToolBackend {
         mode: "local",
         enableCloudCache: true,
         themeColor: "cyan",
-        voice: { configured: false, language: "auto", speed: 260, voice: "auto" }
+        voice: {
+          configured: false,
+          language: "auto",
+          speed: 260,
+          voice: "auto",
+          microphone: "default",
+          transcriptionModel: "small"
+        }
       }, 
       bedrock: { endpointBase: "", modelId: "", temperature: 0, maxTokens: 0 }, 
       mcp: { args: [] }, 

@@ -95,6 +95,8 @@ export interface VoiceSettings {
   language: string;
   speed: number;
   voice: string;
+  microphone: string;
+  transcriptionModel: string;
 }
 
 export interface AppConfig {
@@ -128,7 +130,9 @@ const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   configured: false,
   language: "auto",
   speed: 260,
-  voice: "auto"
+  voice: "auto",
+  microphone: "default",
+  transcriptionModel: "small"
 };
 
 function normalizeVoiceSettings(value?: Partial<VoiceSettings> | null): VoiceSettings {
@@ -137,7 +141,10 @@ function normalizeVoiceSettings(value?: Partial<VoiceSettings> | null): VoiceSet
     configured: value?.configured === true,
     language: value?.language?.trim() || DEFAULT_VOICE_SETTINGS.language,
     speed: Number.isFinite(speed) ? speed : DEFAULT_VOICE_SETTINGS.speed,
-    voice: value?.voice?.trim() || DEFAULT_VOICE_SETTINGS.voice
+    voice: value?.voice?.trim() || DEFAULT_VOICE_SETTINGS.voice,
+    microphone: value?.microphone?.trim() || DEFAULT_VOICE_SETTINGS.microphone,
+    transcriptionModel:
+      value?.transcriptionModel?.trim() || DEFAULT_VOICE_SETTINGS.transcriptionModel
   };
 }
 

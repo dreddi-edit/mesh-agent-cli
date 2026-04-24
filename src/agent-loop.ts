@@ -65,6 +65,12 @@ const VOICE_LANGUAGE_CHOICES = [
   { name: "pt", message: "Portuguese", hint: "pt" }
 ];
 
+const VOICE_TRANSCRIPTION_MODEL_CHOICES = [
+  { name: "base", message: "Base", hint: "fastest, lower accuracy, ~141 MB" },
+  { name: "small", message: "Small", hint: "recommended, better accuracy, ~466 MB" },
+  { name: "medium", message: "Medium", hint: "best accuracy, slowest, ~1.5 GB" }
+];
+
 const VOICE_LANGUAGE_LABELS: Record<string, string> = {
   ar: "Arabic",
   de: "German",
@@ -74,6 +80,16 @@ const VOICE_LANGUAGE_LABELS: Record<string, string> = {
   it: "Italian",
   ja: "Japanese",
   pt: "Portuguese"
+};
+
+const RECOMMENDED_SYSTEM_VOICE_BY_LANGUAGE: Record<string, string> = {
+  de: "Anna",
+  en: "Daniel",
+  es: "Mónica",
+  fr: "Jacques",
+  it: "Alice",
+  ja: "Kyoko",
+  pt: "Luciana"
 };
 
 interface WireTool {
@@ -322,11 +338,18 @@ export class AgentLoop {
 
   private buildVoiceManager(): VoiceManager {
     return new VoiceManager({
-      whisperModel: path.join(this.config.agent.workspaceRoot, ".mesh", "models", "ggml-base.bin"),
+      whisperModel: path.join(
+        this.config.agent.workspaceRoot,
+        ".mesh",
+        "models",
+        `ggml-${this.config.agent.voice.transcriptionModel}.bin`
+      ),
       piperModel: path.join(this.config.agent.workspaceRoot, ".mesh", "models", "en_US-lessac-medium.onnx"),
       voiceLanguage: this.config.agent.voice.language,
       voiceSpeed: this.config.agent.voice.speed,
-      voiceName: this.config.agent.voice.voice
+      voiceName: this.config.agent.voice.voice,
+      voiceInput: this.config.agent.voice.microphone,
+      transcriptionModel: this.config.agent.voice.transcriptionModel
     });
   }
 
@@ -335,7 +358,15 @@ export class AgentLoop {
     this.voiceManager.updateConfig({
       voiceLanguage: voice.language,
       voiceSpeed: voice.speed,
-      voiceName: voice.voice
+      voiceName: voice.voice,
+      voiceInput: voice.microphone,
+      transcriptionModel: voice.transcriptionModel,
+      whisperModel: path.join(
+        this.config.agent.workspaceRoot,
+        ".mesh",
+        "models",
+        `ggml-${voice.transcriptionModel}.bin`
+      )
     });
     this.syncVoiceLanguage(voice.language);
   }
@@ -394,6 +425,27 @@ export class AgentLoop {
       .trim();
 
     return cleaned || text.replace(/\s+/g, " ").trim();
+  }
+
+  private pickRecommendedSystemVoice(language: string, availableVoices: Array<{ name: string }>): string {
+    const normalized = this.normalizeLanguageCode(language).split("-")[0];
+    const preferred = RECOMMENDED_SYSTEM_VOICE_BY_LANGUAGE[normalized];
+    if (preferred && availableVoices.some((voice) => voice.name === preferred)) {
+      return preferred;
+    }
+    return availableVoices[0]?.name || "auto";
+  }
+
+  private sortSystemVoices(language: string, voices: Array<{ name: string; locale: string; sample: string }>) {
+    const preferred = this.pickRecommendedSystemVoice(language, voices);
+    return [...voices].sort((left, right) => {
+      const leftScore = left.name === preferred ? 0 : 1;
+      const rightScore = right.name === preferred ? 0 : 1;
+      if (leftScore !== rightScore) {
+        return leftScore - rightScore;
+      }
+      return left.name.localeCompare(right.name);
+    });
   }
 
   async runCli(initialPrompt?: string): Promise<void> {
@@ -1065,6 +1117,53 @@ export class AgentLoop {
       const language = await languagePrompt.run() as string;
       (rl as any).resume();
 
+      const sttPrompt = new Select({
+        name: "voiceTranscriptionModel",
+        message: "Transcription quality",
+        choices: VOICE_TRANSCRIPTION_MODEL_CHOICES.map((choice) => ({
+          name: choice.name,
+          message: choice.message,
+          hint:
+            choice.name === current.transcriptionModel
+              ? pc.green("(current)")
+              : pc.dim(choice.hint)
+        })),
+        initial: Math.max(
+          0,
+          VOICE_TRANSCRIPTION_MODEL_CHOICES.findIndex(
+            (choice) => choice.name === current.transcriptionModel
+          )
+        ),
+        stdin: input,
+        stdout: output
+      });
+      const transcriptionModel = await sttPrompt.run() as string;
+      (rl as any).resume();
+
+      const audioDevices = this.voiceManager.listAudioInputDevices();
+      const microphoneChoices = [
+        {
+          name: "default",
+          message: "Default microphone",
+          hint: current.microphone === "default" ? pc.green("(current)") : pc.dim("Use macOS default input")
+        },
+        ...audioDevices.map((device) => ({
+          name: device.id,
+          message: `${device.name} ${pc.dim(`#${device.id}`)}`,
+          hint: device.id === current.microphone ? pc.green("(current)") : pc.dim("Specific audio input")
+        }))
+      ];
+      const microphonePrompt = new Select({
+        name: "voiceMicrophone",
+        message: "Microphone",
+        choices: microphoneChoices,
+        initial: Math.max(0, microphoneChoices.findIndex((choice) => choice.name === current.microphone)),
+        stdin: input,
+        stdout: output
+      });
+      const microphone = await microphonePrompt.run() as string;
+      (rl as any).resume();
+
       const speedPrompt = new Input({
         name: "voiceSpeed",
         message: "Voice speed (recommended 220-320)",
@@ -1086,17 +1185,26 @@ export class AgentLoop {
         normalizedLanguage === "auto"
           ? availableVoices
           : availableVoices.filter((voice) => voice.locale.toLowerCase().startsWith(`${normalizedLanguage}_`) || voice.locale.toLowerCase().startsWith(`${normalizedLanguage}-`) || voice.locale.toLowerCase() === normalizedLanguage);
-      const voicePool = filteredVoices.length > 0 ? filteredVoices : availableVoices;
+      const voicePool = this.sortSystemVoices(language, filteredVoices.length > 0 ? filteredVoices : availableVoices);
+      const recommendedVoice = this.pickRecommendedSystemVoice(language, voicePool);
       const voiceChoices = [
         {
           name: "auto",
           message: "Auto choose voice",
-          hint: language === "auto" ? pc.dim("Match detected language") : pc.dim(`Default for ${language}`)
+          hint:
+            language === "auto"
+              ? pc.dim("Match detected language")
+              : pc.dim(`Default for ${language}: ${recommendedVoice}`)
         },
         ...voicePool.map((voice) => ({
           name: voice.name,
           message: `${voice.name} ${pc.dim(voice.locale)}`,
-          hint: voice.name === current.voice ? pc.green("(current)") : pc.dim(voice.sample)
+          hint:
+            voice.name === current.voice
+              ? pc.green("(current)")
+              : voice.name === recommendedVoice
+                ? pc.green("(recommended)")
+                : pc.dim(voice.sample)
         }))
       ];
 
@@ -1104,7 +1212,13 @@ export class AgentLoop {
         name: "voiceName",
         message: "Voice",
         choices: voiceChoices,
-        initial: Math.max(0, voiceChoices.findIndex((choice) => choice.name === current.voice)),
+        initial: Math.max(
+          0,
+          voiceChoices.findIndex((choice) =>
+            choice.name === current.voice ||
+            (current.voice === "auto" && choice.name === "auto")
+          )
+        ),
         stdin: input,
         stdout: output
       });
@@ -1116,7 +1230,9 @@ export class AgentLoop {
         configured: true,
         language,
         speed,
-        voice: voiceName
+        voice: voiceName,
+        microphone,
+        transcriptionModel
       };
     } catch {
       (rl as any).resume();
@@ -1446,6 +1562,8 @@ export class AgentLoop {
               "",
               pc.green("Voice settings saved."),
               `${pc.dim("language:")} ${nextVoice.language}`,
+              `${pc.dim("stt:")}      ${nextVoice.transcriptionModel}`,
+              `${pc.dim("mic:")}      ${nextVoice.microphone}`,
               `${pc.dim("speed:")}    ${nextVoice.speed}`,
               `${pc.dim("voice:")}    ${nextVoice.voice}`,
               ""
@@ -1746,8 +1864,8 @@ export class AgentLoop {
       output.write(
         [
           "",
-          "Usage: /setup noninteractive model=sonnet4.6 cloud=on theme=cyan key=- endpoint=- voice_lang=auto voice_speed=260 voice_voice=auto",
-          "Keys: model, cloud, theme, key, endpoint, voice_lang, voice_speed, voice_voice",
+          "Usage: /setup noninteractive model=sonnet4.6 cloud=on theme=cyan key=- endpoint=- voice_lang=auto voice_stt=small voice_mic=default voice_speed=260 voice_voice=auto",
+          "Keys: model, cloud, theme, key, endpoint, voice_lang, voice_stt, voice_mic, voice_speed, voice_voice",
           ""
         ].join("\n")
       );
@@ -1785,8 +1903,16 @@ export class AgentLoop {
             ? String(patch.endpoint)
             : current.customEndpoint,
       voice: {
-        configured: current.voice.configured || patch.voice_lang !== undefined || patch.voice_speed !== undefined || patch.voice_voice !== undefined,
+        configured:
+          current.voice.configured ||
+          patch.voice_lang !== undefined ||
+          patch.voice_stt !== undefined ||
+          patch.voice_mic !== undefined ||
+          patch.voice_speed !== undefined ||
+          patch.voice_voice !== undefined,
         language: patch.voice_lang ? String(patch.voice_lang) : current.voice.language,
+        transcriptionModel: patch.voice_stt ? String(patch.voice_stt) : current.voice.transcriptionModel,
+        microphone: patch.voice_mic ? String(patch.voice_mic) : current.voice.microphone,
         speed: patch.voice_speed ? Number(patch.voice_speed) : current.voice.speed,
         voice: patch.voice_voice ? String(patch.voice_voice) : current.voice.voice
       }
@@ -1801,7 +1927,7 @@ export class AgentLoop {
         `${pc.dim("model:")} ${shortModelName(nextSettings.modelId)}`,
         `${pc.dim("cloud:")} ${nextSettings.enableCloudCache ? "on" : "off"}`,
         `${pc.dim("theme:")} ${nextSettings.themeColor}`,
-        `${pc.dim("voice:")} ${nextSettings.voice.language} / ${nextSettings.voice.speed} / ${nextSettings.voice.voice}`,
+        `${pc.dim("voice:")} ${nextSettings.voice.language} / ${nextSettings.voice.transcriptionModel} / ${nextSettings.voice.microphone} / ${nextSettings.voice.speed} / ${nextSettings.voice.voice}`,
         ""
       ].join("\n")
     );
@@ -1832,7 +1958,7 @@ export class AgentLoop {
         `${pc.yellow("•")} ${"tts voice".padEnd(15)} ${pc.dim("Falls back to macOS say if Piper model is missing")}\n`
       );
       output.write(
-        `${pc.yellow("•")} ${"voice config".padEnd(15)} ${pc.dim(`${this.config.agent.voice.language} / ${this.config.agent.voice.speed} / ${this.config.agent.voice.voice}`)}\n`
+        `${pc.yellow("•")} ${"voice config".padEnd(15)} ${pc.dim(`${this.config.agent.voice.language} / ${this.config.agent.voice.transcriptionModel} / ${this.config.agent.voice.microphone} / ${this.config.agent.voice.speed} / ${this.config.agent.voice.voice}`)}\n`
       );
 
       if (wantsFix) {
@@ -1935,9 +2061,10 @@ export class AgentLoop {
     }
 
     const targetPath = this.voiceManager.getWhisperModelPath();
+    const modelInfo = this.voiceManager.getWhisperModelInfo();
     const confirmPrompt = new Confirm({
       name: "installWhisperModel",
-      message: `Download Whisper base model to ${targetPath}? (~141 MB)`,
+      message: `Download Whisper ${modelInfo.name} model to ${targetPath}? (${modelInfo.sizeLabel})`,
       initial: true
     });
     const confirmed = Boolean(await confirmPrompt.run().catch(() => false));
@@ -1946,7 +2073,7 @@ export class AgentLoop {
       return false;
     }
 
-    output.write(this.themeColor(`\nDownloading Whisper model to ${targetPath}\n`));
+    output.write(this.themeColor(`\nDownloading Whisper ${modelInfo.name} model to ${targetPath}\n`));
     try {
       await this.voiceManager.installWhisperModel();
       output.write(pc.green("\nWhisper model download complete.\n"));
