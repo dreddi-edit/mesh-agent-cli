@@ -901,6 +901,35 @@ function buildCodeCapsule(pathValue, text, fileType, workspaceFilePaths = []) {
     });
   }
 
+  // Regex fallback when tree-sitter native bindings are unavailable or found nothing.
+  if (symbolsSection.items.length === 0) {
+    const SYMBOL_PATTERNS = [
+      { re: /^[\t ]*(export\s+)?(async\s+)?function\s+(\w+)\s*\(/, nameGroup: 3, kind: "function" },
+      { re: /^[\t ]*(export\s+)?(abstract\s+|sealed\s+|data\s+|open\s+|final\s+)?(class|interface|enum|type)\s+(\w+)/, nameGroup: 4, kind: "class" },
+      { re: /^[\t ]*(public|private|protected|static|async|override|abstract)?\s*(async\s+)?(\w+)\s*\([^)]*\)\s*(?::\s*\S+\s*)?\{/, nameGroup: 3, kind: "method" },
+      { re: /^[\t ]*(pub(\(crate\))?\s+)?(async\s+)?fn\s+(\w+)\s*[<(]/, nameGroup: 4, kind: "fn" },
+      { re: /^[\t ]*def\s+(\w+)\s*[(\[]/, nameGroup: 1, kind: "fn" },
+    ];
+    const seenNames = new Set();
+    const lines = rawText.split(/\r?\n/g);
+    for (let i = 0; i < lines.length && symbolsSection.items.length < MAX_SYMBOL_DISCOVERY; i += 1) {
+      const line = lines[i];
+      for (const { re, nameGroup, kind } of SYMBOL_PATTERNS) {
+        const m = re.exec(line);
+        if (!m) continue;
+        const name = (m[nameGroup] || "").trim();
+        if (!name || seenNames.has(name) || /^(if|for|while|switch|return|const|let|var)$/.test(name)) break;
+        seenNames.add(name);
+        const spanId = spanManager.addLineSpan(i + 1, kind, line);
+        const sig = line.trim().slice(0, 120);
+        pushSectionItem(symbolsSection, { text: `${kind} ${name} line=${i + 1} sig="${sig}"`, spanIds: [spanId], priority: "P0" });
+        const isExported = /^export\s/.test(line.trim());
+        symbolDeclarations.push({ name, kind, lineStart: i + 1, lineEnd: i + 1, signature: sig, isExported });
+        break;
+      }
+    }
+  }
+
   const callSitesRaw = extractCallSites(tree, rawText, fileType?.parserFamily || '');
   const stringLiteralsRaw = extractStringLiterals(tree, rawText);
 
@@ -974,8 +1003,8 @@ function buildCodeCapsule(pathValue, text, fileType, workspaceFilePaths = []) {
     stringLiteralsRaw,
     sections: [
       exportsSection,
-      importsSection,
       symbolsSection,
+      importsSection,
       routesSection,
       callsSection,
       literalsSection,
@@ -1653,8 +1682,8 @@ function buildCapsuleTierBudget(rawTokenEstimate, tier) {
   if (normalizedTier === "medium") {
     if (scale === "tiny") return buildCapsuleBudget(tokens, 0.78, 24, 120);
     if (scale === "small") return buildCapsuleBudget(tokens, 0.78, 60, 240);
-    if (scale === "medium") return buildCapsuleBudget(tokens, 0.24, 80, 320);
-    return buildCapsuleBudget(tokens, 0.16, 120, 720);
+    if (scale === "medium") return buildCapsuleBudget(tokens, 0.35, 120, 500);
+    return buildCapsuleBudget(tokens, 0.22, 150, 900);
   }
   if (scale === "tiny") return buildCapsuleBudget(tokens, 0.60, 18, 84);
   if (scale === "small") return buildCapsuleBudget(tokens, 0.32, 32, 96);
@@ -1729,7 +1758,7 @@ function buildCapsuleTierProfile(rawTokenEstimate, tier, mode) {
         : Math.min(base.maxSecondaryItemsPerSection, scale === "tiny" ? 2 : 3),
       maxTotalItems: isDense
         ? (scale === "tiny" ? 4 : scale === "small" ? 10 : scale === "medium" ? 6 : 12)
-        : Math.min(base.maxTotalItems, scale === "tiny" ? 4 : scale === "small" ? 8 : scale === "medium" ? 7 : 12),
+        : Math.min(base.maxTotalItems, scale === "tiny" ? 4 : scale === "small" ? 12 : scale === "medium" ? 14 : 16),
       itemTextLimit: Math.min(base.itemTextLimit, scale === "large" ? 150 : 170),
       maxSpanIds: Math.min(base.maxSpanIds, scale === "small" ? 1 : 2),
     };

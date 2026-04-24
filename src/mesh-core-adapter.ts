@@ -87,9 +87,9 @@ export class MeshCoreAdapter {
       });
 
       const [low, medium, high] = await Promise.all([
-        this.module.buildWorkspaceFileView(record, "capsule", { tier: "low" }),
+        this.module.buildWorkspaceFileView(record, "capsule", { tier: "ultra" }),
         this.module.buildWorkspaceFileView(record, "capsule", { tier: "medium" }),
-        this.module.buildWorkspaceFileView(record, "capsule", { tier: "high" })
+        this.module.buildWorkspaceFileView(record, "capsule", { tier: "loose" })
       ]);
 
       return {

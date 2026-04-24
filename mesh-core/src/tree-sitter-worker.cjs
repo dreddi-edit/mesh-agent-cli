@@ -708,6 +708,39 @@ function buildCodeCapsule(pathValue, text, fileType, limits) {
     }
   }
 
+  // Regex fallback when tree-sitter native bindings are unavailable or found nothing.
+  if (symbolDeclarations.length === 0) {
+    const SYMBOL_PATTERNS = [
+      { re: /^[\t ]*(export\s+)?(async\s+)?function\s+(\w+)\s*\(/, nameGroup: 3, kind: "function" },
+      { re: /^[\t ]*(export\s+)?(abstract\s+|sealed\s+|data\s+|open\s+|final\s+)?(class|interface|enum|type)\s+(\w+)/, nameGroup: 4, kind: "class" },
+      { re: /^[\t ]*(public|private|protected|static|async|override|abstract)?\s*(async\s+)?(\w+)\s*\([^)]*\)\s*(?::\s*\S+\s*)?\{/, nameGroup: 3, kind: "method" },
+      { re: /^[\t ]*(pub(\(crate\))?\s+)?(async\s+)?fn\s+(\w+)\s*[<(]/, nameGroup: 4, kind: "fn" },
+      { re: /^[\t ]*def\s+(\w+)\s*[(\[]/, nameGroup: 1, kind: "fn" },
+    ];
+    const seenNames = new Set();
+    const lines = rawText.split(/\r?\n/g);
+    for (let i = 0; i < lines.length && symbolsSection.items.length < MAX_SYMBOL_DISCOVERY; i += 1) {
+      const line = lines[i];
+      for (const { re, nameGroup, kind } of SYMBOL_PATTERNS) {
+        const m = re.exec(line);
+        if (!m) continue;
+        const name = (m[nameGroup] || "").trim();
+        if (!name || seenNames.has(name) || /^(if|for|while|switch|return|const|let|var)$/.test(name)) break;
+        seenNames.add(name);
+        const spanId = spanManager.addLineSpan(i + 1, kind, line);
+        const sig = line.trim().slice(0, 120);
+        const isExported = /^export\s/.test(line.trim());
+        symbolDeclarations.push({ name, kind, lineStart: i + 1, lineEnd: i + 1, signature: sig, isExported });
+        if (isExported) {
+          pushSectionItem(exportsSection, { text: `${name} — ${sig}`, priority: "P0" });
+        } else {
+          pushSectionItem(symbolsSection, { text: `${kind} ${name} line=${i + 1} sig="${sig}"`, spanIds: [spanId], priority: "P0" });
+        }
+        break;
+      }
+    }
+  }
+
   return {
     parserFamily: parseOk ? fileType.parserFamily : "heuristic",
     parseOk,
@@ -717,10 +750,10 @@ function buildCodeCapsule(pathValue, text, fileType, limits) {
     callSitesRaw,
     stringLiteralsRaw,
     sections: [
-      importsSection,
       exportsSection,
-      callsSection,
       symbolsSection,
+      importsSection,
+      callsSection,
       routesSection,
       literalsSection,
       elisionsSection,
