@@ -46,7 +46,9 @@ const VOICE_SYSTEM_PROMPT = [
   "Voice mode is active.",
   "Respond for spoken conversation, not for markdown reading.",
   "Use short natural sentences.",
-  "Do not use emojis, bullet lists, markdown formatting, headings, code fences, or decorative symbols.",
+  "Reply in plain text only.",
+  "Never use emojis, bullet lists, markdown formatting, headings, code fences, or decorative symbols.",
+  "Keep answers very short unless the user explicitly asks for more detail.",
   "Avoid reading punctuation-heavy structures aloud.",
   "If the user asks a coding question, answer briefly first and only give commands or code when truly necessary."
 ].join("\n");
@@ -62,6 +64,17 @@ const VOICE_LANGUAGE_CHOICES = [
   { name: "ja", message: "Japanese", hint: "ja" },
   { name: "pt", message: "Portuguese", hint: "pt" }
 ];
+
+const VOICE_LANGUAGE_LABELS: Record<string, string> = {
+  ar: "Arabic",
+  de: "German",
+  en: "English",
+  es: "Spanish",
+  fr: "French",
+  it: "Italian",
+  ja: "Japanese",
+  pt: "Portuguese"
+};
 
 interface WireTool {
   wireName: string;
@@ -304,6 +317,7 @@ export class AgentLoop {
     }
 
     this.voiceManager = this.buildVoiceManager();
+    this.syncVoiceLanguage();
   }
 
   private buildVoiceManager(): VoiceManager {
@@ -323,6 +337,63 @@ export class AgentLoop {
       voiceSpeed: voice.speed,
       voiceName: voice.voice
     });
+    this.syncVoiceLanguage(voice.language);
+  }
+
+  private normalizeLanguageCode(language?: string): string {
+    return String(language || "auto")
+      .trim()
+      .toLowerCase()
+      .replace(/_/g, "-");
+  }
+
+  private getConfiguredVoiceLanguage(): string {
+    return this.normalizeLanguageCode(this.config.agent.voice.language);
+  }
+
+  private syncVoiceLanguage(detectedLanguage?: string): void {
+    const configured = this.getConfiguredVoiceLanguage();
+    this.voiceLanguage =
+      configured === "auto"
+        ? this.normalizeLanguageCode(detectedLanguage || this.voiceLanguage || "en")
+        : configured;
+  }
+
+  private getVoiceReplyLanguage(): string {
+    const configured = this.getConfiguredVoiceLanguage();
+    return configured === "auto"
+      ? this.normalizeLanguageCode(this.voiceLanguage || "en")
+      : configured;
+  }
+
+  private buildVoiceLanguageInstruction(): string {
+    const replyLanguage = this.getVoiceReplyLanguage();
+    const label = VOICE_LANGUAGE_LABELS[replyLanguage.split("-")[0]] || replyLanguage;
+    if (this.getConfiguredVoiceLanguage() === "auto") {
+      return `Reply in the same language as the user's last spoken message. Current detected language: ${label}.`;
+    }
+    return `Always reply in ${label} unless the user explicitly asks to switch languages.`;
+  }
+
+  private sanitizeVoiceAssistantText(text: string): string {
+    const cleaned = text
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .replace(/```[\s\S]*?```/g, " ")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+      .replace(/^\s*>\s+/gm, "")
+      .replace(/^\s*[-*•]\s+/gm, "")
+      .replace(/^\s*\d+\.\s+/gm, "")
+      .replace(/\*\*([^*]+)\*\*/g, "$1")
+      .replace(/\*([^*]+)\*/g, "$1")
+      .replace(/_([^_]+)_/g, "$1")
+      .replace(/~~([^~]+)~~/g, "$1")
+      .replace(/\p{Extended_Pictographic}/gu, "")
+      .replace(/[•▪◦●○◆◇★☆]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    return cleaned || text.replace(/\s+/g, " ").trim();
   }
 
   async runCli(initialPrompt?: string): Promise<void> {
@@ -416,7 +487,7 @@ export class AgentLoop {
             output.write(pc.dim("Transcribing...\n"));
             const transcription = await this.voiceManager.transcribe(audioFile);
             userInput = transcription.text;
-            this.voiceLanguage = transcription.language || this.voiceLanguage;
+            this.syncVoiceLanguage(transcription.language);
             output.write(pc.bold(`❯ ${userInput}\n`));
           } catch (err) {
             output.write(pc.red(`Voice error: ${(err as Error).message}\n`));
@@ -462,10 +533,8 @@ export class AgentLoop {
       try {
         const spinner = this.useAnsi ? ora({ text: "Thinking...", color: "cyan", stream: output }).start() : undefined;
         let answer: string | undefined;
-        let currentSentence = "";
         try {
-          let hasStartedStreaming = false;
-          answer = await this.runSingleTurn(userInput, {
+          const sharedHooks: RunHooks = {
             onToolStart: (wireName, args) => {
               if (spinner) {
                 spinner.text = `Running tool ${pc.cyan(wireName)} ${pc.dim(formatArgsPreview(args))}`;
@@ -478,32 +547,13 @@ export class AgentLoop {
               }
               this.renderToolEvent(ok ? "success" : "error", wireName, resultPreview);
             },
-            onDelta: (delta) => {
-              if (spinner) {
-                spinner.stop();
-                spinner.clear();
-              }
-              if (!hasStartedStreaming) {
-                hasStartedStreaming = true;
-                output.write("\n" + this.themeColor(pc.bold("assistant")) + pc.dim(" › ") + "\n");
-              }
-              output.write(delta);
-              if (this.voiceMode) {
-                currentSentence += delta;
-                if (/[.!?]\s*$/.test(delta)) {
-                  this.voiceManager.speak(currentSentence.trim(), this.voiceLanguage).catch(() => {});
-                  currentSentence = "";
-                }
-              }
-            },
             askPermission: async (msg) => {
               if (spinner) spinner.stop();
               const p = this.useAnsi ? pc.yellow(`\n[Action Required] ${msg} [y/N/A]: `) : `\n[Action Required] ${msg} [y/N/A]: `;
-              // Use a fresh RL for permission to avoid prompt conflicts
               const tempRl = readline.createInterface({ input, output });
               const ans = (await tempRl.question(p)).trim().toLowerCase();
               tempRl.close();
-              
+
               if (ans === "a") {
                 this.autoApproveTools = true;
                 if (spinner) spinner.start();
@@ -513,12 +563,38 @@ export class AgentLoop {
               if (spinner) spinner.start();
               return allowed;
             }
-          });
-          if (this.voiceMode && currentSentence.trim()) {
-            this.voiceManager.speak(currentSentence.trim(), this.voiceLanguage).catch(() => {});
-          }
-          if (hasStartedStreaming) {
-            output.write("\n");
+          };
+
+          if (this.voiceMode) {
+            answer = await this.runSingleTurn(userInput, sharedHooks);
+            const spokenAnswer = this.sanitizeVoiceAssistantText(answer);
+            if (spinner) {
+              spinner.stop();
+              spinner.clear();
+            }
+            this.renderAssistantTurn(spokenAnswer, { plainText: true });
+            await this.voiceManager.speak(spokenAnswer, this.getVoiceReplyLanguage()).catch((error) => {
+              this.renderSystemMessage(pc.red(`Voice output failed: ${(error as Error).message}`));
+            });
+          } else {
+            let hasStartedStreaming = false;
+            answer = await this.runSingleTurn(userInput, {
+              ...sharedHooks,
+              onDelta: (delta) => {
+                if (spinner) {
+                  spinner.stop();
+                  spinner.clear();
+                }
+                if (!hasStartedStreaming) {
+                  hasStartedStreaming = true;
+                  output.write("\n" + this.themeColor(pc.bold("assistant")) + pc.dim(" › ") + "\n");
+                }
+                output.write(delta);
+              }
+            });
+            if (hasStartedStreaming) {
+              output.write("\n");
+            }
           }
         } finally {
           if (spinner) {
@@ -1210,7 +1286,15 @@ export class AgentLoop {
     output.write(`\n${label}> ${text}\n`);
   }
 
-  private renderAssistantTurn(text: string): void {
+  private renderAssistantTurn(text: string, options?: { plainText?: boolean }): void {
+    if (options?.plainText) {
+      if (this.useAnsi) {
+        output.write("\n" + this.themeColor(pc.bold("assistant")) + pc.dim(" › ") + "\n" + text + "\n");
+        return;
+      }
+      output.write(`\nassistant> ${text}\n`);
+      return;
+    }
     const rendered = marked.parse(text);
     if (this.useAnsi) {
       output.write("\n" + this.themeColor(pc.bold("assistant")) + pc.dim(" › ") + "\n" + rendered + "\n");
@@ -1375,6 +1459,7 @@ export class AgentLoop {
         else this.voiceMode = !this.voiceMode;
 
         if (this.voiceMode) {
+          this.syncVoiceLanguage();
           if (!this.config.agent.voice.configured) {
             const current = await loadUserSettings();
             const nextVoice = await this.runVoiceSetupWizard(rl, current.voice);
@@ -1903,6 +1988,7 @@ export class AgentLoop {
     const sections = [SYSTEM_PROMPT];
     if (this.voiceMode) {
       sections.push(`\nVoice Instructions:\n${VOICE_SYSTEM_PROMPT}`);
+      sections.push(`Voice Language:\n${this.buildVoiceLanguageInstruction()}`);
     }
     if (this.localInstructions) {
       sections.push(`\nLocal Project Instructions:\n${this.localInstructions}`);

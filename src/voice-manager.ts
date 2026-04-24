@@ -254,13 +254,15 @@ export class VoiceManager {
     if (!whisperModel) {
       throw new Error(`Whisper model not found at ${this.config.whisperModel}.`);
     }
+    const configuredLanguage = this.normalizeLanguage(this.config.voiceLanguage);
+    const whisperLanguage = configuredLanguage === "auto" ? "auto" : configuredLanguage;
 
     const args = [
       "-m", whisperModel,
       "-f", filePath,
       "-nt",
       "-ng",
-      "-l", "auto"
+      "-l", whisperLanguage
     ];
     const whisperPath = this.resolveBinary(this.config.whisperPath!);
 
@@ -275,7 +277,7 @@ export class VoiceManager {
         if (code === 0) {
           resolve({
             text: output.trim(),
-            language: this.extractDetectedLanguage(errorOutput)
+            language: whisperLanguage === "auto" ? this.extractDetectedLanguage(errorOutput) : whisperLanguage
           });
         } else {
           const detail = errorOutput.trim().split("\n").slice(-3).join(" | ");
