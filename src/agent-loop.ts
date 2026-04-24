@@ -1556,114 +1556,240 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
   }
 
   private async launchDashboard(): Promise<void> {
-    const spinner = ora({ text: "Starting Mesh Pulse...", color: "cyan" }).start();
+    const spinner = ora({ text: "Initializing Mesh Pulse Neural Interface...", color: "cyan" }).start();
     try {
-      // Very minimal structural extraction for the visualization
-      const files: any = await this.backend.callTool("workspace.list_files", { limit: 1000 });
+      // 1. Gather rich structural data
+      const filesRes: any = await this.backend.callTool("workspace.list_files", { limit: 500 });
       const nodes: any[] = [];
       const links: any[] = [];
-      
-      for (const f of files.files) {
-        if (f.match(/\.(ts|js|tsx|jsx)$/)) {
-          nodes.push({ id: f, group: f.includes("src") ? 1 : 2 });
-          // In a real scenario we'd use get_file_graph, but to keep the launch instantaneous
-          // we use a lightweight static structural view or query cache.
+      const seenFiles = new Set(filesRes.files);
+
+      // Build basic nodes
+      for (const f of filesRes.files) {
+        if (f.match(/\.(ts|js|tsx|jsx|css|md|json)$/)) {
+          const depth = f.split("/").length;
+          nodes.push({ 
+            id: f, 
+            name: path.basename(f),
+            group: f.includes("node_modules") ? 0 : (f.includes("src") ? 1 : 2),
+            val: Math.max(2, 10 - depth) 
+          });
+        }
+      }
+
+      // Proactively fetch some links for the initial "WOW" effect
+      const sampleFiles = filesRes.files.filter((f: string) => f.endsWith(".ts") || f.endsWith(".js")).slice(0, 20);
+      for (const f of sampleFiles) {
+        const graph: any = await this.backend.callTool("workspace.get_file_graph", { path: f }).catch(() => null);
+        if (graph?.dependencies) {
+          for (const dep of graph.dependencies) {
+            if (seenFiles.has(dep)) {
+              links.push({ source: f, target: dep });
+            }
+          }
         }
       }
 
       const html = `
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <title>Mesh Pulse</title>
+  <meta charset="UTF-8">
+  <title>MESH // NEURAL PULSE</title>
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <style>
-    body { margin: 0; background: #000; overflow: hidden; color: #fff; font-family: monospace; }
-    .node { stroke: #222; stroke-width: 1.5px; transition: r 0.3s, fill 0.3s; }
-    .link { stroke: #555; stroke-opacity: 0.6; }
-    #info { position: absolute; top: 10px; left: 10px; padding: 10px; background: rgba(0,0,0,0.8); border: 1px solid #333; z-index: 10; }
-    #log { position: absolute; bottom: 10px; right: 10px; width: 300px; height: 200px; background: rgba(0,0,0,0.8); border: 1px solid #333; font-size: 10px; overflow-y: auto; padding: 5px; }
-    .node.active { fill: #fff !important; r: 15px !important; stroke: #0ff; }
+    :root {
+      --bg: #050505;
+      --accent: #00f2ff;
+      --node-src: #00f2ff;
+      --node-other: #ff00ea;
+      --text: #e0e0e0;
+      --panel: rgba(10, 10, 10, 0.9);
+      --border: #1a1a1a;
+    }
+    body { margin: 0; background: var(--bg); overflow: hidden; color: var(--text); font-family: 'JetBrains Mono', 'Fira Code', monospace; }
+    
+    #header { position: absolute; top: 0; left: 0; right: 0; height: 50px; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 20px; z-index: 100; letter-spacing: 2px; }
+    #header .brand { color: var(--accent); font-weight: bold; font-size: 18px; text-shadow: 0 0 10px var(--accent); }
+    #header .status { margin-left: auto; font-size: 10px; color: #555; }
+
+    #info-panel { position: absolute; top: 70px; left: 20px; width: 300px; background: var(--panel); border: 1px solid var(--border); padding: 15px; z-index: 90; backdrop-filter: blur(10px); }
+    #info-panel h2 { margin: 0 0 10px 0; font-size: 14px; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 5px; }
+    #info-panel .content { font-size: 11px; line-height: 1.4; color: #aaa; }
+
+    #log-panel { position: absolute; bottom: 20px; right: 20px; width: 400px; height: 250px; background: var(--panel); border: 1px solid var(--border); padding: 10px; z-index: 90; display: flex; flex-direction: column; overflow: hidden; }
+    #log-panel h3 { margin: 0 0 5px 0; font-size: 10px; color: #666; text-transform: uppercase; }
+    #log-stream { flex: 1; overflow-y: auto; font-size: 10px; color: #888; }
+    .log-entry { margin-bottom: 4px; border-left: 2px solid var(--accent); padding-left: 8px; animation: fadeIn 0.3s ease; }
+    .log-entry .time { color: #444; margin-right: 5px; }
+    .log-entry .tag { color: var(--accent); font-weight: bold; margin-right: 5px; }
+
+    .node { cursor: pointer; }
+    .node circle { stroke: #000; stroke-width: 1px; transition: r 0.3s, fill 0.3s, filter 0.3s; }
+    .node text { font-size: 8px; fill: #555; pointer-events: none; transition: fill 0.3s, font-size 0.3s; }
+    .node:hover circle { filter: brightness(1.5) drop-shadow(0 0 8px var(--accent)); }
+    .node:hover text { fill: #fff; font-size: 12px; }
+    .link { stroke: #222; stroke-opacity: 0.4; stroke-width: 1px; }
+
+    .pulse { animation: nodePulse 1.5s infinite; }
+    @keyframes nodePulse {
+      0% { filter: drop-shadow(0 0 2px #fff); }
+      50% { filter: drop-shadow(0 0 15px var(--accent)); }
+      100% { filter: drop-shadow(0 0 2px #fff); }
+    }
+    @keyframes fadeIn { from { opacity: 0; transform: translateX(10px); } to { opacity: 1; transform: translateX(0); } }
+
+    svg { cursor: move; }
   </style>
 </head>
 <body>
-  <div id="info">Mesh Pulse WebSocket Hub<br><small>Watching workspace in real-time...</small></div>
-  <div id="log"></div>
-  <svg width="100vw" height="100vh"></svg>
+  <div id="header">
+    <div class="brand">MESH // NEURAL PULSE v2.0</div>
+    <div class="status">SYSTEM.CONNECTED // WORKSPACE: ${path.basename(this.config.agent.workspaceRoot).toUpperCase()}</div>
+  </div>
+
+  <div id="info-panel">
+    <h2 id="file-name">Select a node</h2>
+    <div class="content" id="file-meta">Click a file node to inspect its neural capsule state and dependencies.</div>
+  </div>
+
+  <div id="log-panel">
+    <h3>Neural Activity Stream</h3>
+    <div id="log-stream"></div>
+  </div>
+
+  <svg id="canvas"></svg>
+
   <script>
-    const data = { nodes: ${JSON.stringify(nodes)}, links: [] };
     const width = window.innerWidth, height = window.innerHeight;
-    const svg = d3.select("svg");
+    const data = { nodes: ${JSON.stringify(nodes)}, links: ${JSON.stringify(links)} };
+
+    const svg = d3.select("#canvas")
+      .attr("width", width)
+      .attr("height", height)
+      .call(d3.zoom().on("zoom", (event) => {
+        container.attr("transform", event.transform);
+      }));
+
+    const container = svg.append("g");
+
     const simulation = d3.forceSimulation(data.nodes)
-      .force("link", d3.forceLink(data.links).id(d => d.id))
-      .force("charge", d3.forceManyBody().strength(-100))
-      .force("center", d3.forceCenter(width / 2, height / 2));
+      .force("link", d3.forceLink(data.links).id(d => d.id).distance(50))
+      .force("charge", d3.forceManyBody().strength(-150))
+      .force("center", d3.forceCenter(width / 2, height / 2))
+      .force("collision", d3.forceCollide().radius(30));
 
-    const link = svg.append("g").selectAll("line")
-      .data(data.links).enter().append("line").attr("class", "link");
+    const link = container.append("g")
+      .selectAll("line")
+      .data(data.links)
+      .enter().append("line")
+      .attr("class", "link");
 
-    const node = svg.append("g").selectAll("circle")
-      .data(data.nodes).enter().append("circle")
-      .attr("class", "node").attr("r", 5).attr("fill", d => d.group === 1 ? "#00ffff" : "#ff00ff")
-      .on("mouseover", (e, d) => document.getElementById("info").innerHTML = d.id);
+    const node = container.append("g")
+      .selectAll(".node")
+      .data(data.nodes)
+      .enter().append("g")
+      .attr("class", "node")
+      .call(d3.drag()
+        .on("start", dragstarted)
+        .on("drag", dragged)
+        .on("end", dragended))
+      .on("click", (e, d) => {
+        document.getElementById("file-name").innerText = d.name;
+        document.getElementById("file-meta").innerText = "PATH: " + d.id + "\\n\\nInitializing deep inspection...";
+      });
+
+    node.append("circle")
+      .attr("r", d => d.val)
+      .attr("fill", d => d.group === 1 ? "var(--node-src)" : "var(--node-other)");
+
+    node.append("text")
+      .attr("dx", 12)
+      .attr("dy", ".35em")
+      .text(d => d.name);
 
     simulation.on("tick", () => {
       link.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
           .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
-      node.attr("cx", d => d.x).attr("cy", d => d.y);
+      node.attr("transform", d => \`translate(\${d.x},\${d.y})\`);
     });
 
-    // WebSocket Logic
+    function dragstarted(event, d) {
+      if (!event.active) simulation.alphaTarget(0.3).restart();
+      d.fx = d.x; d.fy = d.y;
+    }
+    function dragged(event, d) {
+      d.fx = event.x; d.fy = event.y;
+    }
+    function dragended(event, d) {
+      if (!event.active) simulation.alphaTarget(0);
+      d.fx = null; d.fy = null;
+    }
+
+    // WebSocket Neural Feed
     const ws = new WebSocket("ws://" + location.host);
+    const logStream = document.getElementById("log-stream");
+
     ws.onmessage = (event) => {
       const msg = JSON.parse(event.data);
-      const log = document.getElementById("log");
-      log.innerHTML += "<div>[" + new Date().toLocaleTimeString() + "] " + msg.type + ": " + (msg.path || msg.msg) + "</div>";
-      log.scrollTop = log.scrollHeight;
+      
+      // Update Log
+      const entry = document.createElement("div");
+      entry.className = "log-entry";
+      const time = new Date().toLocaleTimeString();
+      entry.innerHTML = \`<span class="time">\${time}</span><span class="tag">\${msg.type.toUpperCase()}</span> \${msg.path || msg.msg}\`;
+      logStream.prepend(entry);
+      if (logStream.childNodes.length > 50) logStream.lastChild.remove();
 
+      // Pulse the node
       if (msg.path) {
-        node.filter(d => d.id === msg.path)
-          .classed("active", true)
-          .transition().duration(1000).classed("active", false);
+        const targetNode = node.filter(d => d.id === msg.path || d.id.endsWith(msg.path));
+        targetNode.select("circle")
+          .attr("fill", "#fff")
+          .attr("r", 20)
+          .transition().duration(2000)
+          .attr("fill", d => d.group === 1 ? "var(--node-src)" : "var(--node-other)")
+          .attr("r", d => d.val);
+        
+        targetNode.classed("pulse", true);
+        setTimeout(() => targetNode.classed("pulse", false), 3000);
       }
     };
-  </script>
+  <\/script>
 </body>
 </html>`;
 
       const server = http.createServer((req, res) => {
-        if (req.headers.upgrade && req.headers.upgrade.toLowerCase() === 'websocket') return; // Handled by ws
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(html);
       });
 
-      // Ultra-minimal WS server logic (no external deps)
       const crypto = await import("node:crypto");
-      server.on('upgrade', (req, socket, head) => {
+      server.on('upgrade', (req, socket) => {
         const key = req.headers['sec-websocket-key'];
         const digest = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
-        socket.write('HTTP/1.1 101 Switching Protocols\\r\\n' +
-                     'Upgrade: websocket\\r\\n' +
-                     'Connection: Upgrade\\r\\n' +
-                     'Sec-WebSocket-Accept: ' + digest + '\\r\\n' +
-                     '\\r\\n');
-        
+        socket.write('HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: ' + digest + '\\r\\n\\r\\n');
         this.dashboardSocket = socket;
       });
 
-      server.listen(0, "127.0.0.1", async () => {
+      // Listen on random port
+      server.listen(0, "127.0.0.1", () => {
         const port = (server.address() as any).port;
-        spinner.succeed(pc.green(`Mesh Pulse running on http://127.0.0.1:${port}`));
+        spinner.succeed(pc.green(`Mesh Pulse active at http://127.0.0.1:${port}`));
         
-        // Open browser automatically
-        const { exec } = await import("node:child_process");
-        const cmd = process.platform === "darwin" ? `open http://127.0.0.1:${port}` :
-                    process.platform === "win32" ? `start http://127.0.0.1:${port}` :
-                    `xdg-open http://127.0.0.1:${port}`;
-        exec(cmd);
+        const { exec } = require("node:child_process");
+        const openCmd = process.platform === "darwin" ? `open http://127.0.0.1:${port}` :
+                        process.platform === "win32" ? `start http://127.0.0.1:${port}` :
+                        `xdg-open http://127.0.0.1:${port}`;
+        exec(openCmd);
+        
+        // CRITICAL: Unref the server so it doesn't block the Node event loop's exit
+        // and allow the AgentLoop to continue immediately.
+        server.unref();
       });
+
     } catch (e) {
-      spinner.fail(pc.red(`Dashboard failed: ${(e as Error).message}`));
+      spinner.fail(pc.red(`Interface initialization failed: ${(e as Error).message}`));
     }
   }
 
