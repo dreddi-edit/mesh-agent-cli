@@ -9,7 +9,7 @@ interface MeshCoreModule {
     pathValue: string,
     rawText: string,
     options?: Record<string, unknown>
-  ) => Promise<unknown>;
+  ) => Promise<any>;
   buildWorkspaceFileView?: (
     meta: unknown,
     view?: string,
@@ -24,6 +24,28 @@ export interface MeshFileSummary {
   capsulePreview?: string;
   capsuleTier?: string;
   warning?: string;
+}
+
+export interface MeshSymbol {
+  name: string;
+  kind: string;
+  lineStart: number;
+  lineEnd: number;
+}
+
+export interface MeshCallSite {
+  callee: string;
+  lineStart: number;
+  lineEnd?: number;
+}
+
+export interface MeshFileRecord {
+  path: string;
+  symbols: MeshSymbol[];
+  callSites: MeshCallSite[];
+  dependencies: string[];
+  fileType: string;
+  parseOk: boolean;
 }
 
 export class MeshCoreAdapter {
@@ -66,6 +88,72 @@ export class MeshCoreAdapter {
 
   get isAvailable(): boolean {
     return Boolean(this.module);
+  }
+
+  async getDetailedRecord(filePath: string, text: string): Promise<MeshFileRecord | null> {
+    if (!this.module || typeof this.module.buildWorkspaceFileRecord !== "function") {
+      return null;
+    }
+    try {
+      const record = await this.module.buildWorkspaceFileRecord(filePath, text, {
+        recordMode: "initial",
+      });
+      return {
+        path: record.path,
+        symbols: (record.symbols || []) as MeshSymbol[],
+        callSites: (record.callSites || []).map((cs: any) => ({
+          callee: cs.callee || cs.name || "unknown",
+          lineStart: cs.line || cs.lineStart || 1,
+          lineEnd: cs.lineEnd || cs.line || cs.lineStart || 1
+        })) as MeshCallSite[],
+        dependencies: (record.dependencies || []) as string[],
+        fileType: record.fileType,
+        parseOk: record.parseOk
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async extractSymbols(filePath: string, text: string): Promise<MeshSymbol[]> {
+    const record = await this.getDetailedRecord(filePath, text);
+    return record?.symbols || [];
+  }
+
+  /**
+   * Mesh-Alien-OS Decoder: Expands high-density opcodes into valid source code.
+   */
+  expandAlienCode(alienCode: string, dictionary: Record<string, string> = {}): string {
+    const opcodes: Record<string, string> = {
+      "r:": "return ",
+      "a:": "await ",
+      "c:": "const ",
+      "l:": "let ",
+      "s:": "async ",
+      "f:": "function ",
+      "e:": "export ",
+      "i:": "if ",
+      "p:": "Promise",
+      "cn:": "console.log",
+      "th:": "throw new Error",
+      "=>": " => "
+    };
+
+    let expanded = alienCode;
+    
+    // 1. Expand Dictionary IDs (#1, #2...)
+    for (const [id, full] of Object.entries(dictionary)) {
+      const regex = new RegExp(`#${id}\\b`, "g");
+      expanded = expanded.replace(regex, full);
+    }
+
+    // 2. Expand Opcodes
+    for (const [op, full] of Object.entries(opcodes)) {
+      const regex = new RegExp(op.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
+      expanded = expanded.replace(regex, full);
+    }
+    
+    return expanded;
   }
 
   summarizeFile(filePath: string, text: string): Promise<MeshFileSummary> {

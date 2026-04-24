@@ -168,7 +168,16 @@ export class BedrockLlmClient {
         try {
           const event = JSON.parse(line);
           if (event.contentBlockDelta?.delta?.text) {
-            yield { kind: "text", text: event.contentBlockDelta.delta.text };
+            const delta = event.contentBlockDelta.delta.text;
+            
+            // JIT Reversion: Prevent the LLM from streaming known broken patterns
+            // (e.g., calling a variable that doesn't exist, or obvious syntax typos)
+            if (delta.includes("undefined.") || delta.includes("null.")) {
+               yield { kind: "stop", text: "\n[JIT REVERSION] Aborted: Potential null pointer access detected in stream." };
+               return; 
+            }
+
+            yield { kind: "text", text: delta };
           }
           if (event.contentBlockStart?.start?.toolUse) {
             yield { kind: "tool_use", toolUse: event.contentBlockStart.start.toolUse };
@@ -208,7 +217,14 @@ export class BedrockLlmClient {
   ): Record<string, unknown> {
     const body: Record<string, unknown> = {
       messages,
-      system: [{ text: systemPrompt }],
+      system: [
+        { 
+          text: systemPrompt,
+          // Anthropic/Bedrock cache control marker
+          // Supported by modern providers to cache the system prompt + tools
+          ...( (systemPrompt.length > 1000) ? { cache_control: { type: "ephemeral" } } : {} )
+        }
+      ],
       inferenceConfig: {
         temperature: this.options.temperature,
         maxTokens: this.options.maxTokens
@@ -216,7 +232,7 @@ export class BedrockLlmClient {
     };
 
     if (tools.length > 0) {
-      body.toolConfig = {
+      const toolConfig = {
         tools: tools.map((tool) => ({
           toolSpec: {
             name: tool.name,
@@ -227,6 +243,13 @@ export class BedrockLlmClient {
           }
         }))
       };
+      
+      // Inject cache marker on the last tool to ensure the entire tool block is cached
+      if (toolConfig.tools.length > 0) {
+        const lastTool = toolConfig.tools[toolConfig.tools.length - 1];
+        (lastTool.toolSpec as any).cache_control = { type: "ephemeral" };
+      }
+      body.toolConfig = toolConfig;
     }
 
     return body;

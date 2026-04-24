@@ -1,5 +1,8 @@
 import zlib from "node:zlib";
 import { promisify } from "node:util";
+import crypto from "node:crypto";
+
+const SEEN_FILES_HASHES = new Set<string>();
 
 const brotliCompress = promisify(zlib.brotliCompress);
 const brotliDecompress = promisify(zlib.brotliDecompress);
@@ -62,7 +65,19 @@ export async function buildLlmSafeMeshContext(
   toolResult: unknown,
   maxInlineChars = 4000
 ): Promise<string> {
-  const serialized = JSON.stringify(toolResult);
+  let serialized = JSON.stringify(toolResult);
+
+  // Differential Sync Logic
+  if (toolName === "workspace.read_file" && serialized.length > 500) {
+    const path = String(toolArgs.path ?? "unknown");
+    const fingerprint = crypto.createHash("md5").update(path + ":" + serialized).digest("hex");
+    if (SEEN_FILES_HASHES.has(fingerprint)) {
+      serialized = `{"note": "[DIFFERENTIAL SYNC] File ${path} content is already in context. Omitted."}`;
+    } else {
+      SEEN_FILES_HASHES.add(fingerprint);
+    }
+  }
+
   const compressed = await compressMeshPayload(serialized);
   const normalized = await decompressMeshPayload(compressed.buffer);
 

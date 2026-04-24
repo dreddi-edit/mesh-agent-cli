@@ -7,3 +7,6 @@ supabase/
 .mesh/
 benchmarks/
 mesh-core/lib
+
+.gemini/
+gha-creds-*.json
