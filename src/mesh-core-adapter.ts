@@ -15,6 +15,7 @@ interface MeshCoreModule {
     view?: string,
     options?: Record<string, unknown>
   ) => Promise<Record<string, unknown>>;
+  getTreeSitterWorkerPool?: () => Array<{ terminate?: () => Promise<number> | void }>;
 }
 
 export interface MeshFileSummary {
@@ -51,6 +52,7 @@ export interface MeshFileRecord {
 export class MeshCoreAdapter {
   private readonly module: MeshCoreModule | null;
   private readonly loadError: string | null;
+  private usedParserWorkerPool = false;
 
   constructor() {
     const require = createRequire(import.meta.url);
@@ -95,6 +97,7 @@ export class MeshCoreAdapter {
       return null;
     }
     try {
+      this.usedParserWorkerPool = true;
       const record = await this.module.buildWorkspaceFileRecord(filePath, text, {
         recordMode: "initial",
       });
@@ -169,6 +172,7 @@ export class MeshCoreAdapter {
     }
 
     try {
+      this.usedParserWorkerPool = true;
       const record = await this.module.buildWorkspaceFileRecord(filePath, content, {
         recordMode: "initial",
         defaultCapsuleTier: "medium"
@@ -220,6 +224,7 @@ export class MeshCoreAdapter {
         typeof this.module.buildWorkspaceFileRecord === "function" &&
         typeof this.module.buildWorkspaceFileView === "function"
       ) {
+        this.usedParserWorkerPool = true;
         const record = await this.module.buildWorkspaceFileRecord(filePath, content, {
           recordMode: "initial",
           defaultCapsuleTier: "medium"
@@ -243,6 +248,18 @@ export class MeshCoreAdapter {
         fileType: null,
         warning: `mesh-core summarize failed: ${(error as Error).message}`
       };
+    }
+  }
+
+  async close(): Promise<void> {
+    if (!this.usedParserWorkerPool || typeof this.module?.getTreeSitterWorkerPool !== "function") {
+      return;
+    }
+    try {
+      const workers = this.module.getTreeSitterWorkerPool();
+      await Promise.all(workers.map((worker) => worker.terminate?.()));
+    } catch {
+      // MeshCore worker shutdown is best-effort; process exit must not depend on it.
     }
   }
 }

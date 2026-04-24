@@ -28,6 +28,7 @@ import {
 } from "./llm-client.js";
 import { buildLlmSafeMeshContext } from "./mesh-gateway.js";
 import { PersistedSessionCapsule, SessionCapsuleStore } from "./session-capsule-store.js";
+import { MeshPortal } from "./mesh-portal.js";
 import { ToolBackend, ToolDefinition } from "./tool-backend.js";
 import { VoiceManager } from "./voice-manager.js";
 
@@ -35,17 +36,18 @@ const SYSTEM_PROMPT = [
   "You are Mesh, a high-performance terminal AI coding agent designed by edgarelmo.",
   "Your purpose is to assist developers with complex engineering tasks directly within their workspace.",
   "Core Principles:",
-  "1. Efficiency: Follow the CAPSULE-FIRST hierarchy: Always prefer 'workspace.read_file' (Capsules), 'workspace.read_dir_overview', and 'workspace.ask_codebase' (Neural Semantic RAG) for initial understanding.",
-  "2. Neural Semantic RAG: 'workspace.ask_codebase' now uses local on-device embeddings to understand intent. Use it for conceptual questions like 'Where is the data flow for X?'.",
+  "1. Efficiency: Follow the CAPSULE-FIRST hierarchy: Prefer 'workspace.ask_codebase' with the right mode, then 'workspace.read_file', 'workspace.read_dir_overview', and exact raw reads only when needed.",
+  "2. Local Code Intelligence: 'workspace.ask_codebase' uses the persistent local index and returns citations. Use modes: architecture, bug, edit-impact, test-impact, ownership, recent-change, runtime-path.",
+  "2a. Symbol and Impact Tools: Use 'workspace.explain_symbol' for definitions/callers and 'workspace.impact_map' before risky edits.",
   "3. Void-Protocol (MAX COMPRESSION): Use 'workspace.generate_lexicon' to get a dictionary of project terms. Then use #ID in 'workspace.alien_patch' (e.g. !1 > { #A = a: #B() }) for near-zero token edits.",
-  "3. Ghost Branch Lifecycle (GBL): When proposing a critical fix, use 'workspace.ghost_verify' to test your patch in a parallel timeline. This ensures 100% stability before merging.",
+  "3. Ghost Timeline Lifecycle: When proposing a critical fix, create or use an isolated timeline with 'workspace.timeline_create', apply a patch, run verification, compare, then promote only if verified.",
   "4. Predictive Pathing: You will sometimes see [PREDICTIVE CONTEXT] in your prompt. This is Mesh pre-loading likely relevant dependencies based on your last actions.",
   "5. Time-Travel AST Diffing: Use 'workspace.get_recent_changes' to see background modifications without re-reading files.",
   "6. Symbolic Trace Routing: Use 'workspace.trace_symbol' to trace data flow deterministically.",
-  "7. Delegation (MoE): For broad research tasks across many files, ALWAYS use 'agent.invoke_sub_agent'.",
+  "7. Multi-Agent OS: For broad work, create role-scoped workers with 'agent.spawn' using .mesh/agents definitions, review timelines with 'agent.review', and merge with 'agent.merge_verified'.",
   "8. Micro-Edits: For simple renames, use 'workspace.rename_symbol'.",
   "9. Parallelism: ALWAYS batch your tool calls.",
-  "10. Visual & Structural Search: Use 'web.inspect_ui' if you need to visually debug.",
+  "10. Runtime Cognition: Use 'runtime.start', 'runtime.capture_failure', and 'runtime.explain_failure' for live command/test debugging. Use 'frontend.preview' for real terminal screenshots via Chrome CDP; use 'web.inspect_ui' only when Playwright-style inspection is needed.",
   "11. Plan-First & Finalization: Use 'agent.plan'.",
   "12. Action-Oriented: Focus on solving the user's problem. Give concise, direct final answers.",
   "13. Adaptability: Match the language of the user (German or English).",
@@ -129,6 +131,7 @@ interface RunHooks {
   askPermission?: (msg: string) => Promise<boolean>;
   onDelta?: (delta: string) => void;
   onCommandChunk?: (chunk: string) => void;
+  silent?: boolean;
 }
 
 interface SessionCapsule extends PersistedSessionCapsule {}
@@ -342,6 +345,9 @@ export class AgentLoop {
   private prefetchQueue: string[] = [];
   private dashboardSocket: any = null;
   private entangledWorkspaces: string[] = [];
+  private gitStatusContext = "";
+  private consecutiveErrors = new Map<string, number>();
+  private portal: MeshPortal;
 
   constructor(
     private readonly config: AppConfig,
@@ -349,6 +355,7 @@ export class AgentLoop {
   ) {
     this.sessionStore = new SessionCapsuleStore(config.agent.workspaceRoot);
     this.dynamicMaxSteps = config.agent.maxSteps;
+    this.portal = new MeshPortal(config.agent.workspaceRoot);
     this.currentModelId = config.bedrock.modelId;
     this.llm = new BedrockLlmClient({
       endpointBase: config.bedrock.endpointBase,
@@ -510,7 +517,165 @@ export class AgentLoop {
     return 'Say "voice off" or "Voice aus" to leave voice mode.';
   }
 
-  async runCli(initialPrompt?: string): Promise<void> {
+  private async refreshGitStatus(): Promise<void> {
+    try {
+      const res = await this.backend.callTool("workspace.git_status", {}) as any;
+      if (res.ok) {
+        this.gitStatusContext = `${res.branch}\nFiles:\n${res.status || "Clean (no uncommitted changes)"}`;
+      }
+    } catch {
+      this.gitStatusContext = "";
+    }
+  }
+
+  private async handleInspect(url: string): Promise<void> {
+    const port = new URL(url).port || "3000";
+    
+    // 1. Check if server is already running
+    const isRunning = await new Promise(resolve => {
+      const socket = new http.ClientRequest({ port: Number(port), method: 'HEAD', timeout: 500 });
+      socket.on('response', () => resolve(true));
+      socket.on('error', () => resolve(false));
+      socket.end();
+    });
+
+    if (!isRunning) {
+      output.write(pc.yellow(`\n[Mesh Portal] No server detected on port ${port}. Attempting to start dev server...\n`));
+      try {
+        const pkgPath = path.join(this.config.agent.workspaceRoot, "package.json");
+        const pkg = JSON.parse(await fs.readFile(pkgPath, "utf8"));
+        const devScript = pkg.scripts?.dev || pkg.scripts?.start;
+        
+        if (devScript) {
+          const { spawn } = await import("node:child_process");
+          const serverProc = spawn("npm", ["run", pkg.scripts?.dev ? "dev" : "start"], {
+            cwd: this.config.agent.workspaceRoot,
+            stdio: "ignore",
+            detached: true
+          });
+          serverProc.unref();
+          output.write(pc.green(`[Mesh Portal] Dev server launched in background. Waiting for port ${port}...\n`));
+          
+          // Wait for port to open
+          for (let i = 0; i < 20; i++) {
+            await new Promise(r => setTimeout(r, 1000));
+            if (await new Promise(res => {
+              const s = new http.ClientRequest({ port: Number(port), method: 'HEAD', timeout: 200 });
+              s.on('response', () => res(true));
+              s.on('error', () => res(false));
+              s.end();
+            })) break;
+          }
+        } else {
+          throw new Error("No 'dev' or 'start' script found in package.json");
+        }
+      } catch (e) {
+        output.write(pc.red(`[Mesh Portal] Could not start server: ${(e as Error).message}\n`));
+      }
+    }
+
+    const spinner = ora({ text: `Connecting to Neuro-Kinetic Portal at ${url}...`, color: "cyan" }).start();
+    try {
+      await this.portal.start(url, async (event) => {
+        if (event.name === "meshEmit") {
+          await this.handlePortalMutation(event.payload);
+        }
+      });
+
+      // Inject the overlay script
+      const scriptPath = path.join(path.dirname(new URL(import.meta.url).pathname), "mesh-canvas-overlay.js");
+      const scriptContent = await fs.readFile(scriptPath, "utf8");
+      await this.portal.evaluate(scriptContent);
+
+      spinner.succeed(pc.green(`Visual Portal active on ${url}. Use Alt+Click to edit UI.`));
+    } catch (e) {
+      spinner.fail(pc.red(`Portal connection failed: ${(e as Error).message}`));
+    }
+  }
+
+  private async handlePortalMutation(payloadStr: string): Promise<void> {
+    let payload: any;
+    try {
+      payload = JSON.parse(payloadStr);
+    } catch { return; }
+
+    const { type, file, line, prompt, context } = payload;
+    if (!file || file === "unknown") return;
+
+    const relPath = path.relative(this.config.agent.workspaceRoot, file);
+    
+    if (type === "PROMPT") {
+      process.stdout.write(pc.cyan(`\n[Visual AI] Designing for ${pc.bold(relPath)}:${line}...\n`));
+      process.stdout.write(pc.dim(`  " ${prompt} "\n`));
+
+      // Detect Styling Paradigm
+      const hasTailwind = await fs.access(path.join(this.config.agent.workspaceRoot, "tailwind.config.js")).then(() => true).catch(() => 
+                          fs.access(path.join(this.config.agent.workspaceRoot, "tailwind.config.ts")).then(() => true).catch(() => false));
+
+      const mutationPrompt = `The user clicked an element in the browser and provided a visual instruction.
+    File: ${relPath}
+    Line: ${line}
+    Element: <${context.tag} class="${context.classes}">
+    HTML Context: ${context.html}
+    Parent HTML: ${context.parentHtml}
+
+    User Instruction: "${prompt}"
+    Styling Paradigm: ${hasTailwind ? "TAILWIND CSS (Use utility classes, avoid inline styles)" : "STANDARD CSS/INLINE"}
+
+    Your mission is a two-step process:
+    1. IMMEDIATELY output a JSON block labeled 'PREVIEW_STYLE' with CSS properties for instant preview.
+    2. Then, proceed to apply the PERMANENT code patch to the file using your tools.
+
+    Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. Finalize once done.`;
+      // Intercept the LLM delta stream to catch the PREVIEW_STYLE block
+      let previewSent = false;
+      const interceptHooks: RunHooks = {
+        onDelta: async (delta) => {
+          if (!previewSent && delta.includes("PREVIEW_STYLE")) {
+            try {
+              const match = delta.match(/PREVIEW_STYLE\s*(\{.*?\})/);
+              if (match) {
+                const styles = JSON.parse(match[1]);
+                await this.portal.applyGhostStyles(styles);
+                previewSent = true;
+                process.stdout.write(pc.green("\n[Ghost Sync] Live preview applied. Capturing for Vision check...\n"));
+                
+                // Vision Verification Step
+                await new Promise(r => setTimeout(r, 300)); // Wait for render
+                const base64 = await this.portal.captureElementScreenshot();
+                if (base64) {
+                  this.transcript.push({
+                    role: "user",
+                    content: [
+                      { text: "Here is a live screenshot of the element after your PREVIEW_STYLE was applied. Visual check: Does this match the user intent? If yes, finalize the code patch. If not, output a corrected PREVIEW_STYLE or adjust your patch." },
+                      { image: { format: "png", source: { bytes: base64 } } }
+                    ]
+                  });
+                  process.stdout.write(pc.cyan("[Vision] Screenshot sent to Agent for verification.\n"));
+                }
+              }
+            } catch (e) {
+              // Silently fail if JSON is incomplete yet
+            }
+          }
+          process.stdout.write(delta);
+        }
+      };
+
+      try {
+        await this.runSingleTurn(mutationPrompt, interceptHooks);
+      } catch (e) {
+        process.stdout.write(pc.red(`\n[Visual AI] Error: ${(e as Error).message}\n`));
+      }
+    }
+ else {
+      // Legacy CSS Mutation logic
+      // ...
+    }
+  }
+
+  public async runCli(initialPrompt?: string): Promise<void> {
+
     await this.checkInit();
     this.sessionCapsule = await this.sessionStore.load();
     
@@ -651,6 +816,8 @@ export class AgentLoop {
         }
       }
 
+      await this.refreshGitStatus();
+
       try {
         const spinner = this.useAnsi ? ora({ text: "Thinking...", color: "cyan", stream: output }).start() : undefined;
         let answer: string | undefined;
@@ -754,8 +921,9 @@ export class AgentLoop {
   }
 
   private async runSingleTurn(userInput: string, hooks?: RunHooks): Promise<string> {
+    const silent = hooks?.silent;
     const autoCompactMessage = await this.autoCompactIfNeeded();
-    if (autoCompactMessage) {
+    if (autoCompactMessage && !silent) {
       this.renderSystemMessage(autoCompactMessage);
     }
 
@@ -769,6 +937,8 @@ export class AgentLoop {
 
     let lastAssistantText = "";
     this.abortController = new AbortController();
+
+    const spinner = (this.useAnsi && !silent) ? ora({ text: "Thinking...", color: "cyan", stream: output }).start() : undefined;
 
     try {
       for (let step = 0; step < this.dynamicMaxSteps; step += 1) {
@@ -789,7 +959,7 @@ export class AgentLoop {
             for await (const chunk of stream) {
               if (chunk.kind === "text" && chunk.text) {
                 accumulatedText += chunk.text;
-                hooks.onDelta(chunk.text);
+                if (!silent) hooks.onDelta(chunk.text);
               } else if (chunk.kind === "tool_use") {
                 streamedToolUses.push(chunk.toolUse);
               } else if (chunk.kind === "stop") {
@@ -876,7 +1046,10 @@ export class AgentLoop {
         for (const tu of response.toolUses) {
           const sel = wireToolMap.get(tu.name);
           if (!sel) { approved.set(tu.toolUseId, false); continue; }
-          if (sel.tool.requiresApproval && !this.autoApproveTools) {
+          
+          if (silent) {
+            approved.set(tu.toolUseId, true);
+          } else if (sel.tool.requiresApproval && !this.autoApproveTools) {
             const preview = this.buildApprovalPreview(sel.tool.name, tu.input);
             const denied = !hooks?.askPermission || !(await hooks.askPermission(preview));
             approved.set(tu.toolUseId, !denied);
@@ -888,6 +1061,8 @@ export class AgentLoop {
         // Parallel execution of all tool calls in this step.
         const toolResults = await Promise.all(response.toolUses.map(async (tu) => {
           const sel = wireToolMap.get(tu.name);
+          const toolSignature = `${tu.name}:${JSON.stringify(tu.input)}`;
+
           if (!sel) {
             return { toolUseId: tu.toolUseId, status: "error" as const, text: `Tool '${tu.name}' is not available.` };
           }
@@ -895,16 +1070,23 @@ export class AgentLoop {
             return {
               toolUseId: tu.toolUseId,
               status: "error" as const,
-              text: hooks?.askPermission ? "User denied permission to run this tool." : "Tool requires interactive approval but no TTY is available."
+              text: "Tool requires interactive approval but no TTY is available."
             };
           }
           
           this.emitPulse("tool_start", tu.input.path as string, tu.name);
-          hooks?.onToolStart?.(tu.name, tu.input, step, this.dynamicMaxSteps);
+          if (!silent) {
+            if (spinner) {
+              const stepLabel = `[${step + 1}/${this.dynamicMaxSteps}]`;
+              spinner.text = `${pc.dim(stepLabel)} ${pc.cyan(tu.name)} ${pc.dim(formatArgsPreview(tu.input))}`;
+            }
+            hooks?.onToolStart?.(tu.name, tu.input, step, this.dynamicMaxSteps);
+          }
+
           try {
-            const raw = await this.backend.callTool(sel.tool.name, tu.input, { onProgress: hooks?.onCommandChunk });
+            const raw = await this.backend.callTool(sel.tool.name, tu.input, { onProgress: silent ? undefined : hooks?.onCommandChunk });
             
-            // Neural Path Prefetching: If we just read a file, pre-load its dependencies
+            // Neural Path Prefetching
             if (sel.tool.name === "workspace.read_file" || sel.tool.name === "workspace.expand_execution_path") {
               const filePath = String(tu.input.path ?? "");
               if (filePath) {
@@ -921,11 +1103,22 @@ export class AgentLoop {
             }
 
             const resultText = await buildLlmSafeMeshContext(sel.tool.name, tu.input, raw);
-            hooks?.onToolEnd?.(tu.name, true, this.normalizeCapsuleLine(resultText, 120));
+            if (!silent) hooks?.onToolEnd?.(tu.name, true, this.normalizeCapsuleLine(resultText, 120));
+            // Success: clear errors for this signature
+            this.consecutiveErrors.delete(toolSignature);
             return { toolUseId: tu.toolUseId, status: "success" as const, text: resultText };
           } catch (error) {
-            const resultText = `Tool execution failed: ${(error as Error).message}`;
-            hooks?.onToolEnd?.(tu.name, false, this.normalizeCapsuleLine(resultText, 120));
+            const errorMsg = (error as Error).message;
+            const errorKey = `${toolSignature} -> ${errorMsg}`;
+            const errorCount = (this.consecutiveErrors.get(errorKey) || 0) + 1;
+            this.consecutiveErrors.set(errorKey, errorCount);
+
+            let resultText = `Tool execution failed: ${errorMsg}`;
+            if (errorCount >= 2) {
+              resultText += "\n\n[MESH SYSTEM WARNING] This exact error has occurred multiple times. DO NOT retry the same action. Either try a different approach or stop and ask the user for clarification.";
+            }
+            
+            if (!silent) hooks?.onToolEnd?.(tu.name, false, this.normalizeCapsuleLine(resultText, 120));
             return { toolUseId: tu.toolUseId, status: "error" as const, text: resultText };
           }
         }));
@@ -1533,6 +1726,56 @@ Your task:
     output.write(pc.cyan("\n[Neuro-Kinetic UI] Please open the /dashboard. Mouse movements on the canvas will now be translated to AST edits via the LLM.\n(Note: This requires an active dashboard session).\n"));
   }
 
+  private async runFrontendPreview(args: string[]): Promise<void> {
+    const url = args[0]?.trim();
+    if (!url) {
+      output.write(pc.yellow("Usage: /preview <url> [widthxheight] [protocol=auto|kitty|iterm2|sixel|none]\n"));
+      return;
+    }
+
+    const dims = args.find((arg) => /^\d+x\d+$/i.test(arg));
+    const [widthRaw, heightRaw] = dims ? dims.toLowerCase().split("x") : ["1280", "800"];
+    const protocolArg = args.find((arg) => arg.startsWith("protocol="));
+    const protocol = protocolArg?.split("=")[1] || "auto";
+
+    const spinner = this.useAnsi ? ora({ text: "Capturing frontend preview via Chrome CDP...", color: "cyan", stream: output }).start() : undefined;
+    try {
+      const result: any = await this.backend.callTool(
+        "frontend.preview",
+        {
+          url,
+          width: Number(widthRaw),
+          height: Number(heightRaw),
+          protocol,
+          render: true
+        },
+        {
+          onProgress: (chunk) => {
+            if (spinner) {
+              spinner.stop();
+              spinner.clear();
+            }
+            output.write(chunk);
+          }
+        }
+      );
+      if (spinner) spinner.succeed("Frontend preview captured.");
+      output.write(
+        [
+          "",
+          `${pc.dim("url:")}        ${result.url}`,
+          `${pc.dim("viewport:")}   ${result.width}x${result.height}`,
+          `${pc.dim("screenshot:")} ${result.screenshotPath}`,
+          `${pc.dim("protocol:")}   ${result.protocol}${result.rendered ? "" : " (not rendered inline)"}`,
+          ""
+        ].join("\n")
+      );
+    } catch (error) {
+      if (spinner) spinner.fail("Frontend preview failed.");
+      output.write(pc.red(`\nPreview failed: ${(error as Error).message}\n`));
+    }
+  }
+
   private async runFix(): Promise<void> {
     const backend: any = this.backend;
     if (backend.speculativeFixes && backend.speculativeFixes.size > 0) {
@@ -1929,14 +2172,19 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       { name: "/fix", usage: "/fix", description: "apply a background-resolved fix for a current linter/compiler error" },
       { name: "/hologram", usage: "/hologram start <cmd>", description: "run command with V8 telemetry injection for live memory debugging" },
       { name: "/entangle", usage: "/entangle <path>", description: "quantum-link a second repository to sync AST mutations in real-time" },
-      { name: "/inspect", usage: "/inspect", description: "enable neuro-kinetic UI mutations in the dashboard" },
+      { name: "/inspect", usage: "/inspect [url]", description: "attach visual agent portal for real-time canvas editing" },
+      { name: "/stop-inspect", usage: "/stop-inspect", description: "detach visual agent portal" },
+      { name: "/preview", usage: "/preview <url> [widthxheight] [protocol=auto|kitty|iterm2|sixel|none]", description: "show real frontend screenshot in terminal via Chrome CDP" },
+
       { name: "/dashboard", usage: "/dashboard", description: "launch local interactive 3D codebase visualizer" },
       { name: "/sync", usage: "/sync", description: "check cloud (L2) cache synchronization" },
       { name: "/setup", usage: "/setup [noninteractive key=value ...]", description: "interactive or scripted settings" },
       { name: "/model", usage: "/model [pick|list|id|save]", description: "interactive chooser or switch model" },
       { name: "/cost", usage: "/cost", description: "show token usage and estimated cost" },
       { name: "/approvals", usage: "/approvals [status|on|off]", description: "control tool auto-approval mode" },
+      { name: "/undo", usage: "/undo", description: "revert the last file change made by the agent" },
       { name: "/steps", usage: "/steps [<n>|reset]", description: "set max tool steps for this session" },
+
       { name: "/doctor", usage: "/doctor [brief|full|voice [fix]]", description: "show runtime diagnostics" },
       { name: "/compact", usage: "/compact", description: "compress transcript into session capsule" },
       { name: "/clear", usage: "/clear", description: "clear terminal UI" },
@@ -1958,11 +2206,10 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     const inputCmd = rawCmd.toLowerCase();
 
     const commandList = [
-      "/help", "/status", "/index", "/dashboard", "/sync", "/setup", "/clear", 
-      "/model", "/cost", "/compact", "/capsule", "/memory", "/approvals", "/steps",
-      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/hologram", "/entangle", "/inspect", "/fix"
+      "/help", "/status", "/index", "/dashboard", "/sync", "/setup", "/clear",
+      "/model", "/cost", "/compact", "/capsule", "/memory", "/approvals", "/steps", "/undo",
+      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/hologram", "/entangle", "/inspect", "/preview", "/fix"
     ];
-
     // Priority 1: Exact match
     let command = inputCmd;
     if (commandList.includes(inputCmd)) {
@@ -1976,7 +2223,32 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     }
 
     switch (command) {
+      case "/undo": {
+        const spinner = ora({ text: "Undoing last change...", color: "yellow" }).start();
+        try {
+          const result = await this.backend.callTool("workspace.undo", {}) as any;
+          if (result.ok) {
+            spinner.succeed(pc.green(result.message));
+          } else {
+            spinner.fail(pc.red(result.error));
+          }
+        } catch (e) {
+          spinner.fail(pc.red(`Undo failed: ${(e as Error).message}`));
+        }
+        return { wasHandled: true, shouldExit: false };
+      }
+      case "/inspect": {
+        const url = args[0] || "http://localhost:3000";
+        await this.handleInspect(url);
+        return { wasHandled: true, shouldExit: false };
+      }
+      case "/stop-inspect": {
+        await this.portal.stop();
+        output.write(pc.green("\n[Mesh Portal] Browser detached and overlay removed.\n"));
+        return { wasHandled: true, shouldExit: false };
+      }
       case "/help":
+
       case "/commands":
         this.printHelp();
         return { wasHandled: true, shouldExit: false };
@@ -2003,6 +2275,9 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
         return { wasHandled: true, shouldExit: false };
       case "/inspect":
         await this.runInspect(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/preview":
+        await this.runFrontendPreview(args);
         return { wasHandled: true, shouldExit: false };
       case "/dashboard":
         await this.launchDashboard();
@@ -2638,7 +2913,11 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
 
   private buildRuntimeSystemPrompt(): string {
     const sections = [SYSTEM_PROMPT];
-    
+
+    if (this.gitStatusContext) {
+      sections.push(`\n[GIT REPOSITORY STATUS]\nCurrent branch: ${this.gitStatusContext}`);
+    }
+
     // Inject Prefetched Capsules (predicted next files)
     if (this.prefetchQueue.length > 0) {
       sections.push("\n[PREDICTIVE CONTEXT PREFETCH]\nThe following file capsules were pre-loaded because they are highly likely to be relevant to your current task:");

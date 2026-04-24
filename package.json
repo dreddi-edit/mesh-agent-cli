@@ -1,6 +1,6 @@
 {
   "name": "@edgarelmo/mesh-agent-cli",
-  "version": "0.2.86",
+  "version": "0.2.87",
   "private": false,
   "type": "module",
   "description": "Mesh terminal agent CLI. Zero-config: ships with a shared Mesh LLM proxy so no AWS credentials are needed.",
@@ -17,7 +17,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/minify.js",
     "dev": "tsx src/index.ts",
-    "test": "node --test",
+    "test": "node scripts/run-tests.cjs",
     "lint": "eslint src/**/*.ts",
     "prepublishOnly": "npm run build",
     "postinstall": "node scripts/postinstall.cjs"
@@ -31,15 +31,16 @@
     "access": "public"
   },
   "dependencies": {
-    "boxen": "^7.1.1",
     "@supabase/supabase-js": "^2.39.7",
+    "@xenova/transformers": "^2.17.2",
+    "boxen": "^7.1.1",
     "dotenv": "^16.4.5",
     "enquirer": "^2.4.1",
     "glob": "^11.0.0",
+    "ignore": "^7.0.5",
     "keytar": "^7.9.0",
     "marked": "^11.0.1",
     "marked-terminal": "^6.2.0",
-    "@xenova/transformers": "^2.17.2",
     "ora": "^7.0.1",
     "picocolors": "^1.0.0"
   },

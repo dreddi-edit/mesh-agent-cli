@@ -1,8 +1,9 @@
-import { promises as fs } from "node:fs";
+import { promises as fs, existsSync } from "node:fs";
 import path from "node:path";
 import { exec, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import os from "node:os";
+import ignore, { Ignore } from "ignore";
 
 // Lazy-loaded transformers for Local RAG
 let pipeline: any = null;
@@ -61,17 +62,13 @@ import { CacheManager } from "./cache-manager.js";
 import { ToolBackend, ToolCallOpts, ToolDefinition } from "./tool-backend.js";
 import { AppConfig } from "./config.js";
 import { BedrockLlmClient } from "./llm-client.js";
+import { WorkspaceIndex, CodeQueryMode } from "./workspace-index.js";
+import { TimelineManager } from "./timeline-manager.js";
+import { RuntimeObserver } from "./runtime-observer.js";
+import { AgentOs } from "./agent-os.js";
+import { captureFrontendPreview } from "./terminal-preview.js";
 
-const SKIP_DIRS = new Set([".git", "node_modules", "dist"]);
-
-async function pathExists(target: string): Promise<boolean> {
-  try {
-    await fs.access(target);
-    return true;
-  } catch {
-    return false;
-  }
-}
+const SKIP_DIRS = [".git", "node_modules", "dist", ".mesh"];
 
 function toPosixRelative(root: string, absolutePath: string): string {
   return path.relative(root, absolutePath).split(path.sep).join("/");
@@ -87,7 +84,32 @@ function ensureInsideRoot(root: string, requestedPath: string | undefined): stri
   return candidate;
 }
 
-async function collectFiles(start: string, limit: number): Promise<string[]> {
+async function pathExists(target: string): Promise<boolean> {
+  try {
+    await fs.access(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function loadIgnoreFilter(workspaceRoot: string): Promise<Ignore> {
+  const ig = ignore();
+  ig.add(SKIP_DIRS);
+  try {
+    const gitignorePath = path.join(workspaceRoot, ".gitignore");
+    if (existsSync(gitignorePath)) {
+      const content = await fs.readFile(gitignorePath, "utf8");
+      ig.add(content);
+    }
+  } catch {
+    // Ignore if not readable
+  }
+  return ig;
+}
+
+async function collectFiles(start: string, limit: number, workspaceRoot: string): Promise<string[]> {
+  const ig = await loadIgnoreFilter(workspaceRoot);
   const queue = [start];
   const files: string[] = [];
 
@@ -95,17 +117,23 @@ async function collectFiles(start: string, limit: number): Promise<string[]> {
     const current = queue.shift();
     if (!current) break;
 
-    const entries = await fs.readdir(current, { withFileTypes: true });
+    const entries = await fs.readdir(current, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
       if (files.length >= limit) break;
-      if (entry.name.startsWith(".")) continue;
+      
+      const absolutePath = path.join(current, entry.name);
+      const relativePath = path.relative(workspaceRoot, absolutePath).split(path.sep).join("/");
 
-      const nextPath = path.join(current, entry.name);
+      // Skip hidden files except .github
+      if (entry.name.startsWith(".") && entry.name !== ".github") continue;
+      
+      // Check ignore filter
+      if (ig.ignores(relativePath)) continue;
+
       if (entry.isDirectory()) {
-        if (SKIP_DIRS.has(entry.name)) continue;
-        queue.push(nextPath);
+        queue.push(absolutePath);
       } else if (entry.isFile()) {
-        files.push(nextPath);
+        files.push(absolutePath);
       }
     }
   }
@@ -122,7 +150,12 @@ export class LocalToolBackend implements ToolBackend {
   private sessionSymbolIndex: Map<number, { path: string; name: string }> = new Map();
   private projectLexicon: Record<string, string> = {};
   public entangledWorkspaces: string[] = [];
+  private changeStack: Array<{ path: string; content: string }> = [];
   private speculativeFixes: Map<string, string> = new Map();
+  private readonly workspaceIndex: WorkspaceIndex;
+  private readonly timelines: TimelineManager;
+  private readonly runtimeObserver: RuntimeObserver;
+  private readonly agentOs: AgentOs;
 
   constructor(private readonly workspaceRoot: string, private readonly config?: AppConfig) {
     this.cache = new CacheManager(config ?? { 
@@ -145,6 +178,12 @@ export class LocalToolBackend implements ToolBackend {
       mcp: { args: [] }, 
       supabase: {} 
     });
+    this.workspaceIndex = new WorkspaceIndex(workspaceRoot, this.meshCore);
+    this.timelines = new TimelineManager(workspaceRoot);
+    this.runtimeObserver = new RuntimeObserver(workspaceRoot);
+    this.agentOs = new AgentOs(workspaceRoot, this.timelines);
+    void this.agentOs.ensureDefaultDefinitions();
+    void this.runtimeObserver.writeDefaultRunbooks();
     this.startWatcher();
   }
 
@@ -352,6 +391,14 @@ export class LocalToolBackend implements ToolBackend {
       },
       { name: "workspace.get_index_status", description: "Get current indexing progress and cache coverage" },
       {
+        name: "workspace.index_status",
+        description: "Get persistent local code-intelligence index status, storage path, and stale-file count.",
+        inputSchema: {
+          type: "object",
+          properties: {}
+        }
+      },
+      {
         name: "workspace.read_multiple_files",
         description: "Read multiple files from the workspace in a single call.",
         inputSchema: {
@@ -545,12 +592,41 @@ export class LocalToolBackend implements ToolBackend {
       },
       {
         name: "workspace.ask_codebase",
-        description: "Perform a semantic/keyword search over all file capsules to answer architectural questions without reading raw files.",
+        description: "Query the persistent local code-intelligence index. Returns cited matches with file, symbol, line range, confidence, and match rationale.",
         inputSchema: {
           type: "object",
           required: ["query"],
           properties: {
-            query: { type: "string", description: "Natural language query about the codebase." }
+            query: { type: "string", description: "Natural language query about the codebase." },
+            mode: {
+              type: "string",
+              enum: ["architecture", "bug", "edit-impact", "test-impact", "ownership", "recent-change", "runtime-path"],
+              default: "architecture"
+            },
+            limit: { type: "number", default: 8 }
+          }
+        }
+      },
+      {
+        name: "workspace.explain_symbol",
+        description: "Explain an indexed symbol with definition location, callers, dependencies, exports, and linked tests.",
+        inputSchema: {
+          type: "object",
+          required: ["symbol"],
+          properties: {
+            symbol: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "workspace.impact_map",
+        description: "Map edit/test/runtime impact for a path, symbol, or unified diff using the persistent index graph.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            path: { type: "string" },
+            symbol: { type: "string" },
+            diff: { type: "string" }
           }
         }
       },
@@ -587,6 +663,74 @@ export class LocalToolBackend implements ToolBackend {
             patch: { type: "string", description: "The alien_patch or surgical patch to verify." },
             testCommand: { type: "string", description: "Command to run in ghost branch (e.g. 'npm test')." }
           }
+        }
+      },
+      {
+        name: "workspace.timeline_create",
+        description: "Create an isolated speculative timeline using a git worktree when possible, falling back to an isolated checkout copy.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            baseRef: { type: "string", default: "HEAD" }
+          }
+        }
+      },
+      {
+        name: "workspace.timeline_apply_patch",
+        description: "Apply a unified diff patch inside an isolated timeline without touching the main workspace.",
+        inputSchema: {
+          type: "object",
+          required: ["timelineId", "patch"],
+          properties: {
+            timelineId: { type: "string" },
+            patch: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "workspace.timeline_run",
+        description: "Run a verification command inside an isolated timeline and persist stdout/stderr artifacts.",
+        requiresApproval: true,
+        inputSchema: {
+          type: "object",
+          required: ["timelineId", "command"],
+          properties: {
+            timelineId: { type: "string" },
+            command: { type: "string" },
+            timeoutMs: { type: "number" }
+          }
+        }
+      },
+      {
+        name: "workspace.timeline_compare",
+        description: "Compare one or more timelines by diff stat, diff preview, last command, and verification verdict.",
+        inputSchema: {
+          type: "object",
+          required: ["timelineIds"],
+          properties: {
+            timelineIds: { type: "array", items: { type: "string" } }
+          }
+        }
+      },
+      {
+        name: "workspace.timeline_promote",
+        description: "Promote a passing timeline diff into the main workspace.",
+        requiresApproval: true,
+        inputSchema: {
+          type: "object",
+          required: ["timelineId"],
+          properties: {
+            timelineId: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "workspace.timeline_list",
+        description: "List recent speculative timelines for this workspace.",
+        inputSchema: {
+          type: "object",
+          properties: {}
         }
       },
       {
@@ -663,6 +807,24 @@ export class LocalToolBackend implements ToolBackend {
         }
       },
       {
+        name: "frontend.preview",
+        description: "Render a real frontend screenshot in the terminal using Chrome DevTools Protocol directly, then Kitty/iTerm2/Sixel terminal graphics when available. Does not use Playwright.",
+        requiresApproval: true,
+        inputSchema: {
+          type: "object",
+          required: ["url"],
+          properties: {
+            url: { type: "string" },
+            width: { type: "number", default: 1280 },
+            height: { type: "number", default: 800 },
+            waitMs: { type: "number", default: 1200 },
+            render: { type: "boolean", default: true },
+            protocol: { type: "string", enum: ["auto", "kitty", "iterm2", "sixel", "none"], default: "auto" },
+            outputPath: { type: "string" }
+          }
+        }
+      },
+      {
         name: "workspace.query_ast",
         description: "Tree-sitter Query Engine: Search the codebase for structural patterns using ast-grep (sg) syntax.",
         inputSchema: {
@@ -690,6 +852,64 @@ export class LocalToolBackend implements ToolBackend {
           required: ["command"],
           properties: {
             command: { type: "string", description: "Node command to run (e.g. 'node src/index.js' or 'npm run dev')." }
+          }
+        }
+      },
+      {
+        name: "runtime.start",
+        description: "Start a runtime observer for a command or .mesh/runbooks/<profile>.json profile. Captures stdout/stderr as replayable run artifacts.",
+        requiresApproval: true,
+        inputSchema: {
+          type: "object",
+          properties: {
+            command: { type: "string" },
+            profile: { type: "string" },
+            timeoutMs: { type: "number" }
+          }
+        }
+      },
+      {
+        name: "runtime.capture_failure",
+        description: "Capture failure details, stack frames, and log tails for a runtime observer run.",
+        inputSchema: {
+          type: "object",
+          required: ["runId"],
+          properties: {
+            runId: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "runtime.trace_request",
+        description: "Map a URL, test name, or stack frame to likely runtime-path index queries.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            url: { type: "string" },
+            testName: { type: "string" },
+            stackFrame: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "runtime.explain_failure",
+        description: "Explain a captured runtime/test failure and list likely source files.",
+        inputSchema: {
+          type: "object",
+          required: ["runId"],
+          properties: {
+            runId: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "runtime.fix_failure",
+        description: "Turn a captured failure into a timeline-first fix task with recommended verification tools.",
+        inputSchema: {
+          type: "object",
+          required: ["runId"],
+          properties: {
+            runId: { type: "string" }
           }
         }
       },
@@ -736,6 +956,53 @@ export class LocalToolBackend implements ToolBackend {
                 }
               }
             }
+          }
+        }
+      },
+      {
+        name: "agent.spawn",
+        description: "Create a role-scoped worker record and isolated timeline from .mesh/agents/<role>.md.",
+        inputSchema: {
+          type: "object",
+          required: ["role", "task"],
+          properties: {
+            role: { type: "string" },
+            task: { type: "string" },
+            workspaceScope: { type: "array", items: { type: "string" } },
+            writeScope: { type: "array", items: { type: "string" } }
+          }
+        }
+      },
+      {
+        name: "agent.status",
+        description: "List worker records or inspect one worker by id.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            id: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "agent.review",
+        description: "Review a timeline diff with deterministic safety and verification heuristics.",
+        inputSchema: {
+          type: "object",
+          required: ["timelineId"],
+          properties: {
+            timelineId: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "agent.merge_verified",
+        description: "Promote a timeline only after it has a passing verification verdict.",
+        requiresApproval: true,
+        inputSchema: {
+          type: "object",
+          required: ["timelineId"],
+          properties: {
+            timelineId: { type: "string" }
           }
         }
       },
@@ -809,6 +1076,8 @@ export class LocalToolBackend implements ToolBackend {
         return this.grepCapsules(args);
       case "workspace.get_index_status":
         return this.getIndexStatus();
+      case "workspace.index_status":
+        return this.getIndexStatus();
       case "workspace.read_multiple_files":
         return this.readMultipleFiles(args);
       case "workspace.read_file_lines":
@@ -842,14 +1111,21 @@ export class LocalToolBackend implements ToolBackend {
       case "workspace.find_references":
         return this.findReferences(args);
       case "workspace.ask_codebase":
-        return this.askCodebase(args);
+        return this.askCodebase(args, opts?.onProgress);
+      case "workspace.explain_symbol":
+        return this.explainSymbol(args);
+      case "workspace.impact_map":
+        return this.impactMap(args);
       case "workspace.expand_execution_path":
         return this.expandExecutionPath(args);
       case "workspace.rename_symbol":
         return this.renameSymbol(args);
       case "workspace.semantic_undo":
         return this.semanticUndo(args, opts?.onProgress);
+      case "workspace.undo":
+        return this.performUndo();
       case "workspace.alien_patch":
+
         return this.alienPatch(args);
       case "workspace.session_index_symbols":
         return this.sessionIndexSymbols(args);
@@ -857,16 +1133,49 @@ export class LocalToolBackend implements ToolBackend {
         return this.generateLexicon(args);
       case "workspace.ghost_verify":
         return this.ghostVerify(args, opts?.onProgress);
+      case "workspace.timeline_create":
+        return this.timelines.create(args);
+      case "workspace.timeline_apply_patch":
+        return this.timelines.applyPatch({
+          timelineId: String(args.timelineId ?? ""),
+          patch: String(args.patch ?? "")
+        });
+      case "workspace.timeline_run":
+        return this.timelines.run({
+          timelineId: String(args.timelineId ?? ""),
+          command: String(args.command ?? ""),
+          timeoutMs: typeof args.timeoutMs === "number" ? args.timeoutMs : undefined
+        });
+      case "workspace.timeline_compare":
+        return this.timelines.compare({
+          timelineIds: Array.isArray(args.timelineIds) ? args.timelineIds.map(String) : []
+        });
+      case "workspace.timeline_promote":
+        return this.timelines.promote({ timelineId: String(args.timelineId ?? "") });
+      case "workspace.timeline_list":
+        return this.timelines.list();
       case "workspace.finalize_task":
         return this.finalizeTask(args, opts?.onProgress);
       case "web.inspect_ui":
         return this.inspectUi(args, opts?.onProgress);
+      case "frontend.preview":
+        return this.previewFrontend(args, opts?.onProgress);
       case "workspace.query_ast":
         return this.queryAst(args);
       case "workspace.get_recent_changes":
         return { ok: true, changes: this.recentChanges.length > 0 ? this.recentChanges : "No recent changes detected in background." };
       case "workspace.run_with_telemetry":
         return this.runWithTelemetry(args, opts?.onProgress);
+      case "runtime.start":
+        return this.runtimeObserver.start(args);
+      case "runtime.capture_failure":
+        return this.runtimeObserver.captureFailure(args);
+      case "runtime.trace_request":
+        return this.runtimeObserver.traceRequest(args);
+      case "runtime.explain_failure":
+        return this.runtimeObserver.explainFailure(args);
+      case "runtime.fix_failure":
+        return this.runtimeObserver.fixFailure(args);
       case "workspace.validate_patch":
         return this.validatePatch(args);
       case "workspace.trace_symbol":
@@ -875,6 +1184,14 @@ export class LocalToolBackend implements ToolBackend {
         return this.invokeSubAgent(args, opts?.onProgress);
       case "agent.spawn_swarm":
         return this.spawnSwarm(args, opts?.onProgress);
+      case "agent.spawn":
+        return this.agentOs.spawn(args);
+      case "agent.status":
+        return this.agentOs.status(args);
+      case "agent.review":
+        return this.agentOs.review(args);
+      case "agent.merge_verified":
+        return this.agentOs.mergeVerified(args);
       case "workspace.git_diff":
         return this.getGitDiff(args);
       case "agent.plan":
@@ -891,6 +1208,10 @@ export class LocalToolBackend implements ToolBackend {
   }
 
   async close(): Promise<void> {
+    if (this.watcher && typeof this.watcher.close === "function") {
+      this.watcher.close();
+    }
+    await this.meshCore.close();
     return Promise.resolve();
   }
 
@@ -899,7 +1220,7 @@ export class LocalToolBackend implements ToolBackend {
     const limit = Math.max(1, Math.min(Number(args.limit) || 200, 2000));
     const base = ensureInsideRoot(this.workspaceRoot, requestedPath);
 
-    const files = await collectFiles(base, limit);
+    const files = await collectFiles(base, limit, this.workspaceRoot);
     return {
       ok: true,
       workspaceRoot: this.workspaceRoot,
@@ -993,7 +1314,7 @@ export class LocalToolBackend implements ToolBackend {
   private async grepCapsules(args: Record<string, unknown>): Promise<unknown> {
     const query = String(args.query ?? "").trim().toLowerCase();
     const limit = Math.max(1, Math.min(Number(args.limit) || 50, 200));
-    const files = await collectFiles(this.workspaceRoot, 10000);
+    const files = await collectFiles(this.workspaceRoot, 10000, this.workspaceRoot);
     const matches: Array<{ path: string; snippet: string }> = [];
 
     for (const file of files) {
@@ -1039,7 +1360,7 @@ export class LocalToolBackend implements ToolBackend {
     const limit = Math.max(1, Math.min(Number(args.limit) || 100, 1000));
     const base = ensureInsideRoot(this.workspaceRoot, requestedPath);
 
-    const files = await collectFiles(base, 4000);
+    const files = await collectFiles(base, 4000, this.workspaceRoot);
     const matches = files
       .map((item) => toPosixRelative(this.workspaceRoot, item))
       .filter((item) => item.toLowerCase().includes(query))
@@ -1141,6 +1462,7 @@ export class LocalToolBackend implements ToolBackend {
     if (!requestedPath || !search) throw new Error("patch_file requires path and search string");
 
     const absolutePath = ensureInsideRoot(this.workspaceRoot, requestedPath);
+    await this.saveBackup(requestedPath);
     const content = await fs.readFile(absolutePath, "utf8");
     if (!content.includes(search)) {
       throw new Error(`Search string not found in ${requestedPath}`);
@@ -1347,35 +1669,73 @@ export class LocalToolBackend implements ToolBackend {
     return { ok: true, lexicon: this.projectLexicon, note: "Use #ID in alien_patch to reference these terms." };
   }
 
+  private async saveBackup(requestedPath: string): Promise<void> {
+    try {
+      const absolutePath = ensureInsideRoot(this.workspaceRoot, requestedPath);
+      if (existsSync(absolutePath)) {
+        const content = await fs.readFile(absolutePath, "utf8");
+        this.changeStack.push({ path: requestedPath, content });
+        if (this.changeStack.length > 50) this.changeStack.shift();
+      }
+    } catch {
+      // Skip
+    }
+  }
+
+  private async performUndo(): Promise<unknown> {
+    const lastChange = this.changeStack.pop();
+    if (!lastChange) {
+      return { ok: false, error: "No changes to undo." };
+    }
+    const absolutePath = ensureInsideRoot(this.workspaceRoot, lastChange.path);
+    await fs.writeFile(absolutePath, lastChange.content, "utf8");
+    const rel = toPosixRelative(this.workspaceRoot, absolutePath);
+    await this.cache.deleteCapsule(rel, "low");
+    await this.cache.deleteCapsule(rel, "medium");
+    await this.cache.deleteCapsule(rel, "high");
+    return { ok: true, path: lastChange.path, message: `Restored ${lastChange.path} to previous state.` };
+  }
+
   private async ghostVerify(args: Record<string, unknown>, onProgress?: (chunk: string) => void): Promise<unknown> {
     const patch = String(args.patch ?? "");
     const testCommand = String(args.testCommand ?? "");
-    
-    // Create a ghost worktree (timeline)
-    const ghostDir = path.join(os.tmpdir(), `mesh-ghost-${Date.now()}`);
-    onProgress?.(`[GBL] Spawning ghost timeline at ${ghostDir}...\n`);
+    if (!patch.trim() || !testCommand.trim()) {
+      throw new Error("workspace.ghost_verify requires patch and testCommand");
+    }
 
     try {
-      // Fast clone using rsync (excluding heavy stuff)
-      await execAsync(`rsync -a --exclude node_modules --exclude .git --exclude dist ${this.workspaceRoot}/ ${ghostDir}/`);
-      
-      // Apply the patch in the ghost world
-      onProgress?.(`[GBL] Applying proposed patch to ghost timeline...\n`);
-      const backend = new LocalToolBackend(ghostDir, this.config);
-      // We must copy the session state to the ghost backend
-      (backend as any).sessionSymbolIndex = new Map(this.sessionSymbolIndex);
-      (backend as any).projectLexicon = { ...this.projectLexicon };
-      
-      await backend.alienPatch({ patch });
-      
-      // Run the verification command
+      const created = await this.timelines.create({ name: "ghost-verify" });
+      const ghostDir = created.timeline.root;
+      onProgress?.(`[GBL] Spawned replayable timeline ${created.timeline.id} at ${ghostDir}\n`);
+
+      if (/^(diff --git|---\s|\+\+\+\s)/m.test(patch.trim())) {
+        const applied = await this.timelines.applyPatch({ timelineId: created.timeline.id, patch });
+        if (!applied.ok) return applied;
+      } else {
+        onProgress?.(`[GBL] Applying symbolic patch to ghost timeline...\n`);
+        const ghostConfig = this.config
+          ? { ...this.config, agent: { ...this.config.agent, workspaceRoot: ghostDir } }
+          : undefined;
+        const backend = new LocalToolBackend(ghostDir, ghostConfig);
+        (backend as any).sessionSymbolIndex = new Map(this.sessionSymbolIndex);
+        (backend as any).projectLexicon = { ...this.projectLexicon };
+        await backend.alienPatch({ patch });
+      }
+
       onProgress?.(`[GBL] Running verification: ${testCommand}\n`);
-      const { stdout, stderr } = await execAsync(testCommand, { cwd: ghostDir });
-      
-      await execAsync(`rm -rf ${ghostDir}`);
-      return { ok: true, message: "Verification PASSED in ghost timeline.", output: stdout || stderr };
+      const result = await this.timelines.run({
+        timelineId: created.timeline.id,
+        command: testCommand,
+        timeoutMs: 120_000
+      });
+
+      return {
+        ok: result.ok,
+        timelineId: created.timeline.id,
+        message: result.ok ? "Verification PASSED in ghost timeline." : "Verification FAILED in ghost timeline. Patch rejected.",
+        output: result.stdout || result.stderr
+      };
     } catch (err: any) {
-      await execAsync(`rm -rf ${ghostDir}`).catch(() => {});
       return { 
         ok: false, 
         message: "Verification FAILED in ghost timeline. Patch rejected.", 
@@ -1510,6 +1870,7 @@ export class LocalToolBackend implements ToolBackend {
     if (!requestedPath || !oldName || !newName) throw new Error("rename_symbol requires path, oldName, and newName");
 
     const absolutePath = ensureInsideRoot(this.workspaceRoot, requestedPath);
+    await this.saveBackup(requestedPath);
     const content = await fs.readFile(absolutePath, "utf8");
     const originalContent = content;
     
@@ -1606,6 +1967,21 @@ export class LocalToolBackend implements ToolBackend {
         details: (err as Error).message 
       };
     }
+  }
+
+  private async previewFrontend(args: Record<string, unknown>, onProgress?: (chunk: string) => void): Promise<unknown> {
+    const url = String(args.url ?? "").trim();
+    if (!url) throw new Error("frontend.preview requires url");
+    return captureFrontendPreview({
+      url,
+      width: typeof args.width === "number" ? args.width : Number(args.width || 1280),
+      height: typeof args.height === "number" ? args.height : Number(args.height || 800),
+      waitMs: typeof args.waitMs === "number" ? args.waitMs : Number(args.waitMs || 1200),
+      render: args.render !== false,
+      protocol: typeof args.protocol === "string" ? args.protocol as any : "auto",
+      outputPath: typeof args.outputPath === "string" ? args.outputPath : undefined,
+      onProgress
+    });
   }
 
   private async queryAst(args: Record<string, unknown>): Promise<unknown> {
@@ -1897,50 +2273,35 @@ session.on('Debugger.paused', async (message) => {
   private async askCodebase(args: Record<string, unknown>, onProgress?: (msg: string) => void): Promise<unknown> {
     const query = String(args.query ?? "").trim();
     if (!query) throw new Error("ask_codebase requires a query");
+    const rawMode = String(args.mode ?? "architecture").trim() as CodeQueryMode;
+    const mode: CodeQueryMode = [
+      "architecture",
+      "bug",
+      "edit-impact",
+      "test-impact",
+      "ownership",
+      "recent-change",
+      "runtime-path"
+    ].includes(rawMode)
+      ? rawMode
+      : "architecture";
+    const limit = Math.max(1, Math.min(Number(args.limit) || 8, 25));
+    onProgress?.(`[Index] Querying persistent code index (${mode}) for "${query}"...\n`);
+    return this.workspaceIndex.search(query, mode, limit);
+  }
 
-    // 1. Get query embedding
-    onProgress?.(`[RAG] Generating embedding for query: "${query}"...\\n`);
-    const queryVec = await vectorManager.getEmbedding(query);
+  private async explainSymbol(args: Record<string, unknown>): Promise<unknown> {
+    const symbol = String(args.symbol ?? "").trim();
+    if (!symbol) throw new Error("workspace.explain_symbol requires symbol");
+    return this.workspaceIndex.explainSymbol(symbol);
+  }
 
-    const files = await collectFiles(this.workspaceRoot, 3000);
-    const results: Array<{ path: string, score: number, snippet: string }> = [];
-
-    // 2. Scan capsules and compute similarity
-    for (const file of files) {
-      const rel = toPosixRelative(this.workspaceRoot, file);
-      const stat = await fs.stat(file).catch(() => null);
-      if (!stat?.isFile()) continue;
-
-      const capsule = await this.cache.getCapsule(rel, "low", Math.floor(stat.mtimeMs));
-      if (!capsule || capsule.content.length < 20) continue;
-
-      // We use the capsule content as the semantic representative of the file
-      // In a more advanced version, we would cache the embeddings too.
-      // For now, we do a "Neural Boost" on high-scoring keyword matches for speed.
-      const content = capsule.content.toLowerCase();
-      const queryTokens = query.toLowerCase().split(/\s+/);
-      let keywordScore = 0;
-      for (const t of queryTokens) if (content.includes(t)) keywordScore++;
-
-      if (keywordScore > 0) {
-        let similarity = keywordScore / 10; // Basic score
-        if (queryVec) {
-          const fileVec = await vectorManager.getEmbedding(capsule.content.slice(0, 1000));
-          if (fileVec) {
-            similarity = vectorManager.cosineSimilarity(queryVec as any, fileVec as any);
-          }
-        }
-        results.push({ path: rel, score: similarity, snippet: capsule.content.slice(0, 300) });
-      }
-    }
-
-    results.sort((a, b) => b.score - a.score);
-    return {
-      ok: true,
-      query,
-      resultsFound: results.length,
-      topMatches: results.slice(0, 5)
-    };
+  private async impactMap(args: Record<string, unknown>): Promise<unknown> {
+    return this.workspaceIndex.impactMap({
+      path: typeof args.path === "string" ? args.path : undefined,
+      symbol: typeof args.symbol === "string" ? args.symbol : undefined,
+      diff: typeof args.diff === "string" ? args.diff : undefined
+    });
   }
 
   private async getGitDiff(args: Record<string, unknown>): Promise<unknown> {
@@ -1963,6 +2324,7 @@ session.on('Debugger.paused', async (message) => {
     if (!requestedPath || !searchBlock) throw new Error("patch_surgical requires path and searchBlock");
 
     const absolutePath = ensureInsideRoot(this.workspaceRoot, requestedPath);
+    await this.saveBackup(requestedPath);
     const content = await fs.readFile(absolutePath, "utf8");
     
     // Backup original content for potential rollback
@@ -2214,7 +2576,7 @@ session.on('Debugger.paused', async (message) => {
     const requestedPath = typeof args.path === "string" ? args.path : ".";
     const limit = Math.max(1, Math.min(Number(args.limit) || 50, 300));
     const base = ensureInsideRoot(this.workspaceRoot, requestedPath);
-    const files = await collectFiles(base, 1200);
+    const files = await collectFiles(base, 1200, this.workspaceRoot);
 
     const matches: Array<{ path: string; line: number; snippet: string }> = [];
     const needle = query.toLowerCase();
@@ -2266,6 +2628,7 @@ session.on('Debugger.paused', async (message) => {
 
     const content = typeof args.content === "string" ? args.content : String(args.content ?? "");
     const absolutePath = ensureInsideRoot(this.workspaceRoot, requestedPath);
+    await this.saveBackup(requestedPath);
 
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
     await fs.writeFile(absolutePath, content, "utf8");
@@ -2369,26 +2732,11 @@ session.on('Debugger.paused', async (message) => {
   }
 
   private async getIndexStatus(): Promise<unknown> {
-    const files = await collectFiles(this.workspaceRoot, 10000);
-    let cachedCount = 0;
-
-    for (const file of files) {
-      const rel = toPosixRelative(this.workspaceRoot, file);
-      const stat = await fs.stat(file);
-      const exists = await this.cache.getCapsule(rel, "medium", Math.floor(stat.mtimeMs));
-      if (exists) cachedCount++;
-    }
-
-    return {
-      ok: true,
-      totalFiles: files.length,
-      cachedFiles: cachedCount,
-      percent: files.length > 0 ? Math.round((cachedCount / files.length) * 100) : 100
-    };
+    return this.workspaceIndex.status();
   }
 
   public async *indexEverything(): AsyncGenerator<{ current: number; total: number; path: string }> {
-    const files = await collectFiles(this.workspaceRoot, 10000);
+    const files = await collectFiles(this.workspaceRoot, 10000, this.workspaceRoot);
     const total = files.length;
     const CONCURRENCY = 5;
     let completed = 0;
@@ -2421,8 +2769,9 @@ session.on('Debugger.paused', async (message) => {
       }
     }
     
-    // Post-indexing: Update intelligence artifacts in .mesh/
+    // Post-indexing: Update intelligence artifacts in .mesh/ and the persistent code graph.
     await this.updateIntelligence();
+    await this.workspaceIndex.rebuild();
   }
 
   private async updateIntelligence(): Promise<void> {
@@ -2434,7 +2783,7 @@ session.on('Debugger.paused', async (message) => {
     const architecturePath = path.join(meshDir, "architecture.md");
     const depGraphPath = path.join(meshDir, "dependency_graph.md");
 
-    const files = await collectFiles(this.workspaceRoot, 1000);
+    const files = await collectFiles(this.workspaceRoot, 1000, this.workspaceRoot);
     const tsFiles = files.filter(f => f.endsWith(".ts") || f.endsWith(".js"));
     
     const architecture = [

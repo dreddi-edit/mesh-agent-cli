@@ -13,17 +13,23 @@
  */
 
 export type TextBlock = { text: string };
+export type ImageBlock = {
+  image: {
+    format: "png" | "jpeg" | "gif" | "webp";
+    source: { bytes: string }; // Base64
+  };
+};
 export type ToolUseBlock = {
   toolUse: { toolUseId: string; name: string; input: Record<string, unknown> };
 };
 export type ToolResultBlock = {
   toolResult: {
     toolUseId: string;
-    content: Array<{ text: string } | { json: unknown }>;
+    content: Array<{ text: string } | { json: unknown } | { image: { format: "png", source: { bytes: string } } }>;
     status?: "success" | "error";
   };
 };
-export type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock;
+export type ContentBlock = TextBlock | ImageBlock | ToolUseBlock | ToolResultBlock;
 
 export interface ConverseMessage {
   role: "user" | "assistant";
@@ -215,8 +221,24 @@ export class BedrockLlmClient {
     tools: ToolSpec[],
     systemPrompt: string
   ): Record<string, unknown> {
+    // Map messages to ensure image/multimodal blocks are correctly structured
+    const mappedMessages = messages.map(msg => ({
+      role: msg.role,
+      content: msg.content.map(block => {
+        if ("image" in block) {
+          return {
+            image: {
+              format: block.image.format,
+              source: { bytes: block.image.source.bytes }
+            }
+          };
+        }
+        return block;
+      })
+    }));
+
     const body: Record<string, unknown> = {
-      messages,
+      messages: mappedMessages,
       system: [
         { 
           text: systemPrompt,
