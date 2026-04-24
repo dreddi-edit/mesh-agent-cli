@@ -111,10 +111,11 @@ interface WireTool {
 }
 
 interface RunHooks {
-  onToolStart?: (wireName: string, input: Record<string, unknown>) => void;
+  onToolStart?: (wireName: string, input: Record<string, unknown>, step: number, maxSteps: number) => void;
   onToolEnd?: (wireName: string, ok: boolean, resultPreview: string) => void;
   askPermission?: (msg: string) => Promise<boolean>;
   onDelta?: (delta: string) => void;
+  onCommandChunk?: (chunk: string) => void;
 }
 
 interface SessionCapsule extends PersistedSessionCapsule {}
@@ -318,6 +319,7 @@ export class AgentLoop {
   private workspaceContext = "";
   private abortController: AbortController | null = null;
   private autoApproveTools = false;
+  private dynamicMaxSteps: number;
   private themeColor: (text: string) => string = pc.cyan;
   private persistentHistory: string[] = [];
   private readonly historyPath = path.join(os.homedir(), ".mesh_history");
@@ -330,6 +332,7 @@ export class AgentLoop {
     private readonly backend: ToolBackend
   ) {
     this.sessionStore = new SessionCapsuleStore(config.agent.workspaceRoot);
+    this.dynamicMaxSteps = config.agent.maxSteps;
     this.currentModelId = config.bedrock.modelId;
     this.llm = new BedrockLlmClient({
       endpointBase: config.bedrock.endpointBase,
@@ -635,23 +638,29 @@ export class AgentLoop {
       try {
         const spinner = this.useAnsi ? ora({ text: "Thinking...", color: "cyan", stream: output }).start() : undefined;
         let answer: string | undefined;
+        const tokensBefore = { ...this.sessionTokens };
         try {
           const sharedHooks: RunHooks = {
-            onToolStart: (wireName, args) => {
+            onToolStart: (wireName, args, step, maxSteps) => {
               if (spinner) {
-                spinner.text = `Running tool ${pc.cyan(wireName)} ${pc.dim(formatArgsPreview(args))}`;
+                const stepLabel = `[${step + 1}/${maxSteps}]`;
+                spinner.text = `${pc.dim(stepLabel)} ${pc.cyan(wireName)} ${pc.dim(formatArgsPreview(args))}`;
               }
               this.renderToolEvent("start", wireName, formatArgsPreview(args));
             },
             onToolEnd: (wireName, ok, resultPreview) => {
               if (spinner) {
-                spinner.text = ok ? `Completed ${pc.cyan(wireName)}` : `Failed ${pc.cyan(wireName)}`;
+                spinner.text = ok ? `done ${pc.cyan(wireName)}` : `failed ${pc.cyan(wireName)}`;
               }
               this.renderToolEvent(ok ? "success" : "error", wireName, resultPreview);
             },
+            onCommandChunk: (chunk) => {
+              if (spinner) { spinner.stop(); spinner.clear(); }
+              output.write(chunk);
+            },
             askPermission: async (msg) => {
               if (spinner) spinner.stop();
-              const p = this.useAnsi ? pc.yellow(`\n[Action Required] ${msg} [y/N/A]: `) : `\n[Action Required] ${msg} [y/N/A]: `;
+              const p = this.useAnsi ? pc.yellow(`\n[Action Required]\n${msg}\n[y/N/A]: `) : `\n[Action Required]\n${msg}\n[y/N/A]: `;
               const tempRl = readline.createInterface({ input, output });
               const ans = (await tempRl.question(p)).trim().toLowerCase();
               tempRl.close();
@@ -705,8 +714,16 @@ export class AgentLoop {
           }
         }
 
-        // Only render if we didn't stream it already
-        // answer is needed for possible post-processing, but transcript is handled inside.
+        if (this.useAnsi && !this.voiceMode) {
+          const dIn = this.sessionTokens.inputTokens - tokensBefore.inputTokens;
+          const dOut = this.sessionTokens.outputTokens - tokensBefore.outputTokens;
+          if (dIn > 0 || dOut > 0) {
+            const model = MODEL_OPTIONS.find(o => this.currentModelId.includes(o.value) || o.value.includes(this.currentModelId));
+            const { inputPer1k, outputPer1k } = model?.pricing ?? { inputPer1k: 0.003, outputPer1k: 0.015 };
+            const cost = (dIn * inputPer1k / 1000) + (dOut * outputPer1k / 1000);
+            output.write(pc.dim(`\n↑${dIn.toLocaleString()} ↓${dOut.toLocaleString()} tokens · $${cost.toFixed(4)}\n`));
+          }
+        }
 
         const compactionMessage = await this.autoCompactIfNeeded();
         if (compactionMessage) {
@@ -738,12 +755,12 @@ export class AgentLoop {
     this.abortController = new AbortController();
 
     try {
-      for (let step = 0; step < this.config.agent.maxSteps; step += 1) {
+      for (let step = 0; step < this.dynamicMaxSteps; step += 1) {
         let response: LlmResponse;
 
         if (hooks?.onDelta) {
           let accumulatedText = "";
-          let toolUse: any = null;
+          const streamedToolUses: any[] = [];
           try {
             const stream = this.llm.converseStream(
               this.transcript,
@@ -758,7 +775,7 @@ export class AgentLoop {
                 accumulatedText += chunk.text;
                 hooks.onDelta(chunk.text);
               } else if (chunk.kind === "tool_use") {
-                toolUse = chunk.toolUse;
+                streamedToolUses.push(chunk.toolUse);
               } else if (chunk.kind === "stop") {
                 if (chunk.usage) {
                   this.sessionTokens.inputTokens += chunk.usage.inputTokens ?? 0;
@@ -767,12 +784,14 @@ export class AgentLoop {
               }
             }
 
-            if (toolUse) {
+            if (streamedToolUses.length > 0) {
               response = {
                 kind: "tool_use",
-                toolUseId: toolUse.toolUseId,
-                name: toolUse.name,
-                input: toolUse.input as Record<string, unknown>,
+                toolUses: streamedToolUses.map(tu => ({
+                  toolUseId: tu.toolUseId,
+                  name: tu.name,
+                  input: (tu.input ?? {}) as Record<string, unknown>
+                })),
                 text: accumulatedText || undefined,
                 stopReason: "tool_use"
               };
@@ -828,85 +847,60 @@ export class AgentLoop {
 
         lastAssistantText = response.text ?? lastAssistantText;
 
-        // Record the assistant turn that issued the toolUse.
+        // Record the full assistant turn with all tool uses.
         const assistantContent: ContentBlock[] = [];
-        if (response.text) {
-          assistantContent.push({ text: response.text });
+        if (response.text) assistantContent.push({ text: response.text });
+        for (const tu of response.toolUses) {
+          assistantContent.push({ toolUse: { toolUseId: tu.toolUseId, name: tu.name, input: tu.input } });
         }
-        assistantContent.push({
-          toolUse: {
-            toolUseId: response.toolUseId,
-            name: response.name,
-            input: response.input
-          }
-        });
         this.transcript.push({ role: "assistant", content: assistantContent });
 
-        // Execute the tool
-        const selectedTool = wireToolMap.get(response.name);
-
-        if (!selectedTool) {
-          this.transcript.push({
-            role: "user",
-            content: [
-              {
-                toolResult: {
-                  toolUseId: response.toolUseId,
-                  status: "error",
-                  content: [{ text: `Tool '${response.name}' is not available.` }]
-                }
-              }
-            ]
-          });
-          continue;
-        }
-
-        let resultText: string;
-        let errored = false;
-
-        // Tool Security Check
-        if (selectedTool.tool.requiresApproval && !this.autoApproveTools) {
-          const denied = !hooks?.askPermission
-            || !(await hooks.askPermission(`Allow ${selectedTool.tool.name} to run?`));
-          if (denied) {
-            this.transcript.push({
-              role: "user",
-              content: [
-                {
-                  toolResult: {
-                    toolUseId: response.toolUseId,
-                    status: "error",
-                    content: [{ text: hooks?.askPermission ? "User denied permission to run this tool." : "Tool requires interactive approval but no TTY is available." }]
-                  }
-                }
-              ]
-            });
-            continue;
+        // Sequential approval pass (TTY prompts can't be parallel).
+        const approved = new Map<string, boolean>();
+        for (const tu of response.toolUses) {
+          const sel = wireToolMap.get(tu.name);
+          if (!sel) { approved.set(tu.toolUseId, false); continue; }
+          if (sel.tool.requiresApproval && !this.autoApproveTools) {
+            const preview = this.buildApprovalPreview(sel.tool.name, tu.input);
+            const denied = !hooks?.askPermission || !(await hooks.askPermission(preview));
+            approved.set(tu.toolUseId, !denied);
+          } else {
+            approved.set(tu.toolUseId, true);
           }
         }
 
-        try {
-          hooks?.onToolStart?.(response.name, response.input);
-          const raw = await this.backend.callTool(selectedTool.tool.name, response.input);
-          resultText = await buildLlmSafeMeshContext(selectedTool.tool.name, response.input, raw);
-          hooks?.onToolEnd?.(response.name, true, this.normalizeCapsuleLine(resultText, 120));
-        } catch (error) {
-          resultText = `Tool execution failed: ${(error as Error).message}`;
-          errored = true;
-          hooks?.onToolEnd?.(response.name, false, this.normalizeCapsuleLine(resultText, 120));
-        }
+        // Parallel execution of all tool calls in this step.
+        const toolResults = await Promise.all(response.toolUses.map(async (tu) => {
+          const sel = wireToolMap.get(tu.name);
+          if (!sel) {
+            return { toolUseId: tu.toolUseId, status: "error" as const, text: `Tool '${tu.name}' is not available.` };
+          }
+          if (!approved.get(tu.toolUseId)) {
+            return {
+              toolUseId: tu.toolUseId,
+              status: "error" as const,
+              text: hooks?.askPermission ? "User denied permission to run this tool." : "Tool requires interactive approval but no TTY is available."
+            };
+          }
+          hooks?.onToolStart?.(tu.name, tu.input, step, this.dynamicMaxSteps);
+          try {
+            const raw = await this.backend.callTool(sel.tool.name, tu.input, { onProgress: hooks?.onCommandChunk });
+            const resultText = await buildLlmSafeMeshContext(sel.tool.name, tu.input, raw);
+            hooks?.onToolEnd?.(tu.name, true, this.normalizeCapsuleLine(resultText, 120));
+            return { toolUseId: tu.toolUseId, status: "success" as const, text: resultText };
+          } catch (error) {
+            const resultText = `Tool execution failed: ${(error as Error).message}`;
+            hooks?.onToolEnd?.(tu.name, false, this.normalizeCapsuleLine(resultText, 120));
+            return { toolUseId: tu.toolUseId, status: "error" as const, text: resultText };
+          }
+        }));
 
+        // Push all results as a single user message (required by Bedrock Converse spec).
         this.transcript.push({
           role: "user",
-          content: [
-            {
-              toolResult: {
-                toolUseId: response.toolUseId,
-                status: errored ? "error" : "success",
-                content: [{ text: resultText }]
-              }
-            }
-          ]
+          content: toolResults.map(r => ({
+            toolResult: { toolUseId: r.toolUseId, status: r.status, content: [{ text: r.text }] }
+          }))
         });
       }
     } catch (err: any) {
@@ -921,8 +915,32 @@ export class AgentLoop {
 
     return (
       lastAssistantText ||
-      `Stopped after ${this.config.agent.maxSteps} tool steps without final answer.`
+      `Stopped after ${this.dynamicMaxSteps} tool steps without final answer.`
     );
+  }
+
+  private buildApprovalPreview(toolName: string, input: Record<string, unknown>): string {
+    if (toolName === "workspace.write_file") {
+      const p = String(input.path ?? "?");
+      const preview = String(input.content ?? "").split("\n").slice(0, 10).join("\n");
+      return `write_file → ${p}\n${pc.dim("────────────────────")}\n${preview}${String(input.content ?? "").split("\n").length > 10 ? "\n…" : ""}`;
+    }
+    if (toolName === "workspace.patch_file") {
+      const p = String(input.path ?? "?");
+      const s = String(input.search ?? "").split("\n").slice(0, 4).join("\n");
+      const r = String(input.replace ?? "").split("\n").slice(0, 4).join("\n");
+      return `patch_file → ${p}\n${pc.red("--- " + s)}\n${pc.green("+++ " + r)}`;
+    }
+    if (toolName === "workspace.run_command") {
+      return `run_command\n$ ${pc.bold(String(input.command ?? "?"))}`;
+    }
+    if (toolName === "workspace.delete_file") {
+      return `delete_file → ${pc.red(String(input.path ?? "?"))}`;
+    }
+    if (toolName === "workspace.move_file") {
+      return `move_file  ${String(input.sourcePath ?? "?")} → ${String(input.destinationPath ?? "?")}`;
+    }
+    return `Allow ${toolName} to run?`;
   }
 
   private printBanner(): void {
@@ -1508,6 +1526,7 @@ export class AgentLoop {
       { name: "/model", usage: "/model [pick|list|id|save]", description: "interactive chooser or switch model" },
       { name: "/cost", usage: "/cost", description: "show token usage and estimated cost" },
       { name: "/approvals", usage: "/approvals [status|on|off]", description: "control tool auto-approval mode" },
+      { name: "/steps", usage: "/steps [<n>|reset]", description: "set max tool steps for this session" },
       { name: "/doctor", usage: "/doctor [brief|full|voice [fix]]", description: "show runtime diagnostics" },
       { name: "/compact", usage: "/compact", description: "compress transcript into session capsule" },
       { name: "/clear", usage: "/clear", description: "clear terminal UI" },
@@ -1530,7 +1549,7 @@ export class AgentLoop {
 
     const commandList = [
       "/help", "/status", "/index", "/sync", "/setup", "/clear", 
-      "/model", "/cost", "/compact", "/capsule", "/memory", "/approvals", 
+      "/model", "/cost", "/compact", "/capsule", "/memory", "/approvals", "/steps",
       "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice"
     ];
 
@@ -1582,6 +1601,9 @@ export class AgentLoop {
         return { wasHandled: true, shouldExit: false };
       case "/approvals":
         this.handleApprovalsCommand(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/steps":
+        this.handleStepsCommand(args);
         return { wasHandled: true, shouldExit: false };
       case "/doctor":
         await this.runDoctor(args);
@@ -1902,6 +1924,26 @@ export class AgentLoop {
     output.write(`\nAuto-approval: ${this.autoApproveTools ? "on" : "off"}\n`);
   }
 
+  private handleStepsCommand(args: string[]): void {
+    const arg = (args[0] || "").toLowerCase();
+    if (!arg || arg === "status") {
+      output.write(`\nMax steps: ${this.dynamicMaxSteps} (default: ${this.config.agent.maxSteps})\n`);
+      return;
+    }
+    if (arg === "reset") {
+      this.dynamicMaxSteps = this.config.agent.maxSteps;
+      output.write(`\nMax steps reset to ${this.dynamicMaxSteps}.\n`);
+      return;
+    }
+    const n = parseInt(arg, 10);
+    if (isNaN(n) || n < 1 || n > 100) {
+      output.write("\nUsage: /steps <1-100> | reset\n");
+      return;
+    }
+    this.dynamicMaxSteps = n;
+    output.write(`\nMax steps set to ${this.dynamicMaxSteps}.\n`);
+  }
+
   private async handleSetupCommand(args: string[], rl: readline.Interface): Promise<{ shouldExit: boolean }> {
     const parsed = parseCommandArgs(args);
     if (parsed.positionals[0]?.toLowerCase() !== "noninteractive") {
@@ -2201,7 +2243,7 @@ export class AgentLoop {
     }
 
     const sourceMessages = this.transcript.length;
-    const retainedMessages = Math.min(6, sourceMessages);
+    const retainedMessages = Math.min(12, sourceMessages);
     const retained = this.transcript.slice(-retainedMessages);
     const older = this.transcript.slice(0, Math.max(0, sourceMessages - retainedMessages));
     const summary = this.buildSessionCapsuleSummary(older, retained);

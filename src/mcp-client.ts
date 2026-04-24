@@ -78,7 +78,7 @@ export class McpClient {
     return tools;
   }
 
-  async callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+  async callTool(name: string, args: Record<string, unknown>, _opts?: { onProgress?: (chunk: string) => void }): Promise<unknown> {
     return this.sendRequest("tools/call", {
       name,
       arguments: args

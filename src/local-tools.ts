@@ -1,13 +1,13 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { exec } from "node:child_process";
+import { exec, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
 const execAsync = promisify(exec);
 
 import { MeshCoreAdapter } from "./mesh-core-adapter.js";
 import { CacheManager } from "./cache-manager.js";
-import { ToolBackend, ToolDefinition } from "./tool-backend.js";
+import { ToolBackend, ToolCallOpts, ToolDefinition } from "./tool-backend.js";
 import { AppConfig } from "./config.js";
 
 const SKIP_DIRS = new Set([".git", "node_modules", "dist"]);
@@ -275,7 +275,7 @@ export class LocalToolBackend implements ToolBackend {
     ];
   }
 
-  async callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+  async callTool(name: string, args: Record<string, unknown>, opts?: ToolCallOpts): Promise<unknown> {
     switch (name) {
       case "workspace.list_files":
         return this.listFiles(args);
@@ -292,7 +292,7 @@ export class LocalToolBackend implements ToolBackend {
       case "workspace.write_file":
         return this.writeFile(args);
       case "workspace.run_command":
-        return this.runCommand(args);
+        return this.runCommand(args, opts?.onProgress);
       case "workspace.read_file_raw":
         return this.readFileRaw(args);
       case "workspace.grep_capsules":
@@ -670,36 +670,53 @@ export class LocalToolBackend implements ToolBackend {
     };
   }
 
-  private async runCommand(args: Record<string, unknown>): Promise<unknown> {
+  private runCommand(args: Record<string, unknown>, onProgress?: (chunk: string) => void): Promise<unknown> {
     const command = String(args.command ?? "").trim();
-    if (!command) {
-      throw new Error("workspace.run_command requires 'command'");
-    }
+    if (!command) throw new Error("workspace.run_command requires 'command'");
 
-    try {
-      const { stdout, stderr } = await execAsync(command, {
-        cwd: this.workspaceRoot,
-        maxBuffer: 5 * 1024 * 1024
+    const TIMEOUT_MS = 30_000;
+    const TRIM_LIMIT = 15_000;
+    const trim = (s: string) => s.length > TRIM_LIMIT ? s.slice(0, TRIM_LIMIT) + "\n...[TRUNCATED]" : s;
+
+    return new Promise((resolve) => {
+      const child = spawn("sh", ["-c", command], { cwd: this.workspaceRoot });
+      let stdout = "";
+      let stderr = "";
+      let timedOut = false;
+
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+      }, TIMEOUT_MS);
+
+      child.stdout.on("data", (chunk: Buffer) => {
+        const text = chunk.toString();
+        stdout += text;
+        onProgress?.(text);
       });
 
-      const trimOutput = (str: string) => str.length > 15000 ? str.slice(0, 15000) + "\n...[TRUNCATED]" : str;
+      child.stderr.on("data", (chunk: Buffer) => {
+        const text = chunk.toString();
+        stderr += text;
+        onProgress?.(text);
+      });
 
-      return {
-        ok: true,
-        command,
-        stdout: trimOutput(stdout),
-        stderr: trimOutput(stderr)
-      };
-    } catch (error: any) {
-      const trimOutput = (str: string) => str?.length > 15000 ? str.slice(0, 15000) + "\n...[TRUNCATED]" : str;
-      return {
-        ok: false,
-        command,
-        exitCode: error.code ?? 1,
-        stdout: trimOutput(error.stdout || ""),
-        stderr: trimOutput(error.stderr || String(error))
-      };
-    }
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        resolve({
+          ok: code === 0 && !timedOut,
+          command,
+          exitCode: timedOut ? 124 : (code ?? 0),
+          stdout: trim(stdout),
+          stderr: timedOut ? `[TIMEOUT after ${TIMEOUT_MS / 1000}s]\n${trim(stderr)}` : trim(stderr)
+        });
+      });
+
+      child.on("error", (err) => {
+        clearTimeout(timer);
+        resolve({ ok: false, command, exitCode: 1, stdout: "", stderr: String(err) });
+      });
+    });
   }
 
   private async checkSync(): Promise<unknown> {

@@ -45,9 +45,7 @@ export interface LlmResponseText {
 
 export interface LlmResponseToolUse {
   kind: "tool_use";
-  toolUseId: string;
-  name: string;
-  input: Record<string, unknown>;
+  toolUses: Array<{ toolUseId: string; name: string; input: Record<string, unknown> }>;
   text?: string;
   stopReason: string;
   usage?: ConverseUsage;
@@ -240,34 +238,24 @@ export class BedrockLlmClient {
     const usage = data.usage;
 
     const textParts: string[] = [];
-    let toolUse:
-      | { toolUseId: string; name: string; input: Record<string, unknown> }
-      | undefined;
+    const toolUses: Array<{ toolUseId: string; name: string; input: Record<string, unknown> }> = [];
 
     for (const block of content) {
       if ("text" in block && typeof block.text === "string") {
         textParts.push(block.text);
       } else if ("toolUse" in block && block.toolUse) {
-        toolUse = {
+        toolUses.push({
           toolUseId: block.toolUse.toolUseId,
           name: block.toolUse.name,
           input: (block.toolUse.input ?? {}) as Record<string, unknown>
-        };
+        });
       }
     }
 
     const text = textParts.join("\n").trim();
 
-    if (toolUse) {
-      return {
-        kind: "tool_use",
-        toolUseId: toolUse.toolUseId,
-        name: toolUse.name,
-        input: toolUse.input,
-        text: text || undefined,
-        stopReason,
-        usage
-      };
+    if (toolUses.length > 0) {
+      return { kind: "tool_use", toolUses, text: text || undefined, stopReason, usage };
     }
 
     return { kind: "text", text, stopReason, usage };
