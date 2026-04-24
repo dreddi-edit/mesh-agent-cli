@@ -1,6 +1,6 @@
 import { promises as fs, existsSync } from "node:fs";
 import path from "node:path";
-import { exec, spawn } from "node:child_process";
+import { exec, spawn, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import os from "node:os";
 import ignore, { Ignore } from "ignore";
@@ -91,6 +91,149 @@ async function pathExists(target: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Check if a binary is resolvable on the current PATH.
+ * Used to pre-flight optional deps (playwright, ast-grep) and give
+ * actionable errors instead of opaque `npx --yes` failures.
+ */
+function isCommandAvailable(command: string): boolean {
+  try {
+    const result = spawnSync("which", [command], { stdio: "ignore" });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+function countWarnings(output: string): number {
+  return output
+    .split(/\r?\n/g)
+    .map((line) => line.trim())
+    .filter((line) => /\bwarning\b/i.test(line))
+    .length;
+}
+
+function computeRaceScore(args: {
+  passed: boolean;
+  changedLines: number;
+  warningCount: number;
+  durationMs: number;
+}): number {
+  if (!args.passed) {
+    return -1000 - args.changedLines - args.warningCount * 25 - Math.round(args.durationMs / 500);
+  }
+
+  return 1000 - args.changedLines * 3 - args.warningCount * 12 - Math.round(args.durationMs / 250);
+}
+
+async function readJsonFile<T>(filePath: string, fallback: T): Promise<T> {
+  try {
+    return JSON.parse(await fs.readFile(filePath, "utf8")) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+async function writeJsonFile(filePath: string, value: unknown): Promise<void> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, JSON.stringify(value, null, 2), "utf8");
+}
+
+function uniqueStrings(values: Array<string | undefined | null>, limit = 100): string[] {
+  return Array.from(new Set(values.filter((value): value is string => Boolean(value && value.trim())))).slice(0, limit);
+}
+
+function extractRouteHints(raw: string): Array<{ method: string; route: string; line: number }> {
+  const routes: Array<{ method: string; route: string; line: number }> = [];
+  const patterns = [
+    /\b(?:app|router|server)\.(get|post|put|patch|delete|all)\(\s*["'`]([^"'`]+)["'`]/g,
+    /\b(?:fetch|axios\.(?:get|post|put|patch|delete))\(\s*["'`]([^"'`]+)["'`]/g
+  ];
+  for (const pattern of patterns) {
+    for (const match of raw.matchAll(pattern)) {
+      const method = match[2] ? match[1].toUpperCase() : "FETCH";
+      const route = match[2] ?? match[1];
+      const line = raw.slice(0, match.index ?? 0).split(/\r?\n/g).length;
+      routes.push({ method, route, line });
+    }
+  }
+  return routes;
+}
+
+function extractSymbolHints(raw: string): Array<{ name: string; kind: string; line: number }> {
+  const symbols: Array<{ name: string; kind: string; line: number }> = [];
+  const patterns = [
+    { kind: "function", regex: /\b(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/g },
+    { kind: "class", regex: /\b(?:export\s+)?class\s+([A-Za-z_$][\w$]*)/g },
+    { kind: "const", regex: /\b(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*=/g },
+    { kind: "type", regex: /\b(?:export\s+)?(?:type|interface)\s+([A-Za-z_$][\w$]*)/g }
+  ];
+  for (const pattern of patterns) {
+    for (const match of raw.matchAll(pattern.regex)) {
+      symbols.push({
+        name: match[1],
+        kind: pattern.kind,
+        line: raw.slice(0, match.index ?? 0).split(/\r?\n/g).length
+      });
+    }
+  }
+  return symbols;
+}
+
+function detectRiskHints(relativePath: string, raw: string): string[] {
+  const risks: string[] = [];
+  if (/\b(exec|spawn|execFile)\s*\(/.test(raw)) risks.push("shell execution");
+  if (/\b(rm\s+-rf|fs\.rm|deleteFile|unlink)\b/.test(raw)) risks.push("destructive file operation");
+  if (/\b(SECRET|TOKEN|PASSWORD|API_KEY)\b/.test(raw)) risks.push("secret-bearing code");
+  if (/\b(auth|session|jwt|oauth)\b/i.test(`${relativePath}\n${raw}`)) risks.push("auth boundary");
+  if (/\b(sql|query|prisma|supabase|database|migration)\b/i.test(`${relativePath}\n${raw}`)) risks.push("data persistence boundary");
+  if (relativePath.includes("agent-loop") || relativePath.includes("local-tools")) risks.push("agent runtime core");
+  return uniqueStrings(risks, 10);
+}
+
+function tokenizeIntent(value: string): string[] {
+  return uniqueStrings(
+    value
+      .toLowerCase()
+      .split(/[^a-z0-9_/-]+/g)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 3),
+    80
+  );
+}
+
+function slugifyId(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "item";
+}
+
+function severityLabel(score: number): "critical" | "high" | "medium" | "low" {
+  if (score >= 85) return "critical";
+  if (score >= 60) return "high";
+  if (score >= 35) return "medium";
+  return "low";
+}
+
+function normalizeTestSubject(file: string): string {
+  const base = path.basename(file).replace(/\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$/i, "").replace(/\.(ts|tsx|js|jsx|mjs|cjs)$/i, "");
+  return base.toLowerCase();
+}
+
+function relatedTestsForFile(file: string, tests: string[], limit = 12): string[] {
+  const subject = normalizeTestSubject(file);
+  if (!subject) return [];
+  const fileDir = path.dirname(file).toLowerCase();
+  return tests
+    .filter((testPath) => {
+      const lower = testPath.toLowerCase();
+      return lower.includes(subject) || (fileDir !== "." && lower.includes(fileDir));
+    })
+    .slice(0, limit);
 }
 
 async function loadIgnoreFilter(workspaceRoot: string): Promise<Ignore> {
@@ -268,6 +411,7 @@ export class LocalToolBackend implements ToolBackend {
                 try {
                   const diag = await this.getDiagnostics();
                   if (!(diag as any).ok) {
+                    await this.recordPredictiveRepairSignal(rel, diag);
                     // Pre-compute a fix using a sub-agent (0-token cost for main turn)
                     const fixResult = await this.invokeSubAgent({ 
                       prompt: `The file '${rel}' has the following error. Generate a precise alien_patch to fix it without changing logic:\n${(diag as any).output}` 
@@ -704,7 +848,7 @@ export class LocalToolBackend implements ToolBackend {
       },
       {
         name: "workspace.timeline_compare",
-        description: "Compare one or more timelines by diff stat, diff preview, last command, and verification verdict.",
+        description: "Compare one or more timelines by diff stat, changed files, execution time, last command, and verification verdict.",
         inputSchema: {
           type: "object",
           required: ["timelineIds"],
@@ -797,7 +941,7 @@ export class LocalToolBackend implements ToolBackend {
       },
       {
         name: "web.inspect_ui",
-        description: "Multi-modal Sight: Takes a screenshot of a local or remote URL using Playwright and returns a base64 string for visual UI/UX debugging.",
+        description: "Multi-modal Sight: Takes a screenshot of a local or remote URL using Playwright and returns a base64 string for visual UI/UX debugging. Requires `playwright` to be installed locally (`npm i -g playwright && npx playwright install chromium`). For a zero-dependency alternative use `frontend.preview` (built-in Chrome CDP).",
         inputSchema: {
           type: "object",
           required: ["url"],
@@ -826,7 +970,7 @@ export class LocalToolBackend implements ToolBackend {
       },
       {
         name: "workspace.query_ast",
-        description: "Tree-sitter Query Engine: Search the codebase for structural patterns using ast-grep (sg) syntax.",
+        description: "Tree-sitter Query Engine: Search the codebase for structural patterns using ast-grep (sg) syntax. Uses a locally installed `ast-grep` binary if available (recommended: `brew install ast-grep`), otherwise falls back to `npx @ast-grep/cli` (requires network on first run).",
         inputSchema: {
           type: "object",
           required: ["pattern"],
@@ -871,6 +1015,17 @@ export class LocalToolBackend implements ToolBackend {
       {
         name: "runtime.capture_failure",
         description: "Capture failure details, stack frames, and log tails for a runtime observer run.",
+        inputSchema: {
+          type: "object",
+          required: ["runId"],
+          properties: {
+            runId: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "runtime.capture_deep_autopsy",
+        description: "Failure Autopsy: Reconstructs the causal chain of a crash using inspector-backed stack frames and scope values when available, with log fallback otherwise.",
         inputSchema: {
           type: "object",
           required: ["runId"],
@@ -935,6 +1090,19 @@ export class LocalToolBackend implements ToolBackend {
           properties: {
             path: { type: "string" },
             symbol: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "agent.race_fixes",
+        description: "Multiverse Fix Racing: Generates multiple candidate fixes in parallel timelines, verifies them, compares telemetry, and ranks them by stability and quality.",
+        inputSchema: {
+          type: "object",
+          required: ["task", "verificationCommand"],
+          properties: {
+            task: { type: "string", description: "The problem to fix (e.g. 'Fix the linter error in src/auth.ts')." },
+            verificationCommand: { type: "string", description: "The command to run to verify the fix (e.g. 'npm test')." },
+            candidates: { type: "number", description: "Number of parallel timelines to spawn (default: 3).", default: 3 }
           }
         }
       },
@@ -1048,7 +1216,109 @@ export class LocalToolBackend implements ToolBackend {
       },
       { name: "workspace.git_status", description: "Get current git status (branch, changed files)." },
       { name: "workspace.check_sync", description: "Verify cloud (L2) synchronization status" },
-      { name: "workspace.index_everything", description: "Explicitly trigger full workspace indexing (generate all capsules)" }
+      { name: "workspace.index_everything", description: "Explicitly trigger full workspace indexing (generate all capsules)" },
+      {
+        name: "workspace.digital_twin",
+        description: "Build or read the Codebase Digital Twin: symbols, routes, tests, deploy/config files, env names, risk hotspots, and git state.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["build", "read", "status"], default: "build" }
+          }
+        }
+      },
+      {
+        name: "workspace.predictive_repair",
+        description: "Predictive Repair Daemon: analyze diagnostics, recent diffs, and learned risk memory to prepare verifiable repair candidates.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["analyze", "status", "clear"], default: "analyze" },
+            verificationCommand: { type: "string", description: "Optional verification command to attach to prepared repairs." }
+          }
+        }
+      },
+      {
+        name: "workspace.engineering_memory",
+        description: "Read, record, or learn repository-specific engineering rules from accepted/rejected work and risky modules.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["read", "record", "learn"], default: "read" },
+            outcome: { type: "string", enum: ["accepted", "rejected", "neutral"] },
+            note: { type: "string" },
+            rule: { type: "string" },
+            files: { type: "array", items: { type: "string" } }
+          }
+        }
+      },
+      {
+        name: "workspace.intent_compile",
+        description: "Intent Compiler: turn product intent into a repo-grounded implementation contract with likely files, risks, tests, rollout, and verification steps.",
+        inputSchema: {
+          type: "object",
+          required: ["intent"],
+          properties: {
+            intent: { type: "string" },
+            verificationCommand: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "workspace.cockpit_snapshot",
+        description: "Live Architecture Cockpit snapshot: digital twin, timeline, runtime, repair, memory, risk, and coverage state for dashboards.",
+        inputSchema: { type: "object", properties: {} }
+      },
+      {
+        name: "workspace.causal_intelligence",
+        description: "Causal Software Intelligence: build, query, or inspect a causal graph linking files, risks, tests, repairs, memory rules, and git change pressure.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["build", "read", "status", "query"], default: "build" },
+            query: { type: "string", description: "Question to answer against the causal graph when action='query'." }
+          }
+        }
+      },
+      {
+        name: "workspace.discovery_lab",
+        description: "Autonomous Discovery Lab: discover high-impact improvements from the causal graph, diagnostics, repair queue, and repo memory.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["run", "status", "clear"], default: "run" },
+            verificationCommand: { type: "string", description: "Optional verification command attached to generated experiments." },
+            maxDiscoveries: { type: "number", default: 8 }
+          }
+        }
+      },
+      {
+        name: "workspace.reality_fork",
+        description: "Reality Fork Engine: turn an intent into multiple scored project realities and optionally materialize them as isolated timelines.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["plan", "fork", "status", "clear"], default: "plan" },
+            intent: { type: "string", description: "Goal to explore across multiple alternative project realities." },
+            forks: { type: "number", default: 4 },
+            verificationCommand: { type: "string" },
+            runVerification: { type: "boolean", default: false }
+          }
+        }
+      },
+      {
+        name: "workspace.ghost_engineer",
+        description: "Ghost Engineer Replay: learn the local engineer's repo-specific working style, predict their implementation path, detect divergence, and materialize a style-conformant autopilot timeline.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["learn", "profile", "status", "predict", "divergence", "patch", "clear"], default: "profile" },
+            goal: { type: "string", description: "Implementation goal for predict or patch actions." },
+            plan: { type: "string", description: "Plan text to compare against the learned engineer profile." },
+            verificationCommand: { type: "string" }
+          }
+        }
+      }
     ];
   }
 
@@ -1170,6 +1440,8 @@ export class LocalToolBackend implements ToolBackend {
         return this.runtimeObserver.start(args);
       case "runtime.capture_failure":
         return this.runtimeObserver.captureFailure(args);
+      case "runtime.capture_deep_autopsy":
+        return this.runtimeObserver.captureDeepAutopsy(args);
       case "runtime.trace_request":
         return this.runtimeObserver.traceRequest(args);
       case "runtime.explain_failure":
@@ -1182,6 +1454,8 @@ export class LocalToolBackend implements ToolBackend {
         return this.traceSymbol(args);
       case "agent.invoke_sub_agent":
         return this.invokeSubAgent(args, opts?.onProgress);
+      case "agent.race_fixes":
+        return this.raceFixes(args, opts?.onProgress);
       case "agent.spawn_swarm":
         return this.spawnSwarm(args, opts?.onProgress);
       case "agent.spawn":
@@ -1202,6 +1476,24 @@ export class LocalToolBackend implements ToolBackend {
         return this.grepRipgrep(args);
       case "workspace.git_status":
         return this.getGitStatus();
+      case "workspace.digital_twin":
+        return this.digitalTwin(args);
+      case "workspace.predictive_repair":
+        return this.predictiveRepair(args, opts?.onProgress);
+      case "workspace.engineering_memory":
+        return this.engineeringMemory(args);
+      case "workspace.intent_compile":
+        return this.intentCompile(args);
+      case "workspace.cockpit_snapshot":
+        return this.cockpitSnapshot();
+      case "workspace.causal_intelligence":
+        return this.causalIntelligence(args, opts?.onProgress);
+      case "workspace.discovery_lab":
+        return this.discoveryLab(args, opts?.onProgress);
+      case "workspace.reality_fork":
+        return this.realityFork(args, opts?.onProgress);
+      case "workspace.ghost_engineer":
+        return this.ghostEngineer(args, opts?.onProgress);
       default:
         throw new Error(`Unknown local tool: ${name}`);
     }
@@ -1577,8 +1869,16 @@ export class LocalToolBackend implements ToolBackend {
 
   private async getDiagnostics(onProgress?: (chunk: string) => void): Promise<unknown> {
     onProgress?.("Running diagnostics (tsc --noEmit)...\n");
+    const tsconfigPath = path.join(this.workspaceRoot, "tsconfig.json");
+    if (!(await pathExists(tsconfigPath))) {
+      return { ok: true, output: "No tsconfig.json found; TypeScript diagnostics skipped." };
+    }
+    const localTsc = path.join(this.workspaceRoot, "node_modules", ".bin", "tsc");
+    const command = await pathExists(localTsc)
+      ? `"${localTsc}" --noEmit`
+      : "npx --no-install tsc --noEmit";
     try {
-      const { stdout, stderr } = await execAsync("npx tsc --noEmit", { cwd: this.workspaceRoot });
+      const { stdout, stderr } = await execAsync(command, { cwd: this.workspaceRoot });
       return { ok: true, output: stdout || stderr || "No issues found." };
     } catch (err: any) {
       return { ok: false, hasErrors: true, output: err.stdout || err.stderr || err.message };
@@ -1941,16 +2241,29 @@ export class LocalToolBackend implements ToolBackend {
     const url = String(args.url ?? "").trim();
     if (!url) throw new Error("web.inspect_ui requires a URL");
 
-    onProgress?.(`[Multi-modal Sight] Capturing UI from ${url} using Playwright...\n`);
+    // Pre-flight: Playwright is an optional, heavy dependency (~100MB + Chromium).
+    // Instead of silently running `npx --yes playwright` (which downloads live on
+    // first use and fails cryptically offline), detect up-front and return an
+    // actionable error that points to frontend.preview as a zero-dep alternative.
+    const hasPlaywright = isCommandAvailable("playwright");
+    if (!hasPlaywright) {
+      onProgress?.(`[Multi-modal Sight] Playwright not detected locally; attempting npx fallback...\n`);
+    }
+
+    onProgress?.(`[Multi-modal Sight] Capturing UI from ${url} via Playwright...\n`);
     const screenshotPath = path.join(os.tmpdir(), `mesh_ui_${Date.now()}.png`);
-    
+
     try {
-      // Zero-config execution: npx will fetch playwright-cli if missing.
-      await execAsync(`npx --yes playwright screenshot --wait-for-timeout=1000 ${url} ${screenshotPath}`);
-      
+      // If playwright is in PATH, use --no-install to avoid surprise network fetches.
+      // Otherwise, --yes allows npx to install the cli on first run (requires network).
+      const cmd = hasPlaywright
+        ? `npx --no-install playwright screenshot --wait-for-timeout=1000 ${url} ${screenshotPath}`
+        : `npx --yes playwright screenshot --wait-for-timeout=1000 ${url} ${screenshotPath}`;
+      await execAsync(cmd);
+
       const imageBuffer = await fs.readFile(screenshotPath);
       const base64Image = imageBuffer.toString("base64");
-      
+
       // Cleanup
       await fs.unlink(screenshotPath).catch(() => {});
 
@@ -1958,13 +2271,18 @@ export class LocalToolBackend implements ToolBackend {
         ok: true,
         url,
         base64Image,
-        instruction: "Pass this base64 string to a vision model (e.g. Claude 3.5 Sonnet Vision) to evaluate the layout."
+        instruction: "Pass this base64 string to a vision model (e.g. Claude Sonnet 4.5 Vision) to evaluate the layout."
       };
     } catch (err) {
-      return { 
-        ok: false, 
-        error: "Failed to capture screenshot. Ensure Node and network are available.", 
-        details: (err as Error).message 
+      const message = (err as any)?.stderr?.toString?.() || (err as Error).message || "";
+      const looksLikeMissing = /command not found|ENOENT|could not determine executable|is not installed|executable not found|browserType\.launch/i.test(message);
+      return {
+        ok: false,
+        error: looksLikeMissing
+          ? "Playwright is not installed (or its browser binaries are missing). Install with `npm i -g playwright && npx playwright install chromium`, or use `frontend.preview` instead (built-in Chrome CDP, zero extra deps)."
+          : "Failed to capture screenshot via Playwright.",
+        tip: "frontend.preview uses the Chrome DevTools Protocol directly and needs no Playwright install.",
+        details: message
       };
     }
   }
@@ -1988,25 +2306,44 @@ export class LocalToolBackend implements ToolBackend {
     const pattern = String(args.pattern ?? "").trim();
     if (!pattern) throw new Error("query_ast requires an AST pattern");
 
+    // Prefer a locally-installed binary (fast, offline-safe). The tool is published
+    // under two names: `ast-grep` (Homebrew, cargo) and `sg` (older binary name).
+    const localBin = isCommandAvailable("ast-grep")
+      ? "ast-grep"
+      : isCommandAvailable("sg")
+      ? "sg"
+      : null;
+
+    const escapedPattern = pattern.replace(/"/g, '\\"');
+    const command = localBin
+      ? `${localBin} run --pattern "${escapedPattern}"`
+      : `npx --yes @ast-grep/cli run --pattern "${escapedPattern}"`;
+
     try {
-      // Use ast-grep (sg) via npx for zero-config deep search
-      const { stdout } = await execAsync(`npx --yes @ast-grep/cli run --pattern "${pattern.replace(/"/g, '\\"')}"`, { 
-        cwd: this.workspaceRoot 
-      });
-      
+      const { stdout } = await execAsync(command, { cwd: this.workspaceRoot });
+
       const lines = stdout.split("\n").filter(Boolean);
       return {
         ok: true,
         pattern,
         matchesFound: lines.length,
-        preview: lines.slice(0, 15).join("\n")
+        preview: lines.slice(0, 15).join("\n"),
+        backend: localBin ?? "npx"
       };
     } catch (err: any) {
       if (err.stdout) {
-        // ast-grep might return non-zero if no matches
-        return { ok: true, pattern, matchesFound: 0, preview: err.stdout };
+        // ast-grep returns non-zero when there are zero matches — that's not an error.
+        return { ok: true, pattern, matchesFound: 0, preview: err.stdout, backend: localBin ?? "npx" };
       }
-      return { ok: false, error: "ast-grep failed to execute.", details: err.message };
+      const message = err.stderr?.toString?.() || err.message || "";
+      if (!localBin && /command not found|ENOENT|is not installed|could not determine/i.test(message)) {
+        return {
+          ok: false,
+          error: "ast-grep is not installed and the npx fallback could not fetch it. Install locally with `brew install ast-grep` (macOS), `cargo install ast-grep --locked`, or `npm i -g @ast-grep/cli`.",
+          hint: "Once installed, Mesh will auto-detect the `ast-grep` binary and skip the slow npx fetch."
+        };
+      }
+      return { ok: false, error: "ast-grep failed to execute.", details: message };
     }
   }
 
@@ -2268,6 +2605,142 @@ session.on('Debugger.paused', async (message) => {
     }
 
     return { ok: false, error: "Sub-agent reached max iterations without a final summary." };
+  }
+
+  private async raceFixes(args: Record<string, unknown>, onProgress?: (chunk: string) => void): Promise<unknown> {
+    const task = String(args.task ?? "").trim();
+    const verificationCommand = String(args.verificationCommand ?? "").trim();
+    const candidateCount = Math.max(1, Math.min(Number(args.candidates) || 3, 5));
+
+    if (!task || !verificationCommand) throw new Error("race_fixes requires task and verificationCommand");
+    if (!this.config) throw new Error("Agent configuration not available.");
+
+    onProgress?.(`[Multiverse] Racing ${candidateCount} candidates for task: "${task}"\n`);
+
+    const llm = new BedrockLlmClient({
+      endpointBase: this.config.bedrock.endpointBase,
+      modelId: this.config.bedrock.modelId,
+      bearerToken: this.config.bedrock.bearerToken,
+      temperature: 0.7,
+      maxTokens: 4096
+    });
+    const context = await this.workspaceIndex.search(task, "bug", Math.max(2, candidateCount)).catch(() => null);
+    const contextBlock = context?.results?.length
+      ? context.results
+          .slice(0, 5)
+          .map((result) => [
+            `- ${result.file}`,
+            `  purpose: ${result.purpose}`,
+            result.citations.length > 0
+              ? `  signals: ${result.citations.map((citation) => citation.whyMatched.join(", ")).join(" | ")}`
+              : null
+          ].filter(Boolean).join("\n"))
+          .join("\n")
+      : "No high-confidence codebase matches were found.";
+
+    const strategies = [
+      "Minimal Intervention: Fix the error with as few changes as possible.",
+      "Complete Refactoring: Clean up the code and improve architecture while fixing.",
+      "Robust Error-Handling: Add defensive checks and try-catch blocks.",
+      "Performance Focus: Optimize for speed and memory.",
+      "Standard idiomatic approach: Use common patterns."
+    ];
+
+    const results = await Promise.all(Array.from({ length: candidateCount }).map(async (_, i) => {
+      const strategy = strategies[i % strategies.length];
+      onProgress?.(`[Candidate ${i + 1}] Generating fix with strategy: ${strategy.split(":")[0]}...\n`);
+
+      const prompt = `You are an expert engineer.
+Task: ${task}
+Strategy: ${strategy}
+Relevant codebase context:
+${contextBlock}
+
+Generate a standard git patch (diff) to solve the problem.
+Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
+
+      try {
+        const response = await llm.converse([{ role: "user", content: [{ text: prompt }] }], [], "Respond only with a raw git patch.");
+        if (response.kind !== "text") {
+          return { id: i, status: "error", error: "LLM failed to generate text." };
+        }
+
+        const patch = response.text.trim();
+        if (!patch) return { id: i, status: "error", error: "LLM returned empty patch." };
+
+        const tlRes = await this.timelines.create({ name: `race-${i}-${Date.now().toString(36)}` });
+        const timelineId = tlRes.timeline.id;
+
+        onProgress?.(`[Candidate ${i + 1}] Applying patch to ${timelineId}...\n`);
+        const applyRes = await this.timelines.applyPatch({ timelineId, patch });
+        if (!applyRes.ok) {
+          return {
+            id: i,
+            timelineId,
+            strategy: strategy.split(":")[0],
+            status: "rejected",
+            error: "Patch rejected.",
+            score: -1000,
+            metrics: { changedLines: 0, warningCount: 0, durationMs: 0 }
+          };
+        }
+
+        onProgress?.(`[Candidate ${i + 1}] Running verification: ${verificationCommand}...\n`);
+        const runRes = await this.timelines.run({ timelineId, command: verificationCommand });
+        const comparison = await this.timelines.compare({ timelineIds: [timelineId] });
+        const summary = comparison.comparisons[0] as Record<string, unknown> | undefined;
+        const changedLines = Number(summary?.changedLineCount ?? 0);
+        const warningCount = countWarnings(`${runRes.stdout}\n${runRes.stderr}`);
+        const durationMs = Number(summary?.commandDurationMs ?? runRes.commandRecord.durationMs ?? 0);
+        const score = computeRaceScore({
+          passed: runRes.ok,
+          changedLines,
+          warningCount,
+          durationMs
+        });
+
+        return {
+          id: i,
+          timelineId,
+          strategy: strategy.split(":")[0],
+          status: runRes.ok ? "passed" : "failed",
+          exitCode: runRes.exitCode,
+          verdict: runRes.ok ? "pass" : "fail",
+          score,
+          metrics: {
+            changedFiles: Array.isArray(summary?.changedFiles) ? summary?.changedFiles : [],
+            changedLines,
+            warningCount,
+            durationMs
+          },
+          comparison: summary
+        };
+      } catch (err) {
+        return {
+          id: i,
+          timelineId: undefined,
+          strategy: strategy.split(":")[0],
+          status: "error",
+          error: (err as Error).message,
+          score: -1000,
+          metrics: { changedLines: 0, warningCount: 0, durationMs: 0 }
+        };
+      }
+    }));
+
+    const rankedResults = [...results].sort((left, right) => Number(right.score ?? -Infinity) - Number(left.score ?? -Infinity));
+    const winner = rankedResults.find((result) => result.verdict === "pass") ?? rankedResults[0] ?? null;
+
+    return {
+      ok: true,
+      task,
+      verificationCommand,
+      context: context?.topMatches ?? [],
+      winnerTimelineId: winner?.timelineId ?? null,
+      winnerStrategy: winner?.strategy ?? null,
+      results: rankedResults,
+      note: "Multiverse racing complete. Review the ranked candidates and promote the winner with workspace.timeline_promote."
+    };
   }
 
   private async askCodebase(args: Record<string, unknown>, onProgress?: (msg: string) => void): Promise<unknown> {
@@ -2733,6 +3206,1385 @@ session.on('Debugger.paused', async (message) => {
 
   private async getIndexStatus(): Promise<unknown> {
     return this.workspaceIndex.status();
+  }
+
+  private meshArtifactPath(...parts: string[]): string {
+    return path.join(this.workspaceRoot, ".mesh", ...parts);
+  }
+
+  private async digitalTwin(args: Record<string, unknown> = {}): Promise<unknown> {
+    const action = String(args.action ?? "build");
+    const twinPath = this.meshArtifactPath("digital-twin.json");
+    if (action === "read" || action === "status") {
+      const existing = await readJsonFile<any | null>(twinPath, null);
+      if (!existing) return { ok: false, status: "missing", path: twinPath, message: "Digital Twin has not been built yet." };
+      return action === "status"
+        ? {
+            ok: true,
+            path: twinPath,
+            builtAt: existing.builtAt,
+            files: existing.files?.total ?? 0,
+            symbols: existing.symbols?.length ?? 0,
+            routes: existing.routes?.length ?? 0,
+            riskHotspots: existing.riskHotspots?.length ?? 0
+          }
+        : { ok: true, path: twinPath, twin: existing };
+    }
+
+    const files = await collectFiles(this.workspaceRoot, 10000, this.workspaceRoot);
+    const relativeFiles = files.map((file) => toPosixRelative(this.workspaceRoot, file));
+    const sourceFiles = relativeFiles.filter((file) => /\.(ts|tsx|js|jsx|mjs|cjs)$/.test(file));
+    const testFiles = relativeFiles.filter((file) => /(^|\/)(test|tests|__tests__)\/|(\.test|\.spec)\.(ts|tsx|js|jsx|mjs|cjs)$/.test(file));
+    const configFiles = relativeFiles.filter((file) => /(^|\/)(package\.json|tsconfig\.json|vite\.config|next\.config|tailwind\.config|Dockerfile|docker-compose|cloudbuild|render\.yaml|vercel\.json|netlify\.toml|\.env\.example|\.github\/workflows)/.test(file));
+    const envFiles = relativeFiles.filter((file) => /(^|\/)\.env(\.example|\.local|\.development|\.production)?$/.test(file));
+    const symbols: Array<Record<string, unknown>> = [];
+    const routes: Array<Record<string, unknown>> = [];
+    const riskHotspots: Array<Record<string, unknown>> = [];
+
+    for (const rel of sourceFiles.slice(0, 1500)) {
+      const absolutePath = ensureInsideRoot(this.workspaceRoot, rel);
+      const raw = await fs.readFile(absolutePath, "utf8").catch(() => "");
+      if (!raw) continue;
+      for (const symbol of extractSymbolHints(raw).slice(0, 40)) {
+        symbols.push({ file: rel, ...symbol });
+      }
+      for (const route of extractRouteHints(raw)) {
+        routes.push({ file: rel, ...route });
+      }
+      const risks = detectRiskHints(rel, raw);
+      if (risks.length > 0) {
+        riskHotspots.push({ file: rel, risks, score: risks.length });
+      }
+    }
+
+    const packageJson = await readJsonFile<any | null>(path.join(this.workspaceRoot, "package.json"), null);
+    const env = await this.collectEnvNames(envFiles);
+    const git = await this.getGitStatus();
+    const index = await this.workspaceIndex.status();
+    const twin = {
+      schemaVersion: 1,
+      builtAt: new Date().toISOString(),
+      workspaceRoot: this.workspaceRoot,
+      workspaceName: path.basename(this.workspaceRoot),
+      index,
+      files: {
+        total: relativeFiles.length,
+        source: sourceFiles.length,
+        tests: testFiles.length,
+        config: configFiles.length
+      },
+      package: packageJson
+        ? {
+            name: packageJson.name,
+            version: packageJson.version,
+            scripts: packageJson.scripts ?? {},
+            dependencies: Object.keys(packageJson.dependencies ?? {}),
+            devDependencies: Object.keys(packageJson.devDependencies ?? {})
+          }
+        : null,
+      env,
+      deploy: {
+        configs: configFiles.filter((file) => /Dockerfile|docker-compose|cloudbuild|render\.yaml|vercel\.json|netlify\.toml|\.github\/workflows/.test(file)),
+        scripts: Object.entries(packageJson?.scripts ?? {})
+          .filter(([name, value]) => /deploy|publish|release|build|start/i.test(`${name} ${value}`))
+          .map(([name, value]) => ({ name, command: value }))
+      },
+      tests: testFiles.slice(0, 250),
+      routes: routes.slice(0, 250),
+      symbols: symbols.slice(0, 1000),
+      riskHotspots: riskHotspots.sort((left: any, right: any) => right.score - left.score).slice(0, 100),
+      git
+    };
+
+    await writeJsonFile(twinPath, twin);
+    return { ok: true, path: twinPath, twin };
+  }
+
+  private async collectEnvNames(envFiles: string[]): Promise<Record<string, string[]>> {
+    const result: Record<string, string[]> = {};
+    for (const rel of envFiles) {
+      const raw = await fs.readFile(ensureInsideRoot(this.workspaceRoot, rel), "utf8").catch(() => "");
+      result[rel] = uniqueStrings(raw
+        .split(/\r?\n/g)
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith("#"))
+        .map((line) => line.split("=")[0]?.trim()), 200);
+    }
+    return result;
+  }
+
+  private async predictiveRepair(args: Record<string, unknown> = {}, onProgress?: (chunk: string) => void): Promise<unknown> {
+    const action = String(args.action ?? "analyze");
+    const repairPath = this.meshArtifactPath("predictive-repair.json");
+    const existing = await readJsonFile<any>(repairPath, {
+      schemaVersion: 1,
+      updatedAt: null,
+      queue: [],
+      history: []
+    });
+
+    if (action === "status") {
+      return { ok: true, path: repairPath, ...existing };
+    }
+    if (action === "clear") {
+      const cleared = { schemaVersion: 1, updatedAt: new Date().toISOString(), queue: [], history: existing.history ?? [] };
+      await writeJsonFile(repairPath, cleared);
+      return { ok: true, path: repairPath, ...cleared };
+    }
+
+    onProgress?.("[Predictive Repair] Running diagnostics and loading repo memory...\n");
+    const diagnostics: any = await this.getDiagnostics().catch((error) => ({ ok: false, output: (error as Error).message }));
+    const memory: any = await this.engineeringMemory({ action: "read" }).catch(() => ({ memory: null }));
+    const twinResult: any = await this.digitalTwin({ action: "build" }).catch(() => null);
+    const outputText = String(diagnostics.output ?? diagnostics.stderr ?? diagnostics.stdout ?? "");
+    const referencedFiles = uniqueStrings(Array.from(outputText.matchAll(/([A-Za-z0-9_./-]+\.(?:ts|tsx|js|jsx|mjs|cjs))(?::(\d+))?/g)).map((match) => match[1]), 25);
+    const dirtyFiles = await this.readDirtyFilesForMemory();
+    const riskFiles = new Set((twinResult?.twin?.riskHotspots ?? []).map((entry: any) => entry.file));
+    const queue = referencedFiles.length > 0 || !diagnostics.ok
+      ? [{
+          id: `repair-${Date.now().toString(36)}`,
+          createdAt: new Date().toISOString(),
+          status: "prepared",
+          source: "diagnostics",
+          verificationCommand: String(args.verificationCommand ?? this.defaultVerificationCommand(twinResult?.twin)),
+          summary: diagnostics.ok
+            ? "Diagnostics are currently clean; no repair candidate required."
+            : "Diagnostics failed; prepare a timeline-first repair.",
+          files: referencedFiles.length > 0 ? referencedFiles : dirtyFiles.slice(0, 10),
+          riskFiles: referencedFiles.filter((file) => riskFiles.has(file)),
+          diagnostics: outputText.slice(0, 8000),
+          recommendedTool: "agent.race_fixes"
+        }]
+      : [];
+    const state = {
+      schemaVersion: 1,
+      updatedAt: new Date().toISOString(),
+      diagnosticsOk: Boolean(diagnostics.ok),
+      memoryDigest: memory?.memory?.rules?.slice?.(0, 10) ?? [],
+      queue,
+      history: [...(existing.history ?? []), ...(queue.length > 0 ? queue : [])].slice(-50)
+    };
+    await writeJsonFile(repairPath, state);
+    return { ok: true, path: repairPath, ...state };
+  }
+
+  private async recordPredictiveRepairSignal(file: string, diagnostics: unknown): Promise<void> {
+    const repairPath = this.meshArtifactPath("predictive-repair.json");
+    const existing = await readJsonFile<any>(repairPath, {
+      schemaVersion: 1,
+      updatedAt: null,
+      queue: [],
+      history: []
+    });
+    const outputText = String((diagnostics as any)?.output ?? (diagnostics as any)?.stderr ?? (diagnostics as any)?.stdout ?? "");
+    const item = {
+      id: `repair-${Date.now().toString(36)}`,
+      createdAt: new Date().toISOString(),
+      status: "prepared",
+      source: "watcher",
+      summary: `Diagnostics changed after editing ${file}.`,
+      files: uniqueStrings([file], 10),
+      diagnostics: outputText.slice(0, 8000),
+      recommendedTool: "agent.race_fixes"
+    };
+    const queue = [item, ...(existing.queue ?? [])].slice(0, 25);
+    const state = {
+      ...existing,
+      updatedAt: item.createdAt,
+      diagnosticsOk: false,
+      queue,
+      history: [item, ...(existing.history ?? [])].slice(0, 50)
+    };
+    await writeJsonFile(repairPath, state);
+  }
+
+  private async engineeringMemory(args: Record<string, unknown> = {}): Promise<unknown> {
+    const action = String(args.action ?? "read");
+    const memoryPath = this.meshArtifactPath("engineering-memory.json");
+    const memory = await readJsonFile<any>(memoryPath, {
+      schemaVersion: 1,
+      updatedAt: null,
+      rules: [],
+      riskModules: [],
+      reviewerPreferences: [],
+      acceptedPatterns: [],
+      rejectedPatterns: [],
+      events: []
+    });
+
+    if (action === "record") {
+      const event = {
+        id: `mem-${Date.now().toString(36)}`,
+        at: new Date().toISOString(),
+        outcome: String(args.outcome ?? "neutral"),
+        note: String(args.note ?? "").trim(),
+        rule: String(args.rule ?? "").trim(),
+        files: Array.isArray(args.files) ? args.files.map(String) : []
+      };
+      memory.events.unshift(event);
+      if (event.rule) memory.rules = uniqueStrings([event.rule, ...memory.rules], 100);
+      if (event.outcome === "accepted" && event.note) memory.acceptedPatterns = uniqueStrings([event.note, ...memory.acceptedPatterns], 100);
+      if (event.outcome === "rejected" && event.note) memory.rejectedPatterns = uniqueStrings([event.note, ...memory.rejectedPatterns], 100);
+      memory.riskModules = uniqueStrings([...event.files, ...memory.riskModules], 100);
+      memory.updatedAt = event.at;
+      await writeJsonFile(memoryPath, memory);
+      return { ok: true, path: memoryPath, memory };
+    }
+
+    if (action === "learn") {
+      const twinResult: any = await this.digitalTwin({ action: "build" }).catch(() => null);
+      const dirtyFiles = await this.readDirtyFilesForMemory();
+      const learnedRules = [
+        "Prefer timeline verification for changes touching agent runtime, shell execution, auth, secrets, or persistence.",
+        "Use the Digital Twin risk hotspots before broad refactors.",
+        "Keep docs status aligned with implemented tool surfaces."
+      ];
+      memory.rules = uniqueStrings([...learnedRules, ...memory.rules], 100);
+      memory.riskModules = uniqueStrings([
+        ...dirtyFiles,
+        ...((twinResult?.twin?.riskHotspots ?? []).map((entry: any) => entry.file)),
+        ...memory.riskModules
+      ], 100);
+      memory.updatedAt = new Date().toISOString();
+      memory.events.unshift({
+        id: `learn-${Date.now().toString(36)}`,
+        at: memory.updatedAt,
+        outcome: "neutral",
+        note: "Learned repository heuristics from Digital Twin, dirty files, and risk hotspots.",
+        files: dirtyFiles
+      });
+      memory.events = memory.events.slice(0, 100);
+      await writeJsonFile(memoryPath, memory);
+      return { ok: true, path: memoryPath, memory };
+    }
+
+    return { ok: true, path: memoryPath, memory };
+  }
+
+  private async intentCompile(args: Record<string, unknown>): Promise<unknown> {
+    const intent = String(args.intent ?? "").trim();
+    if (!intent) throw new Error("workspace.intent_compile requires intent");
+    const twinResult: any = await this.digitalTwin({ action: "build" });
+    const memoryResult: any = await this.engineeringMemory({ action: "read" });
+    const search: any = await this.workspaceIndex.search(intent, "edit-impact", 8).catch(() => ({ results: [], topMatches: [] }));
+    const likelyFiles = uniqueStrings([
+      ...((search.results ?? []).map((result: any) => result.file)),
+      ...((twinResult.twin?.riskHotspots ?? []).slice(0, 5).map((entry: any) => entry.file))
+    ], 20);
+    const verificationCommand = String(args.verificationCommand ?? this.defaultVerificationCommand(twinResult.twin));
+    const contract = {
+      schemaVersion: 1,
+      compiledAt: new Date().toISOString(),
+      intent,
+      likelyFiles,
+      phases: [
+        "Confirm behavior and public surface from the Digital Twin.",
+        "Implement the smallest vertical change that satisfies the intent.",
+        "Update tests/docs for changed behavior.",
+        "Verify in a timeline or with the declared verification command.",
+        "Record accepted/rejected lessons in Engineering Memory."
+      ],
+      interfaces: this.inferIntentInterfaces(intent, twinResult.twin),
+      tests: this.inferIntentTests(intent, twinResult.twin),
+      risks: this.inferIntentRisks(intent, twinResult.twin, likelyFiles),
+      rollout: {
+        verificationCommand,
+        rollback: "Use workspace.semantic_undo or promote only verified timelines.",
+        monitoring: "Check cockpit snapshot after implementation for diagnostics, risk hotspots, and repair queue."
+      },
+      memoryRules: memoryResult.memory?.rules?.slice?.(0, 8) ?? [],
+      topMatches: search.topMatches ?? []
+    };
+    const contractPath = this.meshArtifactPath("intent-compiler", "latest.json");
+    await writeJsonFile(contractPath, contract);
+    return { ok: true, path: contractPath, contract };
+  }
+
+  private async cockpitSnapshot(): Promise<unknown> {
+    const [index, git, twinStatus, repair, memory, timelines, causalStatus, discoveryStatus, realityStatus, ghostStatus] = await Promise.all([
+      this.workspaceIndex.status().catch((error) => ({ ok: false, error: (error as Error).message })),
+      this.getGitStatus(),
+      this.digitalTwin({ action: "status" }).catch((error) => ({ ok: false, error: (error as Error).message })),
+      this.predictiveRepair({ action: "status" }).catch((error) => ({ ok: false, error: (error as Error).message })),
+      this.engineeringMemory({ action: "read" }).catch((error) => ({ ok: false, error: (error as Error).message })),
+      this.timelines.list().catch((error) => ({ ok: false, timelines: [], error: (error as Error).message })),
+      this.causalIntelligence({ action: "status" }).catch((error) => ({ ok: false, error: (error as Error).message })),
+      this.discoveryLab({ action: "status" }).catch((error) => ({ ok: false, error: (error as Error).message })),
+      this.realityFork({ action: "status" }).catch((error) => ({ ok: false, error: (error as Error).message })),
+      this.ghostEngineer({ action: "status" }).catch((error) => ({ ok: false, error: (error as Error).message }))
+    ]);
+    const runtimeRuns = await this.listRuntimeRuns();
+    return {
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      index,
+      git,
+      digitalTwin: twinStatus,
+      predictiveRepair: repair,
+      engineeringMemory: memory,
+      causalIntelligence: causalStatus,
+      discoveryLab: discoveryStatus,
+      realityFork: realityStatus,
+      ghostEngineer: ghostStatus,
+      timelines,
+      runtimeRuns,
+      health: this.scoreCockpitHealth({ index, repair, timelines, runtimeRuns })
+    };
+  }
+
+  private async causalIntelligence(args: Record<string, unknown> = {}, onProgress?: (chunk: string) => void): Promise<unknown> {
+    const action = String(args.action ?? "build");
+    const graphPath = this.meshArtifactPath("causal-intelligence.json");
+    const existing = await readJsonFile<any | null>(graphPath, null);
+
+    if (action === "status") {
+      if (!existing) return { ok: false, status: "missing", path: graphPath };
+      return {
+        ok: true,
+        path: graphPath,
+        builtAt: existing.builtAt,
+        nodes: existing.nodes?.length ?? 0,
+        edges: existing.edges?.length ?? 0,
+        insights: existing.insights?.length ?? 0,
+        topSeverity: existing.insights?.[0]?.severity ?? "none"
+      };
+    }
+
+    if (action === "read") {
+      if (!existing) return { ok: false, status: "missing", path: graphPath };
+      return { ok: true, path: graphPath, graph: existing };
+    }
+
+    if (action === "query") {
+      const query = String(args.query ?? "").trim();
+      if (!query) throw new Error("workspace.causal_intelligence query action requires query");
+      const graph = existing ?? await this.buildCausalGraph(onProgress);
+      if (!existing) await writeJsonFile(graphPath, graph);
+      return { ok: true, path: graphPath, query, ...this.answerCausalQuery(query, graph) };
+    }
+
+    const graph = await this.buildCausalGraph(onProgress);
+    await writeJsonFile(graphPath, graph);
+    return { ok: true, path: graphPath, graph };
+  }
+
+  private async buildCausalGraph(onProgress?: (chunk: string) => void): Promise<Record<string, any>> {
+    onProgress?.("[Causal Intelligence] Building causal graph from twin, memory, repairs, and git pressure...\n");
+    const [twinResult, memoryResult, repairStatus, dirtyFiles, churn] = await Promise.all([
+      this.digitalTwin({ action: "build" }).catch((error) => ({ ok: false, error: (error as Error).message })),
+      this.engineeringMemory({ action: "read" }).catch(() => ({ memory: null })),
+      this.predictiveRepair({ action: "status" }).catch(() => ({ queue: [] })),
+      this.readDirtyFilesForMemory(),
+      this.readGitChurn()
+    ]);
+
+    const twin = (twinResult as any).twin ?? {};
+    const memory = (memoryResult as any).memory ?? {};
+    const repair = repairStatus as any;
+    const tests = Array.isArray(twin.tests) ? twin.tests.map(String) : [];
+    const riskHotspots = Array.isArray(twin.riskHotspots) ? twin.riskHotspots : [];
+    const routes = Array.isArray(twin.routes) ? twin.routes : [];
+    const symbols = Array.isArray(twin.symbols) ? twin.symbols : [];
+    const repairQueue = Array.isArray(repair.queue) ? repair.queue : [];
+    const repairFiles = uniqueStrings(repairQueue.flatMap((item: any) => Array.isArray(item.files) ? item.files.map(String) : []), 250);
+    const allKnownFiles = uniqueStrings([
+      ...symbols.map((entry: any) => String(entry.file ?? "")),
+      ...routes.map((entry: any) => String(entry.file ?? "")),
+      ...riskHotspots.map((entry: any) => String(entry.file ?? "")),
+      ...tests,
+      ...((twin.deploy?.configs ?? []) as string[]),
+      ...dirtyFiles,
+      ...repairFiles,
+      ...((memory.riskModules ?? []) as string[])
+    ], 1500);
+
+    const nodes = new Map<string, Record<string, unknown>>();
+    const edges = new Map<string, Record<string, unknown>>();
+    const addNode = (node: Record<string, unknown>) => {
+      const id = String(node.id ?? "");
+      if (!id) return;
+      nodes.set(id, { ...(nodes.get(id) ?? {}), ...node });
+    };
+    const addEdge = (edge: Record<string, unknown>) => {
+      const from = String(edge.from ?? "");
+      const to = String(edge.to ?? "");
+      const type = String(edge.type ?? "related_to");
+      if (!from || !to) return;
+      edges.set(`${from}->${type}->${to}`, { ...edge, from, to, type });
+    };
+
+    addNode({ id: "workspace", type: "workspace", label: path.basename(this.workspaceRoot), weight: 100 });
+
+    for (const file of allKnownFiles) {
+      const relatedTests = relatedTestsForFile(file, tests);
+      addNode({
+        id: `file:${file}`,
+        type: "file",
+        label: file,
+        file,
+        weight: 10 + Math.min(30, Number(churn[file] ?? 0) * 3),
+        metadata: {
+          dirty: dirtyFiles.includes(file),
+          churn: churn[file] ?? 0,
+          tests: relatedTests
+        }
+      });
+      addEdge({ from: "workspace", to: `file:${file}`, type: "contains", weight: 1 });
+      for (const test of relatedTests) {
+        addNode({ id: `file:${test}`, type: "test", label: test, file: test, weight: 8 });
+        addEdge({ from: `file:${file}`, to: `file:${test}`, type: "covered_by", weight: 0.72, evidence: "fuzzy test filename match" });
+      }
+    }
+
+    for (const symbol of symbols.slice(0, 1200)) {
+      const file = String(symbol.file ?? "");
+      const name = String(symbol.name ?? "");
+      if (!file || !name) continue;
+      const id = `symbol:${file}:${name}`;
+      addNode({ id, type: "symbol", label: name, file, line: symbol.line, weight: 5 });
+      addEdge({ from: `file:${file}`, to: id, type: "defines", weight: 0.6 });
+    }
+
+    for (const route of routes.slice(0, 300)) {
+      const file = String(route.file ?? "");
+      const routePath = String(route.route ?? "");
+      if (!file || !routePath) continue;
+      const id = `route:${file}:${route.method ?? "ANY"}:${routePath}`;
+      addNode({ id, type: "route", label: `${route.method ?? "ANY"} ${routePath}`, file, line: route.line, weight: 12 });
+      addEdge({ from: `file:${file}`, to: id, type: "exposes_runtime_path", weight: 0.85 });
+    }
+
+    for (const hotspot of riskHotspots) {
+      const file = String(hotspot.file ?? "");
+      const risks = Array.isArray(hotspot.risks) ? hotspot.risks.map(String) : [];
+      for (const risk of risks) {
+        const riskId = `risk:${slugifyId(risk)}`;
+        addNode({ id: riskId, type: "risk", label: risk, weight: 20 });
+        addEdge({ from: `file:${file}`, to: riskId, type: "has_risk", weight: 0.9, evidence: risk });
+      }
+    }
+
+    for (const [index, rule] of ((memory.rules ?? []) as string[]).slice(0, 80).entries()) {
+      const ruleId = `rule:${index}:${slugifyId(rule)}`;
+      addNode({ id: ruleId, type: "rule", label: rule, weight: 15 });
+      addEdge({ from: "workspace", to: ruleId, type: "governed_by", weight: 0.7 });
+      for (const file of ((memory.riskModules ?? []) as string[]).slice(0, 80)) {
+        addEdge({ from: `file:${file}`, to: ruleId, type: "governed_by", weight: 0.55 });
+      }
+    }
+
+    for (const item of repairQueue.slice(0, 30)) {
+      const repairId = `repair:${item.id ?? slugifyId(String(item.summary ?? "repair"))}`;
+      addNode({ id: repairId, type: "repair", label: String(item.summary ?? "Prepared repair"), weight: 35, metadata: item });
+      for (const file of Array.isArray(item.files) ? item.files.map(String) : []) {
+        addEdge({ from: repairId, to: `file:${file}`, type: "targets", weight: 0.95, evidence: "predictive repair queue" });
+      }
+    }
+
+    for (const [file, count] of Object.entries(churn)) {
+      if (!allKnownFiles.includes(file)) continue;
+      const id = `change:${file}`;
+      addNode({ id, type: "change_pressure", label: `${file} churn ${count}`, file, weight: Number(count) });
+      addEdge({ from: id, to: `file:${file}`, type: "changed_recently", weight: Math.min(1, Number(count) / 10), evidence: `${count} recent commits` });
+    }
+
+    const insights = this.generateCausalInsights({ allKnownFiles, twin, memory, repairQueue, dirtyFiles, churn, tests });
+    return {
+      schemaVersion: 1,
+      builtAt: new Date().toISOString(),
+      workspaceRoot: this.workspaceRoot,
+      workspaceName: path.basename(this.workspaceRoot),
+      nodes: Array.from(nodes.values()),
+      edges: Array.from(edges.values()),
+      insights,
+      stats: {
+        nodes: nodes.size,
+        edges: edges.size,
+        files: allKnownFiles.length,
+        routes: routes.length,
+        symbols: symbols.length,
+        riskHotspots: riskHotspots.length,
+        repairItems: repairQueue.length,
+        memoryRules: (memory.rules ?? []).length
+      },
+      sources: {
+        digitalTwinBuiltAt: twin.builtAt ?? null,
+        engineeringMemoryUpdatedAt: memory.updatedAt ?? null,
+        predictiveRepairUpdatedAt: repair.updatedAt ?? null
+      }
+    };
+  }
+
+  private generateCausalInsights(args: {
+    allKnownFiles: string[];
+    twin: any;
+    memory: any;
+    repairQueue: any[];
+    dirtyFiles: string[];
+    churn: Record<string, number>;
+    tests: string[];
+  }): Array<Record<string, unknown>> {
+    const riskByFile = new Map<string, string[]>((args.twin.riskHotspots ?? []).map((entry: any) => [String(entry.file), Array.isArray(entry.risks) ? entry.risks.map(String) : []]));
+    const routesByFile = new Map<string, any[]>();
+    for (const route of args.twin.routes ?? []) {
+      const file = String(route.file ?? "");
+      if (!routesByFile.has(file)) routesByFile.set(file, []);
+      routesByFile.get(file)?.push(route);
+    }
+    const symbolsByFile = new Map<string, number>();
+    for (const symbol of args.twin.symbols ?? []) {
+      const file = String(symbol.file ?? "");
+      symbolsByFile.set(file, (symbolsByFile.get(file) ?? 0) + 1);
+    }
+    const repairFiles = new Set(args.repairQueue.flatMap((item: any) => Array.isArray(item.files) ? item.files.map(String) : []));
+    const insights = args.allKnownFiles
+      .map((file) => {
+        const risks = riskByFile.get(file) ?? [];
+        const tests = relatedTestsForFile(file, args.tests);
+        const churn = args.churn[file] ?? 0;
+        const routeCount = routesByFile.get(file)?.length ?? 0;
+        const symbolCount = symbolsByFile.get(file) ?? 0;
+        const dirty = args.dirtyFiles.includes(file);
+        const inRepairQueue = repairFiles.has(file);
+        let score = 0;
+        score += Math.min(40, risks.length * 18);
+        score += risks.length > 0 && tests.length === 0 ? 24 : 0;
+        score += Math.min(24, churn * 4);
+        score += dirty ? 15 : 0;
+        score += inRepairQueue ? 30 : 0;
+        score += Math.min(16, routeCount * 4);
+        score += Math.min(10, Math.floor(symbolCount / 10));
+        if (/src\/(local-tools|agent-loop|runtime-observer|timeline-manager)\.ts$/.test(file)) score += 10;
+
+        const evidence = uniqueStrings([
+          ...risks.map((risk) => `risk: ${risk}`),
+          tests.length === 0 && risks.length > 0 ? "no related test file found" : undefined,
+          churn > 0 ? `${churn} recent commits touched this file` : undefined,
+          dirty ? "currently dirty in git status" : undefined,
+          inRepairQueue ? "present in predictive repair queue" : undefined,
+          routeCount > 0 ? `${routeCount} runtime route(s)` : undefined,
+          symbolCount > 0 ? `${symbolCount} indexed symbol(s)` : undefined
+        ], 12);
+
+        return {
+          id: `causal-${slugifyId(file)}`,
+          type: inRepairQueue ? "operational-repair" : risks.length > 0 && tests.length === 0 ? "risk-without-proof" : "change-pressure",
+          title: `${file} is a causal pressure point`,
+          severity: severityLabel(score),
+          score,
+          confidence: Math.min(0.95, 0.42 + evidence.length * 0.08),
+          summary: `Changes here are likely to propagate because the file combines ${evidence.slice(0, 3).join(", ") || "repository centrality signals"}.`,
+          evidence,
+          likelyFiles: uniqueStrings([file, ...tests], 12),
+          recommendedAction: inRepairQueue
+            ? "Run workspace.predictive_repair, then race fixes in timelines before promotion."
+            : risks.length > 0 && tests.length === 0
+              ? "Add focused tests or a runtime proof before broad edits touch this file."
+              : "Use workspace.impact_map before changing this area and verify through a timeline."
+        };
+      })
+      .filter((insight) => insight.score >= 20)
+      .sort((left, right) => right.score - left.score)
+      .slice(0, 20);
+
+    if ((args.memory.rules ?? []).length > 0) {
+      insights.push({
+        id: "causal-engineering-memory",
+        type: "policy-memory",
+        title: "Engineering Memory is enforcing local repo rules",
+        severity: "medium",
+        score: 42,
+        confidence: 0.82,
+        summary: "Accepted and rejected work has become an active policy layer for future changes.",
+        evidence: (args.memory.rules ?? []).slice(0, 6),
+        likelyFiles: (args.memory.riskModules ?? []).slice(0, 10),
+        recommendedAction: "Load Engineering Memory before planning large changes and record outcomes after verification."
+      });
+    }
+
+    return insights.sort((left, right) => Number(right.score) - Number(left.score));
+  }
+
+  private answerCausalQuery(query: string, graph: any): Record<string, unknown> {
+    const tokens = tokenizeIntent(query);
+    const scoreText = (value: unknown) => {
+      const text = JSON.stringify(value ?? "").toLowerCase();
+      return tokens.reduce((score, token) => score + (text.includes(token) ? 1 : 0), 0);
+    };
+    const topInsights = [...(graph.insights ?? [])]
+      .map((insight: any) => ({ ...insight, queryScore: scoreText(insight) + Number(insight.score ?? 0) / 100 }))
+      .filter((insight: any) => insight.queryScore > 0)
+      .sort((left: any, right: any) => right.queryScore - left.queryScore)
+      .slice(0, 5);
+    const evidenceNodes = [...(graph.nodes ?? [])]
+      .map((node: any) => ({ ...node, queryScore: scoreText(node) + Number(node.weight ?? 0) / 100 }))
+      .filter((node: any) => node.queryScore > 0)
+      .sort((left: any, right: any) => right.queryScore - left.queryScore)
+      .slice(0, 12);
+    const recommendations = uniqueStrings(topInsights.map((insight: any) => String(insight.recommendedAction ?? "")), 5);
+    const answer = topInsights.length > 0
+      ? `Top causal signal: ${topInsights[0].title}. ${topInsights[0].summary}`
+      : "No direct causal match found. Build the Digital Twin and Causal Intelligence graph again after more runtime or git evidence exists.";
+    return {
+      answer,
+      topInsights,
+      evidenceNodes,
+      recommendations,
+      graphStats: graph.stats ?? {}
+    };
+  }
+
+  private async discoveryLab(args: Record<string, unknown> = {}, onProgress?: (chunk: string) => void): Promise<unknown> {
+    const action = String(args.action ?? "run");
+    const labPath = this.meshArtifactPath("discovery-lab.json");
+    const existing = await readJsonFile<any>(labPath, {
+      schemaVersion: 1,
+      ranAt: null,
+      discoveries: [],
+      history: []
+    });
+
+    if (action === "status") return { ok: true, path: labPath, ...existing };
+    if (action === "clear") {
+      const cleared = { schemaVersion: 1, ranAt: new Date().toISOString(), discoveries: [], history: existing.history ?? [] };
+      await writeJsonFile(labPath, cleared);
+      return { ok: true, path: labPath, ...cleared };
+    }
+
+    const maxDiscoveries = Math.max(1, Math.min(Number(args.maxDiscoveries) || 8, 20));
+    onProgress?.("[Discovery Lab] Running causal scan and repair analysis...\n");
+    const verificationCommand = String(args.verificationCommand ?? "");
+    const [causalResult, repairResult] = await Promise.all([
+      this.causalIntelligence({ action: "build" }, onProgress),
+      this.predictiveRepair({ action: "analyze", verificationCommand: verificationCommand || undefined }, onProgress).catch((error) => ({ ok: false, queue: [], error: (error as Error).message }))
+    ]);
+    const graph = (causalResult as any).graph;
+    const defaultCommand = verificationCommand || this.defaultVerificationCommand((await this.digitalTwin({ action: "read" }).catch(() => ({ twin: null })) as any).twin);
+    const discoveries = this.generateLabDiscoveries(graph, repairResult, defaultCommand).slice(0, maxDiscoveries);
+    const state = {
+      schemaVersion: 1,
+      ranAt: new Date().toISOString(),
+      summary: {
+        discoveries: discoveries.length,
+        critical: discoveries.filter((item: any) => item.severity === "critical").length,
+        high: discoveries.filter((item: any) => item.severity === "high").length,
+        verificationCommand: defaultCommand
+      },
+      discoveries,
+      history: [...discoveries, ...(existing.history ?? [])].slice(0, 100)
+    };
+    await writeJsonFile(labPath, state);
+    return { ok: true, path: labPath, ...state };
+  }
+
+  private generateLabDiscoveries(graph: any, repairResult: unknown, verificationCommand: string): Array<Record<string, unknown>> {
+    const repairQueue = Array.isArray((repairResult as any)?.queue) ? (repairResult as any).queue : [];
+    const repairDiscoveries = repairQueue.map((item: any, index: number) => ({
+      id: `lab-repair-${index}-${slugifyId(String(item.id ?? item.summary ?? "repair"))}`,
+      type: "prepared-repair",
+      severity: "high",
+      score: 90 - index,
+      confidence: 0.86,
+      hypothesis: String(item.summary ?? "Diagnostics can be converted into a verified repair."),
+      evidence: uniqueStrings([
+        "Predictive Repair produced a prepared queue item.",
+        ...(Array.isArray(item.files) ? item.files.map((file: string) => `file: ${file}`) : []),
+        String(item.diagnostics ?? "").slice(0, 500)
+      ], 8),
+      experiment: {
+        steps: [
+          "Inspect the referenced files and diagnostics.",
+          "Generate 3 candidate fixes with agent.race_fixes.",
+          "Promote only a passing timeline."
+        ],
+        verificationCommand: item.verificationCommand ?? verificationCommand,
+        recommendedTool: "agent.race_fixes",
+        rollback: "Do not promote a failed timeline."
+      },
+      files: Array.isArray(item.files) ? item.files : []
+    }));
+
+    const causalDiscoveries = (graph.insights ?? []).map((insight: any, index: number) => ({
+      id: `lab-causal-${index}-${slugifyId(String(insight.id ?? insight.title ?? "insight"))}`,
+      type: "causal-opportunity",
+      severity: insight.severity,
+      score: Number(insight.score ?? 0),
+      confidence: insight.confidence ?? 0.7,
+      hypothesis: `Reducing "${insight.title}" will lower future change risk or increase delivery speed.`,
+      evidence: insight.evidence ?? [],
+      experiment: {
+        steps: [
+          "Run workspace.impact_map on the top likely file.",
+          "Add the smallest proof: focused test, runtime assertion, or architecture guard.",
+          "Verify and record the outcome in Engineering Memory."
+        ],
+        verificationCommand,
+        recommendedTool: "workspace.reality_fork",
+        rollback: "Keep the proof in a timeline until verification passes."
+      },
+      files: insight.likelyFiles ?? []
+    }));
+
+    return [...repairDiscoveries, ...causalDiscoveries]
+      .sort((left, right) => Number(right.score ?? 0) - Number(left.score ?? 0))
+      .slice(0, 20);
+  }
+
+  private async realityFork(args: Record<string, unknown> = {}, onProgress?: (chunk: string) => void): Promise<unknown> {
+    const action = String(args.action ?? "plan");
+    const forkPath = this.meshArtifactPath("reality-forks", "latest.json");
+    const existing = await readJsonFile<any | null>(forkPath, null);
+
+    if (action === "status") {
+      if (!existing) return { ok: false, status: "missing", path: forkPath };
+      return {
+        ok: true,
+        path: forkPath,
+        plannedAt: existing.plannedAt,
+        intent: existing.intent,
+        proposals: existing.proposals?.length ?? 0,
+        materialized: (existing.proposals ?? []).filter((proposal: any) => proposal.timelineId).length,
+        recommendation: existing.recommendation?.id ?? null
+      };
+    }
+
+    if (action === "clear") {
+      const cleared = { schemaVersion: 1, plannedAt: new Date().toISOString(), intent: null, proposals: [] };
+      await writeJsonFile(forkPath, cleared);
+      return { ok: true, path: forkPath, ...cleared };
+    }
+
+    const intent = String(args.intent ?? "").trim();
+    if (!intent) throw new Error("workspace.reality_fork requires intent for plan or fork actions");
+    const forks = Math.max(2, Math.min(Number(args.forks) || 4, 6));
+    onProgress?.(`[Reality Fork] Planning ${forks} alternate realities for: ${intent}\n`);
+    const [contractResult, causalResult, memoryResult] = await Promise.all([
+      this.intentCompile({ intent, verificationCommand: args.verificationCommand }),
+      this.causalIntelligence({ action: "build" }, onProgress),
+      this.engineeringMemory({ action: "read" })
+    ]);
+    const contract = (contractResult as any).contract;
+    const graph = (causalResult as any).graph;
+    const memory = (memoryResult as any).memory ?? {};
+    const verificationCommand = String(args.verificationCommand ?? contract.rollout?.verificationCommand ?? "npm test");
+    const proposals = this.buildRealityProposals({ intent, contract, graph, memory, forks, verificationCommand });
+
+    if (action === "fork") {
+      const runVerification = Boolean(args.runVerification);
+      for (const proposal of proposals) {
+        const timeline = await this.timelines.create({ name: `reality-${proposal.id}` });
+        const artifactDir = path.join(timeline.timeline.root, ".mesh", "reality-forks");
+        await fs.mkdir(artifactDir, { recursive: true });
+        await fs.writeFile(path.join(artifactDir, `${proposal.id}.json`), JSON.stringify({
+          schemaVersion: 1,
+          materializedAt: new Date().toISOString(),
+          intent,
+          proposal
+        }, null, 2), "utf8");
+        proposal.timelineId = timeline.timeline.id;
+        proposal.timelineRoot = timeline.timeline.root;
+        if (runVerification) {
+          const run = await this.timelines.run({ timelineId: timeline.timeline.id, command: verificationCommand });
+          proposal.verification = {
+            ok: run.ok,
+            exitCode: run.exitCode,
+            durationMs: run.commandRecord.durationMs
+          };
+        }
+      }
+    }
+
+    const state = {
+      schemaVersion: 1,
+      plannedAt: new Date().toISOString(),
+      intent,
+      action,
+      verificationCommand,
+      recommendation: proposals[0] ?? null,
+      proposals,
+      causalEvidence: (graph.insights ?? []).slice(0, 5).map((insight: any) => ({
+        id: insight.id,
+        title: insight.title,
+        severity: insight.severity,
+        likelyFiles: insight.likelyFiles
+      }))
+    };
+    await writeJsonFile(forkPath, state);
+    return { ok: true, path: forkPath, ...state };
+  }
+
+  private buildRealityProposals(args: {
+    intent: string;
+    contract: any;
+    graph: any;
+    memory: any;
+    forks: number;
+    verificationCommand: string;
+  }): Array<Record<string, any>> {
+    const intentTokens = tokenizeIntent(args.intent);
+    const matchingInsights = [...(args.graph.insights ?? [])]
+      .map((insight: any) => ({
+        ...insight,
+        tokenScore: intentTokens.reduce((score, token) => score + (JSON.stringify(insight).toLowerCase().includes(token) ? 1 : 0), 0)
+      }))
+      .sort((left: any, right: any) => (right.tokenScore + Number(right.score ?? 0) / 100) - (left.tokenScore + Number(left.score ?? 0) / 100));
+    const topRiskFiles = uniqueStrings(matchingInsights.flatMap((insight: any) => Array.isArray(insight.likelyFiles) ? insight.likelyFiles : []), 20);
+    const likelyFiles = uniqueStrings([...(args.contract.likelyFiles ?? []), ...topRiskFiles], 30);
+    const memoryRules = (args.memory.rules ?? []).slice(0, 8);
+    const templates = [
+      {
+        id: "minimal-proof",
+        strategy: "Minimal Proof Reality",
+        thesis: "Ship the smallest vertical slice that satisfies the intent while preserving existing boundaries.",
+        focus: likelyFiles.slice(0, 6),
+        bonus: 20
+      },
+      {
+        id: "causal-risk-collapse",
+        strategy: "Causal Risk Collapse Reality",
+        thesis: "Attack the files with the strongest causal risk signals first so the change reduces future fragility.",
+        focus: topRiskFiles.slice(0, 8),
+        bonus: 28
+      },
+      {
+        id: "test-first-proof",
+        strategy: "Test-First Reality",
+        thesis: "Create executable proof before implementation and use it to constrain the patch.",
+        focus: uniqueStrings([...(args.contract.tests ?? []), ...likelyFiles.slice(0, 5)], 10),
+        bonus: 24
+      },
+      {
+        id: "runtime-shadow",
+        strategy: "Runtime Shadow Reality",
+        thesis: "Instrument the runtime path, capture failure evidence, and then patch the observed behavior.",
+        focus: likelyFiles.filter((file) => /runtime|server|api|route|src\//i.test(file)).slice(0, 8),
+        bonus: 18
+      },
+      {
+        id: "architecture-law",
+        strategy: "Architecture Law Reality",
+        thesis: "Convert the intent into explicit constraints so future edits cannot drift across the same boundary.",
+        focus: uniqueStrings([...topRiskFiles.slice(0, 5), ...likelyFiles.slice(0, 5)], 10),
+        bonus: 16
+      },
+      {
+        id: "product-slice",
+        strategy: "Product Slice Reality",
+        thesis: "Deliver a complete user-visible slice and defer internal cleanup unless proof requires it.",
+        focus: likelyFiles.slice(0, 10),
+        bonus: 14
+      }
+    ];
+
+    return templates.slice(0, args.forks).map((template, index) => {
+      const targetFiles = uniqueStrings(template.focus.length > 0 ? template.focus : likelyFiles.slice(0, 6), 12);
+      const evidence = matchingInsights
+        .filter((insight: any) => (insight.likelyFiles ?? []).some((file: string) => targetFiles.includes(file)))
+        .slice(0, 4);
+      const riskReduction = evidence.reduce((total: number, insight: any) => total + Number(insight.score ?? 0), 0);
+      const blastRadiusPenalty = Math.max(0, targetFiles.length - 4) * 6;
+      const score = Math.round(template.bonus + riskReduction / 8 + Math.max(0, 30 - blastRadiusPenalty));
+      return {
+        id: `${index + 1}-${template.id}`,
+        strategy: template.strategy,
+        thesis: template.thesis,
+        score,
+        confidence: Math.min(0.95, 0.55 + evidence.length * 0.09 + targetFiles.length * 0.015),
+        targetFiles,
+        constraints: uniqueStrings([
+          ...(args.contract.risks ?? []).slice(0, 6),
+          ...memoryRules,
+          ...evidence.map((insight: any) => String(insight.recommendedAction ?? ""))
+        ], 14),
+        implementationContract: {
+          phases: args.contract.phases ?? [],
+          interfaces: args.contract.interfaces ?? [],
+          tests: args.contract.tests ?? [],
+          verificationCommand: args.verificationCommand,
+          rollback: args.contract.rollout?.rollback ?? "Promote only passing timelines."
+        },
+        expectedEffects: {
+          riskReduced: evidence.map((insight: any) => insight.title),
+          blastRadius: targetFiles.length <= 4 ? "narrow" : targetFiles.length <= 9 ? "moderate" : "wide",
+          proofRequired: args.contract.tests ?? ["Run verification command before promotion."]
+        },
+        promoteWhen: [
+          "Verification command passes.",
+          "Causal graph no longer reports a higher severity for the touched files.",
+          "Engineering Memory records the accepted or rejected outcome."
+        ]
+      };
+    }).sort((left, right) => right.score - left.score);
+  }
+
+  private async ghostEngineer(args: Record<string, unknown> = {}, onProgress?: (chunk: string) => void): Promise<unknown> {
+    const action = String(args.action ?? "profile");
+    const profilePath = this.meshArtifactPath("ghost-engineer", "profile.json");
+    const existing = await readJsonFile<any | null>(profilePath, null);
+
+    if (action === "status") {
+      if (!existing) return { ok: false, status: "missing", path: profilePath };
+      return {
+        ok: true,
+        path: profilePath,
+        learnedAt: existing.learnedAt,
+        commitsAnalyzed: existing.evidence?.commitsAnalyzed ?? 0,
+        dirtyFiles: existing.evidence?.dirtyFiles?.length ?? 0,
+        firstReadFiles: existing.habits?.firstReadFiles?.length ?? 0,
+        confidence: existing.confidence ?? 0
+      };
+    }
+
+    if (action === "clear") {
+      const cleared = { schemaVersion: 1, clearedAt: new Date().toISOString(), profile: null };
+      await writeJsonFile(profilePath, cleared);
+      return { ok: true, path: profilePath, ...cleared };
+    }
+
+    if (action === "learn") {
+      const profile = await this.learnGhostEngineerProfile(onProgress);
+      await writeJsonFile(profilePath, profile);
+      return { ok: true, path: profilePath, profile };
+    }
+
+    const profile = existing && existing.profile !== null ? existing : await this.learnGhostEngineerProfile(onProgress);
+    if (!existing || existing.profile === null) await writeJsonFile(profilePath, profile);
+
+    if (action === "profile") {
+      return { ok: true, path: profilePath, profile };
+    }
+
+    if (action === "predict") {
+      const goal = String(args.goal ?? "").trim();
+      if (!goal) throw new Error("workspace.ghost_engineer predict action requires goal");
+      const prediction = await this.predictGhostEngineerPath(goal, profile, String(args.verificationCommand ?? ""));
+      const predictionPath = this.meshArtifactPath("ghost-engineer", "predictions", `${Date.now().toString(36)}-${slugifyId(goal)}.json`);
+      await writeJsonFile(predictionPath, prediction);
+      return { ok: true, profilePath, path: predictionPath, prediction };
+    }
+
+    if (action === "divergence") {
+      const plan = String(args.plan ?? "").trim();
+      if (!plan) throw new Error("workspace.ghost_engineer divergence action requires plan");
+      return { ok: true, profilePath, divergence: this.evaluateGhostDivergence(plan, profile) };
+    }
+
+    if (action === "patch") {
+      const goal = String(args.goal ?? "").trim();
+      if (!goal) throw new Error("workspace.ghost_engineer patch action requires goal");
+      const prediction = await this.predictGhostEngineerPath(goal, profile, String(args.verificationCommand ?? ""));
+      const timeline = await this.timelines.create({ name: `ghost-${slugifyId(goal)}` });
+      const artifactDir = path.join(timeline.timeline.root, ".mesh", "ghost-engineer");
+      await fs.mkdir(artifactDir, { recursive: true });
+      const autopilot = {
+        schemaVersion: 1,
+        materializedAt: new Date().toISOString(),
+        goal,
+        profileDigest: prediction.profileDigest,
+        autopilotPatch: prediction.autopilotPatch,
+        predictedApproach: prediction.predictedApproach,
+        divergence: prediction.divergence,
+        promotionGates: [
+          "Implement the patch inside this timeline only.",
+          `Run ${prediction.predictedApproach.verificationCommand}.`,
+          "Compare timeline telemetry before promotion.",
+          "Record accepted/rejected outcome in Engineering Memory."
+        ]
+      };
+      const autopilotPath = path.join(artifactDir, `autopilot-${slugifyId(goal)}.json`);
+      await fs.writeFile(autopilotPath, JSON.stringify(autopilot, null, 2), "utf8");
+      const savedPath = this.meshArtifactPath("ghost-engineer", "predictions", `${Date.now().toString(36)}-${slugifyId(goal)}-autopilot.json`);
+      await writeJsonFile(savedPath, { ...autopilot, timelineId: timeline.timeline.id, timelineRoot: timeline.timeline.root });
+      return {
+        ok: true,
+        profilePath,
+        path: savedPath,
+        timelineId: timeline.timeline.id,
+        timelineRoot: timeline.timeline.root,
+        autopilot
+      };
+    }
+
+    throw new Error(`Unknown workspace.ghost_engineer action: ${action}`);
+  }
+
+  private async learnGhostEngineerProfile(onProgress?: (chunk: string) => void): Promise<Record<string, any>> {
+    onProgress?.("[Ghost Engineer] Learning local engineering style from git, memory, causal graph, and twin...\n");
+    const [twinResult, memoryResult, causalResult, dirtyFiles, gitSamples] = await Promise.all([
+      this.digitalTwin({ action: "build" }).catch(() => ({ twin: null })),
+      this.engineeringMemory({ action: "read" }).catch(() => ({ memory: null })),
+      this.causalIntelligence({ action: "build" }).catch(() => ({ graph: null })),
+      this.readDirtyFilesForMemory(),
+      this.readGitWorkSamples()
+    ]);
+    const twin = (twinResult as any).twin ?? {};
+    const memory = (memoryResult as any).memory ?? {};
+    const graph = (causalResult as any).graph ?? {};
+    const scripts = twin.package?.scripts ?? {};
+    const touchedFiles = gitSamples.flatMap((sample) => sample.files);
+    const fileFrequency = this.rankStrings([...touchedFiles, ...dirtyFiles, ...((memory.riskModules ?? []) as string[])], 40);
+    const surfaceFrequency = this.rankStrings(touchedFiles.map((file) => this.classifyEngineerSurface(file)), 20);
+    const commitsWithTests = gitSamples.filter((sample) => sample.files.some((file) => /(\.test|\.spec|^tests\/|\/tests\/)/i.test(file))).length;
+    const commitsWithDocs = gitSamples.filter((sample) => sample.files.some((file) => /\.(md|mdx)$/i.test(file))).length;
+    const commitsWithConfig = gitSamples.filter((sample) => sample.files.some((file) => /package\.json|tsconfig|config|\.ya?ml|\.toml/i.test(file))).length;
+    const averageFilesPerCommit = gitSamples.length > 0
+      ? Number((gitSamples.reduce((total, sample) => total + sample.files.length, 0) / gitSamples.length).toFixed(2))
+      : 0;
+    const sourceSymbols = Array.isArray(twin.symbols) ? twin.symbols : [];
+    const naming = this.inferGhostNamingStyle(sourceSymbols);
+    const verificationCommand = this.defaultVerificationCommand(twin);
+    const confidence = Math.min(0.95, 0.35 + Math.min(0.3, gitSamples.length / 160) + Math.min(0.2, (memory.events?.length ?? 0) / 80) + Math.min(0.1, fileFrequency.length / 80));
+    const highRiskFiles = uniqueStrings([
+      ...((graph.insights ?? []).flatMap((insight: any) => Array.isArray(insight.likelyFiles) ? insight.likelyFiles : [])),
+      ...((twin.riskHotspots ?? []).map((entry: any) => entry.file))
+    ], 30);
+
+    return {
+      schemaVersion: 1,
+      learnedAt: new Date().toISOString(),
+      workspaceRoot: this.workspaceRoot,
+      workspaceName: path.basename(this.workspaceRoot),
+      confidence,
+      evidence: {
+        commitsAnalyzed: gitSamples.length,
+        dirtyFiles,
+        memoryEvents: memory.events?.length ?? 0,
+        memoryRules: (memory.rules ?? []).slice(0, 20),
+        causalInsights: (graph.insights ?? []).slice(0, 8).map((insight: any) => ({
+          title: insight.title,
+          severity: insight.severity,
+          likelyFiles: insight.likelyFiles
+        }))
+      },
+      habits: {
+        firstReadFiles: uniqueStrings([
+          ...fileFrequency.map((entry) => entry.value),
+          ...highRiskFiles,
+          ...((twin.tests ?? []) as string[]).slice(0, 8)
+        ], 20),
+        frequentSurfaces: surfaceFrequency,
+        averageFilesPerCommit,
+        testsTogetherWithCodeRate: gitSamples.length > 0 ? Number((commitsWithTests / gitSamples.length).toFixed(2)) : 0,
+        docsTogetherWithCodeRate: gitSamples.length > 0 ? Number((commitsWithDocs / gitSamples.length).toFixed(2)) : 0,
+        configChangeRate: gitSamples.length > 0 ? Number((commitsWithConfig / gitSamples.length).toFixed(2)) : 0,
+        preferredVerificationCommand: verificationCommand,
+        naming,
+        patchShape: averageFilesPerCommit <= 2
+          ? "surgical"
+          : averageFilesPerCommit <= 6
+            ? "vertical-slice"
+            : "campaign"
+      },
+      behaviorModel: {
+        readingOrder: [
+          "Read the closest existing implementation pattern.",
+          "Read the public tool/command surface before changing behavior.",
+          "Read linked tests or create a focused proof if none exists.",
+          "Check Causal Intelligence for risk hotspots before broad edits."
+        ],
+        implementationSequence: [
+          "Schema or public surface first.",
+          "Backend implementation second.",
+          "CLI/dashboard/docs wiring third.",
+          "Focused test coverage fourth.",
+          "Build/test verification before promotion."
+        ],
+        avoidances: [
+          "Avoid new dependencies unless the repo already uses the pattern.",
+          "Avoid broad rewrites when a vertical slice proves the behavior.",
+          "Avoid touching high-risk runtime or shell execution files without timeline verification."
+        ],
+        approvalCriteria: [
+          `Verification passes: ${verificationCommand}.`,
+          "Docs match actual public surface.",
+          "Risky changes have tests or timeline telemetry.",
+          "Engineering Memory captures accepted or rejected lessons."
+        ],
+        divergenceRules: [
+          { id: "missing-verification", severity: "high", description: "Plan does not mention tests, build, or timeline verification." },
+          { id: "new-dependency", severity: "medium", description: "Plan adds dependency/framework without explicit justification." },
+          { id: "wide-blast-radius", severity: "medium", description: "Plan touches many files compared with learned patch shape." },
+          { id: "docs-missing", severity: "medium", description: "Public tool/CLI change lacks docs update." },
+          { id: "risk-without-proof", severity: "high", description: "High-risk file touched without proof-first workflow." }
+        ]
+      },
+      recentWork: gitSamples.slice(0, 20)
+    };
+  }
+
+  private async predictGhostEngineerPath(goal: string, profile: any, verificationOverride = ""): Promise<Record<string, any>> {
+    const [contractResult, causalAnswer] = await Promise.all([
+      this.intentCompile({ intent: goal, verificationCommand: verificationOverride || undefined }),
+      this.causalIntelligence({ action: "query", query: goal }).catch(() => ({ topInsights: [], recommendations: [] }))
+    ]);
+    const contract = (contractResult as any).contract;
+    const verificationCommand = verificationOverride || contract.rollout?.verificationCommand || profile.habits?.preferredVerificationCommand || "npm test";
+    const likelyFiles = uniqueStrings([
+      ...(contract.likelyFiles ?? []),
+      ...((causalAnswer as any).topInsights ?? []).flatMap((insight: any) => Array.isArray(insight.likelyFiles) ? insight.likelyFiles : []),
+      ...(profile.habits?.firstReadFiles ?? []).slice(0, 6)
+    ], 24);
+    const firstReads = uniqueStrings([
+      ...likelyFiles.slice(0, 8),
+      ...(profile.habits?.firstReadFiles ?? []).slice(0, 8)
+    ], 12);
+    const steps = uniqueStrings([
+      ...(profile.behaviorModel?.readingOrder ?? []),
+      ...(contract.phases ?? []),
+      ...(profile.behaviorModel?.implementationSequence ?? [])
+    ], 14);
+    const autopilotPlan = [
+      `Start by reading ${firstReads.slice(0, 4).join(", ") || "the closest matching files"}.`,
+      "Make the smallest repo-native vertical slice that satisfies the goal.",
+      "Mirror existing naming and tool/command patterns before introducing new abstraction.",
+      `Run ${verificationCommand} before promotion.`,
+      "Record the outcome in Engineering Memory."
+    ];
+    const divergence = this.evaluateGhostDivergence(autopilotPlan.join("\n"), profile, likelyFiles);
+    return {
+      schemaVersion: 1,
+      predictedAt: new Date().toISOString(),
+      goal,
+      profileDigest: {
+        learnedAt: profile.learnedAt,
+        confidence: profile.confidence,
+        patchShape: profile.habits?.patchShape,
+        preferredVerificationCommand: profile.habits?.preferredVerificationCommand,
+        frequentSurfaces: profile.habits?.frequentSurfaces?.slice?.(0, 6) ?? []
+      },
+      prediction: `You would likely make a ${profile.habits?.patchShape ?? "vertical-slice"} change: read existing surfaces first, patch the smallest compatible path, add proof, update docs if public behavior changes, then verify.`,
+      predictedApproach: {
+        firstReads,
+        likelyFiles,
+        implementationSteps: steps,
+        tests: contract.tests ?? [],
+        docs: /cli|tool|feature|command|docs?|readme/i.test(goal) ? ["Update MESH_FEATURES.md or the nearest public docs after code lands."] : [],
+        verificationCommand,
+        rollback: contract.rollout?.rollback ?? "Use timelines or semantic undo for rollback."
+      },
+      divergence,
+      autopilotPatch: {
+        mode: "timeline-first",
+        styleConstraints: [
+          ...(profile.behaviorModel?.avoidances ?? []),
+          ...(profile.evidence?.memoryRules ?? []).slice(0, 6)
+        ],
+        suggestedPatchOrder: autopilotPlan,
+        promotionGates: profile.behaviorModel?.approvalCriteria ?? []
+      },
+      causalSignals: (causalAnswer as any).topInsights ?? [],
+      contract
+    };
+  }
+
+  private evaluateGhostDivergence(plan: string, profile: any, likelyFiles: string[] = []): Record<string, unknown> {
+    const text = plan.toLowerCase();
+    const warnings: Array<Record<string, unknown>> = [];
+    const matchedPreferences: string[] = [];
+    const addWarning = (id: string, severity: string, message: string, evidence: string) => {
+      warnings.push({ id, severity, message, evidence });
+    };
+
+    if (/\b(test|build|verify|verification|timeline|npm test|npm run build)\b/.test(text)) {
+      matchedPreferences.push("mentions verification");
+    } else {
+      addWarning("missing-verification", "high", "Plan does not mention verification.", "Learned profile expects tests/build/timeline verification before promotion.");
+    }
+
+    if (/\b(add|install|dependency|framework|package)\b/.test(text) && !/\bjustify|because|existing pattern|already uses\b/.test(text)) {
+      addWarning("new-dependency", "medium", "Plan may introduce a dependency without justification.", "Profile avoids new dependencies unless local patterns justify them.");
+    }
+
+    const fileMentions = uniqueStrings(Array.from(plan.matchAll(/([A-Za-z0-9_./-]+\.(?:ts|tsx|js|jsx|mjs|cjs|md|json|css|html|yml|yaml))/g)).map((match) => match[1]), 100);
+    const mentionedOrLikelyFiles = uniqueStrings([...fileMentions, ...likelyFiles], 100);
+    const typical = Number(profile.habits?.averageFilesPerCommit ?? 0);
+    if (typical > 0 && mentionedOrLikelyFiles.length > Math.max(8, typical * 3)) {
+      addWarning("wide-blast-radius", "medium", "Plan touches a wider surface than the learned patch shape.", `${mentionedOrLikelyFiles.length} files vs typical ${typical}.`);
+    }
+
+    const publicSurface = /\b(cli|slash|command|tool|dashboard|feature|public|docs?|readme)\b/.test(text) || mentionedOrLikelyFiles.some((file) => /agent-loop|local-tools|MESH_FEATURES|MOONSHOT|README/i.test(file));
+    if (publicSurface && !/\b(doc|docs|readme|features|moonshot)\b/.test(text)) {
+      addWarning("docs-missing", "medium", "Public surface change lacks a docs step.", "Profile and repo pattern keep docs aligned with tool surfaces.");
+    } else if (publicSurface) {
+      matchedPreferences.push("keeps docs aligned with public surface");
+    }
+
+    const highRiskFiles = new Set((profile.evidence?.causalInsights ?? []).flatMap((insight: any) => Array.isArray(insight.likelyFiles) ? insight.likelyFiles : []));
+    const touchesHighRisk = mentionedOrLikelyFiles.some((file) => highRiskFiles.has(file));
+    if (touchesHighRisk && !/\b(test|timeline|verify|proof|race|autopsy)\b/.test(text)) {
+      addWarning("risk-without-proof", "high", "High-risk file appears without proof-first workflow.", "Causal profile marks the file as risky.");
+    }
+
+    if (/\b(existing|pattern|smallest|surgical|vertical|focused)\b/.test(text)) {
+      matchedPreferences.push("uses local pattern and focused change language");
+    }
+
+    const penalty = warnings.reduce((total, warning) => total + (warning.severity === "high" ? 30 : 15), 0);
+    const alignmentScore = Math.max(0, Math.min(100, 100 - penalty + matchedPreferences.length * 5));
+    return {
+      alignmentScore,
+      verdict: alignmentScore >= 85 ? "aligned" : alignmentScore >= 65 ? "watch" : "divergent",
+      warnings,
+      matchedPreferences,
+      profileConfidence: profile.confidence ?? 0
+    };
+  }
+
+  private async readGitWorkSamples(maxCommits = 80): Promise<Array<{ commit: string; date: string; subject: string; files: string[] }>> {
+    try {
+      const safeLimit = Math.max(1, Math.min(maxCommits, 300));
+      const { stdout } = await execAsync(`git log --name-only --format=@@@%h%x09%ad%x09%s --date=short --max-count=${safeLimit}`, {
+        cwd: this.workspaceRoot,
+        maxBuffer: 2 * 1024 * 1024
+      });
+      const samples: Array<{ commit: string; date: string; subject: string; files: string[] }> = [];
+      let current: { commit: string; date: string; subject: string; files: string[] } | null = null;
+      for (const line of stdout.split(/\r?\n/g)) {
+        if (line.startsWith("@@@")) {
+          if (current) samples.push(current);
+          const [commit, date, ...subjectParts] = line.slice(3).split("\t");
+          current = { commit: commit || "unknown", date: date || "", subject: subjectParts.join("\t"), files: [] };
+          continue;
+        }
+        const file = line.trim();
+        if (current && file && !file.includes(" ")) current.files.push(file);
+      }
+      if (current) samples.push(current);
+      return samples.map((sample) => ({ ...sample, files: uniqueStrings(sample.files, 80) }));
+    } catch {
+      return [];
+    }
+  }
+
+  private rankStrings(values: string[], limit = 20): Array<{ value: string; count: number }> {
+    const counts = new Map<string, number>();
+    for (const value of values) {
+      const normalized = value.trim();
+      if (!normalized) continue;
+      counts.set(normalized, (counts.get(normalized) ?? 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .map(([value, count]) => ({ value, count }))
+      .sort((left, right) => right.count - left.count || left.value.localeCompare(right.value))
+      .slice(0, limit);
+  }
+
+  private classifyEngineerSurface(file: string): string {
+    if (/(\.test|\.spec|^tests\/|\/tests\/)/i.test(file)) return "tests";
+    if (/\.(md|mdx)$/i.test(file)) return "docs";
+    if (/agent-loop|local-tools|tool|command|cli/i.test(file)) return "cli-tooling";
+    if (/runtime|observer|server|api|route/i.test(file)) return "runtime-api";
+    if (/dashboard|canvas|ui|frontend|tsx|jsx|css|html/i.test(file)) return "frontend";
+    if (/package\.json|tsconfig|config|\.ya?ml|\.toml|Dockerfile/i.test(file)) return "config";
+    return "source";
+  }
+
+  private inferGhostNamingStyle(symbols: any[]): Record<string, unknown> {
+    const names = symbols.map((symbol) => String(symbol.name ?? "")).filter(Boolean).slice(0, 1000);
+    const camel = names.filter((name) => /^[a-z][A-Za-z0-9]*$/.test(name)).length;
+    const pascal = names.filter((name) => /^[A-Z][A-Za-z0-9]*$/.test(name)).length;
+    const snake = names.filter((name) => /^[a-z0-9_]+$/.test(name) && name.includes("_")).length;
+    const dominant = [
+      { style: "lowerCamel", count: camel },
+      { style: "PascalCase", count: pascal },
+      { style: "snake_case", count: snake }
+    ].sort((left, right) => right.count - left.count)[0];
+    return {
+      dominant: dominant?.style ?? "unknown",
+      samples: names.slice(0, 20),
+      counts: { lowerCamel: camel, PascalCase: pascal, snake_case: snake }
+    };
+  }
+
+  private defaultVerificationCommand(twin?: any): string {
+    const scripts = twin?.package?.scripts ?? {};
+    if (scripts.test) return "npm test";
+    if (scripts.build) return "npm run build";
+    if (scripts.lint) return "npm run lint";
+    return "npm test";
+  }
+
+  private inferIntentInterfaces(intent: string, twin: any): string[] {
+    const lower = intent.toLowerCase();
+    const interfaces = [];
+    if (/api|endpoint|route|server|backend/.test(lower)) interfaces.push("API route/controller surface");
+    if (/ui|frontend|screen|dashboard|page|button|form/.test(lower)) interfaces.push("Frontend/browser interaction surface");
+    if (/db|database|schema|migration|persist|store/.test(lower)) interfaces.push("Persistence/schema surface");
+    if (/cli|command|slash|tool/.test(lower)) interfaces.push("CLI/tool surface");
+    if (interfaces.length === 0 && twin?.routes?.length > 0) interfaces.push("Existing route and tool surface");
+    return interfaces;
+  }
+
+  private inferIntentTests(intent: string, twin: any): string[] {
+    const tests = ["Run declared verification command before promotion."];
+    if (/runtime|crash|error|debug|failure/i.test(intent)) tests.push("Add a runtime failure fixture or stack-trace regression test.");
+    if (/ui|frontend|dashboard|browser/i.test(intent)) tests.push("Add a DOM/payload or dashboard snapshot test.");
+    if (/api|route|backend/i.test(intent)) tests.push("Add route matching and request/response behavior tests.");
+    if ((twin?.tests ?? []).length === 0) tests.push("Create first focused test if no matching test exists.");
+    return tests;
+  }
+
+  private inferIntentRisks(intent: string, twin: any, likelyFiles: string[]): string[] {
+    const riskMap = new Map((twin?.riskHotspots ?? []).map((entry: any) => [entry.file, entry.risks]));
+    const risks = likelyFiles.flatMap((file) => (riskMap.get(file) as string[] | undefined)?.map((risk) => `${file}: ${risk}`) ?? []);
+    if (/auth|secret|token|payment|delete|migration/i.test(intent)) risks.push("Intent contains high-risk domain terms; require timeline verification.");
+    return uniqueStrings(risks, 20);
+  }
+
+  private async readDirtyFilesForMemory(): Promise<string[]> {
+    try {
+      const { stdout } = await execAsync("git status --short", { cwd: this.workspaceRoot });
+      return uniqueStrings(stdout.split(/\r?\n/g).map((line) => line.slice(3).trim()).filter(Boolean), 100);
+    } catch {
+      return [];
+    }
+  }
+
+  private async readGitChurn(maxCommits = 200): Promise<Record<string, number>> {
+    try {
+      const safeLimit = Math.max(1, Math.min(maxCommits, 1000));
+      const { stdout } = await execAsync(`git log --name-only --format= --max-count=${safeLimit}`, {
+        cwd: this.workspaceRoot,
+        maxBuffer: 1024 * 1024
+      });
+      const counts: Record<string, number> = {};
+      for (const line of stdout.split(/\r?\n/g)) {
+        const file = line.trim();
+        if (!file || file.includes(" ")) continue;
+        counts[file] = (counts[file] ?? 0) + 1;
+      }
+      return counts;
+    } catch {
+      return {};
+    }
+  }
+
+  private async listRuntimeRuns(): Promise<Array<Record<string, unknown>>> {
+    const runtimeBase = this.runtimeObserver.basePath;
+    const entries = await fs.readdir(runtimeBase, { withFileTypes: true }).catch(() => []);
+    const runs = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const record = await readJsonFile<any | null>(path.join(runtimeBase, entry.name, "run.json"), null);
+      if (record) runs.push(record);
+    }
+    return runs.sort((left, right) => String(right.startedAt ?? "").localeCompare(String(left.startedAt ?? ""))).slice(0, 20);
+  }
+
+  private scoreCockpitHealth(snapshot: Record<string, any>): Record<string, unknown> {
+    const repairQueue = snapshot.repair?.queue?.length ?? 0;
+    const failedTimelines = (snapshot.timelines?.timelines ?? []).filter((timeline: any) => timeline.verdict === "fail").length;
+    const failedRuns = (snapshot.runtimeRuns ?? []).filter((run: any) => run.status === "failed").length;
+    const score = Math.max(0, 100 - repairQueue * 15 - failedTimelines * 10 - failedRuns * 10);
+    return {
+      score,
+      status: score >= 90 ? "healthy" : score >= 70 ? "watch" : "attention",
+      signals: {
+        repairQueue,
+        failedTimelines,
+        failedRuns
+      }
+    };
   }
 
   public async *indexEverything(): AsyncGenerator<{ current: number; total: number; path: string }> {

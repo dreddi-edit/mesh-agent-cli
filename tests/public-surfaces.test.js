@@ -19,7 +19,16 @@ test("local tools expose moonshot public interfaces", () => {
     "runtime.explain_failure",
     "agent.spawn",
     "agent.review",
-    "agent.merge_verified"
+    "agent.merge_verified",
+    "workspace.digital_twin",
+    "workspace.predictive_repair",
+    "workspace.engineering_memory",
+    "workspace.intent_compile",
+    "workspace.cockpit_snapshot",
+    "workspace.causal_intelligence",
+    "workspace.discovery_lab",
+    "workspace.reality_fork",
+    "workspace.ghost_engineer"
   ];
 
   for (const toolName of expectedTools) {

@@ -40,7 +40,7 @@ const SYSTEM_PROMPT = [
   "2. Local Code Intelligence: 'workspace.ask_codebase' uses the persistent local index and returns citations. Use modes: architecture, bug, edit-impact, test-impact, ownership, recent-change, runtime-path.",
   "2a. Symbol and Impact Tools: Use 'workspace.explain_symbol' for definitions/callers and 'workspace.impact_map' before risky edits.",
   "3. Void-Protocol (MAX COMPRESSION): Use 'workspace.generate_lexicon' to get a dictionary of project terms. Then use #ID in 'workspace.alien_patch' (e.g. !1 > { #A = a: #B() }) for near-zero token edits.",
-  "3. Ghost Timeline Lifecycle: When proposing a critical fix, create or use an isolated timeline with 'workspace.timeline_create', apply a patch, run verification, compare, then promote only if verified.",
+  "3. Ghost Timeline Lifecycle: When proposing a critical fix, use 'agent.race_fixes' to try multiple parallel strategies. Compare results and promote the best one. For single manual fixes, use 'workspace.timeline_create', apply a patch, run verification, and promote.",
   "4. Predictive Pathing: You will sometimes see [PREDICTIVE CONTEXT] in your prompt. This is Mesh pre-loading likely relevant dependencies based on your last actions.",
   "5. Time-Travel AST Diffing: Use 'workspace.get_recent_changes' to see background modifications without re-reading files.",
   "6. Symbolic Trace Routing: Use 'workspace.trace_symbol' to trace data flow deterministically.",
@@ -48,10 +48,13 @@ const SYSTEM_PROMPT = [
   "8. Micro-Edits: For simple renames, use 'workspace.rename_symbol'.",
   "9. Parallelism: ALWAYS batch your tool calls.",
   "10. Runtime Cognition: Use 'runtime.start', 'runtime.capture_failure', and 'runtime.explain_failure' for live command/test debugging. Use 'frontend.preview' for real terminal screenshots via Chrome CDP; use 'web.inspect_ui' only when Playwright-style inspection is needed.",
-  "11. Plan-First & Finalization: Use 'agent.plan'.",
-  "12. Action-Oriented: Focus on solving the user's problem. Give concise, direct final answers.",
-  "13. Adaptability: Match the language of the user (German or English).",
-  "14. Mesh-Alien-OS (MAX EFFICIENCY): To save 90% tokens, use 'workspace.session_index_symbols' first to get IDs for file symbols. Then use 'workspace.alien_patch' with Symbolic Opcodes:",
+  "11. Moonshot OS: Use 'workspace.digital_twin' before major work, 'workspace.intent_compile' for product asks, 'workspace.predictive_repair' for failing diagnostics, 'workspace.engineering_memory' for repo-specific rules, and 'workspace.cockpit_snapshot' for operational status.",
+  "12. Legendary Moonshots: Use 'workspace.causal_intelligence' for causal repo reasoning, 'workspace.discovery_lab' for autonomous improvement experiments, and 'workspace.reality_fork' to compare alternate implementation realities before risky work.",
+  "12a. Ghost Engineer Replay: Use 'workspace.ghost_engineer' to learn the user's repo-specific engineering style, predict how they would implement a goal, check divergence, and materialize a style-conformant timeline plan.",
+  "13. Plan-First & Finalization: Use 'agent.plan'.",
+  "14. Action-Oriented: Focus on solving the user's problem. Give concise, direct final answers.",
+  "15. Adaptability: Match the language of the user (German or English).",
+  "16. Mesh-Alien-OS (MAX EFFICIENCY): To save 90% tokens, use 'workspace.session_index_symbols' first to get IDs for file symbols. Then use 'workspace.alien_patch' with Symbolic Opcodes:",
   "    Opcode Rosetta Stone: e: (export) | s: (async) | f: (function) | c: (const) | l: (let) | r: (return) | a: (await) | i: (if) | p: (Promise) | cn: (console.log) | th: (throw new Error)",
   "    Patch Format: !ID > { [ALIENT_CODE] }",
   "Operating Environment: You run as a CLI tool on the user's machine. Minimize I/O and token usage by leveraging the Mesh-Compression cache aggressively. If you feel you lack context, suggest the user run '/index' to pre-cache the entire workspace."
@@ -599,34 +602,82 @@ export class AgentLoop {
       payload = JSON.parse(payloadStr);
     } catch { return; }
 
-    const { type, file, line, prompt, context } = payload;
-    if (!file || file === "unknown") return;
+    const { type, file, line, prompt, context, xray } = payload;
+    const sourceFile = xray?.source?.fileName || file;
+    const sourceLine = xray?.source?.lineNumber || line;
+    if (!sourceFile || sourceFile === "unknown") return;
 
-    const relPath = path.relative(this.config.agent.workspaceRoot, file);
+    const relPath = path.relative(this.config.agent.workspaceRoot, sourceFile);
+    const componentName = xray?.component || this.extractComponentName(context?.tag, context?.classes) || "Anonymous";
+    const requests = Array.isArray(xray?.requests) ? xray.requests.slice(0, 5) : [];
+    const requestSummaries = await Promise.all(requests.map(async (request: any) => {
+      const query = `${String(request.method || "GET").toUpperCase()} ${request.route || request.url || ""}`.trim();
+      if (!query) return null;
+      const result = await this.backend.callTool("workspace.ask_codebase", {
+        query,
+        mode: "runtime-path",
+        limit: 2
+      }).catch(() => null) as any;
+      const matches = Array.isArray(result?.results)
+        ? result.results.slice(0, 2).map((match: any) => ({
+            file: match.file,
+            purpose: match.purpose,
+            citations: Array.isArray(match.citations)
+              ? match.citations.slice(0, 2).map((citation: any) => ({
+                  file: citation.file,
+                  symbol: citation.symbol,
+                  lines: citation.lines,
+                  whyMatched: citation.whyMatched
+                }))
+              : []
+          }))
+        : [];
+      return { request, matches };
+    }));
+    const tracedSymbol: any = componentName && componentName !== "Anonymous"
+      ? await this.backend.callTool("workspace.trace_symbol", { path: relPath, symbol: componentName }).catch(() => null)
+      : null;
+    const populatedRequestSummaries = requestSummaries.filter(Boolean);
     
     if (type === "PROMPT") {
-      process.stdout.write(pc.cyan(`\n[Visual AI] Designing for ${pc.bold(relPath)}:${line}...\n`));
+      process.stdout.write(pc.cyan(`\n[Visual AI] Designing for ${pc.bold(relPath)}:${sourceLine || line || 0}...\n`));
       process.stdout.write(pc.dim(`  " ${prompt} "\n`));
 
       // Detect Styling Paradigm
       const hasTailwind = await fs.access(path.join(this.config.agent.workspaceRoot, "tailwind.config.js")).then(() => true).catch(() => 
                           fs.access(path.join(this.config.agent.workspaceRoot, "tailwind.config.ts")).then(() => true).catch(() => false));
 
+      const evidenceLines = [
+        `Source: ${relPath}:${sourceLine || 0}`,
+        `Component: ${componentName}`,
+        requests.length > 0 ? `Requests:\n${requests.map((request: any) => `- ${String(request.method || "GET").toUpperCase()} ${request.route || request.url} -> ${request.status}${request.durationMs ? ` (${request.durationMs}ms)` : ""}`).join("\n")}` : "Requests: none captured",
+        populatedRequestSummaries.length > 0
+          ? `Route matches:\n${populatedRequestSummaries.map((entry: any) => {
+              const lines = entry.matches.length > 0
+                ? entry.matches.map((match: any) => `- ${match.file}: ${match.purpose}`).join("\n")
+                : "- no strong matches";
+              return `${entry.request.method} ${entry.request.route || entry.request.url}\n${lines}`;
+            }).join("\n")}`
+          : "Route matches: none",
+        tracedSymbol && tracedSymbol.ok
+          ? `Symbol trace:\n${JSON.stringify(tracedSymbol, null, 2)}`
+          : "Symbol trace: unavailable",
+        `DOM:\n${context.html}`,
+        `Parent DOM:\n${context.parentHtml}`
+      ].join("\n\n");
+
       const mutationPrompt = `The user clicked an element in the browser and provided a visual instruction.
-    File: ${relPath}
-    Line: ${line}
-    Element: <${context.tag} class="${context.classes}">
-    HTML Context: ${context.html}
-    Parent HTML: ${context.parentHtml}
+Evidence:
+${evidenceLines}
 
-    User Instruction: "${prompt}"
-    Styling Paradigm: ${hasTailwind ? "TAILWIND CSS (Use utility classes, avoid inline styles)" : "STANDARD CSS/INLINE"}
+User Instruction: "${prompt}"
+Styling Paradigm: ${hasTailwind ? "TAILWIND CSS (Use utility classes, avoid inline styles)" : "STANDARD CSS/INLINE"}
 
-    Your mission is a two-step process:
-    1. IMMEDIATELY output a JSON block labeled 'PREVIEW_STYLE' with CSS properties for instant preview.
-    2. Then, proceed to apply the PERMANENT code patch to the file using your tools.
+Your mission is a two-step process:
+1. IMMEDIATELY output a JSON block labeled 'PREVIEW_STYLE' with CSS properties for instant preview.
+2. Then, proceed to apply the PERMANENT code patch to the file using your tools.
 
-    Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. Finalize once done.`;
+Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. Finalize once done.`;
       // Intercept the LLM delta stream to catch the PREVIEW_STYLE block
       let previewSent = false;
       const interceptHooks: RunHooks = {
@@ -667,11 +718,17 @@ export class AgentLoop {
       } catch (e) {
         process.stdout.write(pc.red(`\n[Visual AI] Error: ${(e as Error).message}\n`));
       }
-    }
- else {
+    } else {
       // Legacy CSS Mutation logic
       // ...
     }
+  }
+
+  private extractComponentName(tag?: string, classes?: string): string {
+    if (!tag) return "Anonymous";
+    const trimmed = String(classes || "").trim();
+    const firstClass = trimmed ? trimmed.split(/\s+/)[0] : "";
+    return firstClass ? `${tag}.${firstClass}` : tag;
   }
 
   public async runCli(initialPrompt?: string): Promise<void> {
@@ -1204,7 +1261,7 @@ export class AgentLoop {
     const statusRows = [
       `mesh  ${this.config.agent.mode}  ${shortPathLabel(this.config.agent.workspaceRoot)}`,
       `branch: ${this.currentBranch}   model: ${shortModelName(this.currentModelId)}`,
-      "commands: /help /status /capsule /model pick /setup /clear /exit",
+      "commands: /help /status /causal /lab /fork /ghost /dashboard /exit",
       "tip: Type / and press TAB for command completion"
     ];
 
@@ -1234,7 +1291,7 @@ export class AgentLoop {
       [
         `${this.themeColor(pc.bold("mesh"))}  ${pc.dim(this.config.agent.mode)}  ${pc.dim(shortPathLabel(this.config.agent.workspaceRoot))}`,
         `${pc.dim("branch:")} ${this.themeColor(this.currentBranch)}   ${pc.dim("model:")} ${this.themeColor(shortModelName(this.currentModelId))}`,
-        `${pc.dim("commands:")} ${pc.magenta("/help")} ${pc.magenta("/status")} ${pc.magenta("/capsule")} ${pc.magenta("/model pick")} ${pc.magenta("/setup")} ${pc.magenta("/clear")} ${pc.magenta("/exit")}`,
+        `${pc.dim("commands:")} ${pc.magenta("/help")} ${pc.magenta("/status")} ${pc.magenta("/causal")} ${pc.magenta("/lab")} ${pc.magenta("/fork")} ${pc.magenta("/ghost")} ${pc.magenta("/dashboard")} ${pc.magenta("/exit")}`,
         `${pc.dim("tip:")} ${pc.dim("Type / and press TAB for command completion")}`
       ].join("\n") + "\n"
     );
@@ -1798,11 +1855,252 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     }
   }
 
+  private async runDigitalTwin(args: string[]): Promise<void> {
+    const action = args[0] || "build";
+    const spinner = ora({ text: `Digital Twin ${action}...`, color: "cyan" }).start();
+    try {
+      const result: any = await this.backend.callTool("workspace.digital_twin", { action });
+      spinner.succeed(pc.cyan(`Digital Twin ${action} complete.`));
+      const twin = result.twin ?? result;
+      output.write([
+        "",
+        `${pc.dim("path:")} ${result.path}`,
+        `${pc.dim("files:")} ${twin.files?.total ?? twin.files ?? "n/a"}`,
+        `${pc.dim("symbols:")} ${twin.symbols?.length ?? twin.symbols ?? "n/a"}`,
+        `${pc.dim("routes:")} ${twin.routes?.length ?? twin.routes ?? "n/a"}`,
+        `${pc.dim("risk hotspots:")} ${twin.riskHotspots?.length ?? twin.riskHotspots ?? "n/a"}`,
+        ""
+      ].join("\n"));
+    } catch (error) {
+      spinner.fail(pc.red(`Digital Twin failed: ${(error as Error).message}`));
+    }
+  }
+
+  private async runPredictiveRepair(args: string[]): Promise<void> {
+    const action = args[0] || "analyze";
+    const spinner = ora({ text: `Predictive Repair ${action}...`, color: "yellow" }).start();
+    try {
+      const result: any = await this.backend.callTool("workspace.predictive_repair", { action });
+      spinner.succeed(pc.yellow(`Predictive Repair ${action} complete.`));
+      output.write([
+        "",
+        `${pc.dim("path:")} ${result.path}`,
+        `${pc.dim("diagnostics:")} ${result.diagnosticsOk ? pc.green("clean") : pc.red("attention")}`,
+        `${pc.dim("queue:")} ${Array.isArray(result.queue) ? result.queue.length : 0}`,
+        ...(Array.isArray(result.queue) ? result.queue.slice(0, 5).map((item: any) => `${pc.yellow("•")} ${item.summary} ${pc.dim((item.files ?? []).join(", "))}`) : []),
+        ""
+      ].join("\n"));
+    } catch (error) {
+      spinner.fail(pc.red(`Predictive Repair failed: ${(error as Error).message}`));
+    }
+  }
+
+  private async runEngineeringMemory(args: string[]): Promise<void> {
+    const action = args[0] || "read";
+    const spinner = ora({ text: `Engineering Memory ${action}...`, color: "magenta" }).start();
+    try {
+      const result: any = await this.backend.callTool("workspace.engineering_memory", { action });
+      spinner.succeed(pc.magenta(`Engineering Memory ${action} complete.`));
+      const memory = result.memory ?? {};
+      output.write([
+        "",
+        `${pc.dim("path:")} ${result.path}`,
+        `${pc.dim("rules:")} ${(memory.rules ?? []).length}`,
+        `${pc.dim("risk modules:")} ${(memory.riskModules ?? []).length}`,
+        ...(memory.rules ?? []).slice(0, 6).map((rule: string) => `${pc.magenta("•")} ${rule}`),
+        ""
+      ].join("\n"));
+    } catch (error) {
+      spinner.fail(pc.red(`Engineering Memory failed: ${(error as Error).message}`));
+    }
+  }
+
+  private async runIntentCompile(args: string[]): Promise<void> {
+    const intent = args.join(" ").trim();
+    if (!intent) {
+      output.write(pc.yellow("Usage: /intent <product intent>\n"));
+      return;
+    }
+    const spinner = ora({ text: "Compiling intent...", color: "cyan" }).start();
+    try {
+      const result: any = await this.backend.callTool("workspace.intent_compile", { intent });
+      spinner.succeed(pc.cyan("Intent compiled."));
+      const contract = result.contract;
+      output.write([
+        "",
+        `${pc.dim("path:")} ${result.path}`,
+        `${pc.dim("likely files:")} ${contract.likelyFiles.join(", ") || "none"}`,
+        `${pc.dim("verification:")} ${contract.rollout.verificationCommand}`,
+        ...contract.phases.map((phase: string, index: number) => `${pc.cyan(`${index + 1}.`)} ${phase}`),
+        ""
+      ].join("\n"));
+    } catch (error) {
+      spinner.fail(pc.red(`Intent compile failed: ${(error as Error).message}`));
+    }
+  }
+
+  private async runCausalIntelligence(args: string[]): Promise<void> {
+    const action = args[0] || "build";
+    const query = action === "query" ? args.slice(1).join(" ").trim() : "";
+    if (action === "query" && !query) {
+      output.write(pc.yellow("Usage: /causal query <question>\n"));
+      return;
+    }
+    const spinner = ora({ text: `Causal Intelligence ${action}...`, color: "cyan" }).start();
+    try {
+      const result: any = await this.backend.callTool("workspace.causal_intelligence", { action, query });
+      spinner.succeed(pc.cyan(`Causal Intelligence ${action} complete.`));
+      if (action === "query") {
+        output.write([
+          "",
+          `${pc.dim("answer:")} ${result.answer}`,
+          ...((result.topInsights ?? []).slice(0, 5).map((insight: any) => `${pc.cyan("•")} ${insight.severity} ${insight.title}`)),
+          ""
+        ].join("\n"));
+        return;
+      }
+      const graph = result.graph ?? result;
+      output.write([
+        "",
+        `${pc.dim("path:")} ${result.path}`,
+        `${pc.dim("nodes:")} ${graph.nodes?.length ?? graph.nodes ?? "n/a"}`,
+        `${pc.dim("edges:")} ${graph.edges?.length ?? graph.edges ?? "n/a"}`,
+        `${pc.dim("insights:")} ${graph.insights?.length ?? graph.insights ?? "n/a"}`,
+        ...((graph.insights ?? []).slice(0, 5).map((insight: any) => `${pc.cyan("•")} ${insight.severity} ${insight.title}`)),
+        ""
+      ].join("\n"));
+    } catch (error) {
+      spinner.fail(pc.red(`Causal Intelligence failed: ${(error as Error).message}`));
+    }
+  }
+
+  private async runDiscoveryLab(args: string[]): Promise<void> {
+    const action = args[0] || "run";
+    const spinner = ora({ text: `Discovery Lab ${action}...`, color: "yellow" }).start();
+    try {
+      const result: any = await this.backend.callTool("workspace.discovery_lab", { action });
+      spinner.succeed(pc.yellow(`Discovery Lab ${action} complete.`));
+      output.write([
+        "",
+        `${pc.dim("path:")} ${result.path}`,
+        `${pc.dim("discoveries:")} ${Array.isArray(result.discoveries) ? result.discoveries.length : 0}`,
+        ...((result.discoveries ?? []).slice(0, 6).map((item: any) => `${pc.yellow("•")} ${item.severity} ${item.hypothesis}`)),
+        ""
+      ].join("\n"));
+    } catch (error) {
+      spinner.fail(pc.red(`Discovery Lab failed: ${(error as Error).message}`));
+    }
+  }
+
+  private async runRealityFork(args: string[]): Promise<void> {
+    const actions = new Set(["plan", "fork", "status", "clear"]);
+    const first = args[0] || "plan";
+    const action = actions.has(first) ? first : "plan";
+    const intent = actions.has(first) ? args.slice(1).join(" ").trim() : args.join(" ").trim();
+    if ((action === "plan" || action === "fork") && !intent) {
+      output.write(pc.yellow("Usage: /fork [plan|fork] <intent>\n"));
+      return;
+    }
+    const spinner = ora({ text: `Reality Fork ${action}...`, color: "magenta" }).start();
+    try {
+      const result: any = await this.backend.callTool("workspace.reality_fork", { action, intent });
+      spinner.succeed(pc.magenta(`Reality Fork ${action} complete.`));
+      output.write([
+        "",
+        `${pc.dim("path:")} ${result.path}`,
+        `${pc.dim("intent:")} ${result.intent ?? "n/a"}`,
+        `${pc.dim("proposals:")} ${Array.isArray(result.proposals) ? result.proposals.length : result.proposals ?? 0}`,
+        ...((result.proposals ?? []).slice(0, 5).map((proposal: any) => {
+          const timeline = proposal.timelineId ? pc.dim(` timeline=${proposal.timelineId}`) : "";
+          return `${pc.magenta("•")} ${proposal.score} ${proposal.strategy}${timeline}`;
+        })),
+        ""
+      ].join("\n"));
+    } catch (error) {
+      spinner.fail(pc.red(`Reality Fork failed: ${(error as Error).message}`));
+    }
+  }
+
+  private async runGhostEngineer(args: string[]): Promise<void> {
+    const actions = new Set(["learn", "profile", "status", "predict", "divergence", "patch", "clear"]);
+    const first = args[0] || "profile";
+    const action = actions.has(first) ? first : "predict";
+    const payload = actions.has(first) ? args.slice(1).join(" ").trim() : args.join(" ").trim();
+    if ((action === "predict" || action === "patch") && !payload) {
+      output.write(pc.yellow("Usage: /ghost predict <goal> or /ghost patch <goal>\n"));
+      return;
+    }
+    if (action === "divergence" && !payload) {
+      output.write(pc.yellow("Usage: /ghost divergence <plan>\n"));
+      return;
+    }
+    const spinner = ora({ text: `Ghost Engineer ${action}...`, color: "cyan" }).start();
+    try {
+      const result: any = await this.backend.callTool("workspace.ghost_engineer", {
+        action,
+        goal: action === "predict" || action === "patch" ? payload : undefined,
+        plan: action === "divergence" ? payload : undefined
+      });
+      spinner.succeed(pc.cyan(`Ghost Engineer ${action} complete.`));
+
+      if (action === "predict") {
+        const prediction = result.prediction;
+        output.write([
+          "",
+          `${pc.dim("path:")} ${result.path}`,
+          `${pc.dim("prediction:")} ${prediction.prediction}`,
+          `${pc.dim("verification:")} ${prediction.predictedApproach.verificationCommand}`,
+          `${pc.dim("alignment:")} ${prediction.divergence.verdict} / ${prediction.divergence.alignmentScore}`,
+          ...prediction.predictedApproach.firstReads.slice(0, 6).map((file: string) => `${pc.cyan("•")} read ${file}`),
+          ""
+        ].join("\n"));
+        return;
+      }
+
+      if (action === "divergence") {
+        const divergence = result.divergence;
+        output.write([
+          "",
+          `${pc.dim("alignment:")} ${divergence.verdict} / ${divergence.alignmentScore}`,
+          ...((divergence.warnings ?? []).map((warning: any) => `${pc.yellow("•")} ${warning.severity} ${warning.message}`)),
+          ""
+        ].join("\n"));
+        return;
+      }
+
+      if (action === "patch") {
+        output.write([
+          "",
+          `${pc.dim("path:")} ${result.path}`,
+          `${pc.dim("timeline:")} ${result.timelineId}`,
+          `${pc.dim("verification:")} ${result.autopilot.predictedApproach.verificationCommand}`,
+          ...result.autopilot.autopilotPatch.suggestedPatchOrder.slice(0, 5).map((step: string) => `${pc.cyan("•")} ${step}`),
+          ""
+        ].join("\n"));
+        return;
+      }
+
+      const profile = result.profile ?? result;
+      output.write([
+        "",
+        `${pc.dim("path:")} ${result.path}`,
+        `${pc.dim("learned:")} ${profile.learnedAt ?? "n/a"}`,
+        `${pc.dim("confidence:")} ${profile.confidence ?? "n/a"}`,
+        `${pc.dim("patch shape:")} ${profile.habits?.patchShape ?? "n/a"}`,
+        ...((profile.habits?.firstReadFiles ?? []).slice(0, 6).map((file: string) => `${pc.cyan("•")} ${file}`)),
+        ""
+      ].join("\n"));
+    } catch (error) {
+      spinner.fail(pc.red(`Ghost Engineer failed: ${(error as Error).message}`));
+    }
+  }
+
   private async launchDashboard(): Promise<void> {
     const spinner = ora({ text: "Initializing Mesh Pulse Neural Interface...", color: "cyan" }).start();
     try {
       // 1. Gather rich structural data
       const filesRes: any = await this.backend.callTool("workspace.list_files", { limit: 500 });
+      const cockpit: any = await this.backend.callTool("workspace.cockpit_snapshot", {}).catch(() => null);
       const nodes: any[] = [];
       const links: any[] = [];
       const seenFiles = new Set(filesRes.files);
@@ -1859,6 +2157,12 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     #info-panel { position: absolute; top: 70px; left: 20px; width: 300px; background: var(--panel); border: 1px solid var(--border); padding: 15px; z-index: 90; backdrop-filter: blur(10px); }
     #info-panel h2 { margin: 0 0 10px 0; font-size: 14px; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 5px; }
     #info-panel .content { font-size: 11px; line-height: 1.4; color: #aaa; }
+    #cockpit-panel { position: absolute; top: 70px; right: 20px; width: 360px; background: var(--panel); border: 1px solid var(--border); padding: 12px; z-index: 90; backdrop-filter: blur(10px); }
+    #cockpit-panel h2 { margin: 0 0 10px 0; font-size: 12px; color: var(--accent); text-transform: uppercase; }
+    .metric-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .metric { border: 1px solid #181818; padding: 8px; min-height: 44px; background: rgba(255,255,255,0.03); }
+    .metric .label { font-size: 9px; color: #666; text-transform: uppercase; }
+    .metric .value { margin-top: 4px; font-size: 16px; color: #fff; }
 
     #log-panel { position: absolute; bottom: 20px; right: 20px; width: 400px; height: 250px; background: var(--panel); border: 1px solid var(--border); padding: 10px; z-index: 90; display: flex; flex-direction: column; overflow: hidden; }
     #log-panel h3 { margin: 0 0 5px 0; font-size: 10px; color: #666; text-transform: uppercase; }
@@ -1896,6 +2200,11 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     <div class="content" id="file-meta">Click a file node to inspect its neural capsule state and dependencies.</div>
   </div>
 
+  <div id="cockpit-panel">
+    <h2>Architecture Cockpit</h2>
+    <div class="metric-grid" id="cockpit-metrics"></div>
+  </div>
+
   <div id="log-panel">
     <h3>Neural Activity Stream</h3>
     <div id="log-stream"></div>
@@ -1906,6 +2215,20 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
   <script>
     const width = window.innerWidth, height = window.innerHeight;
     const data = { nodes: ${JSON.stringify(nodes)}, links: ${JSON.stringify(links)} };
+    const cockpit = ${JSON.stringify(cockpit ?? {})};
+    const metrics = [
+      ["health", cockpit.health && cockpit.health.status ? cockpit.health.status + " / " + cockpit.health.score : "unknown"],
+      ["files", cockpit.digitalTwin && cockpit.digitalTwin.files ? cockpit.digitalTwin.files : "n/a"],
+      ["repairs", cockpit.predictiveRepair && cockpit.predictiveRepair.queue ? cockpit.predictiveRepair.queue.length : 0],
+      ["timelines", cockpit.timelines && cockpit.timelines.timelines ? cockpit.timelines.timelines.length : 0],
+      ["runtime", cockpit.runtimeRuns ? cockpit.runtimeRuns.length : 0],
+      ["rules", cockpit.engineeringMemory && cockpit.engineeringMemory.memory ? cockpit.engineeringMemory.memory.rules.length : 0],
+      ["causal", cockpit.causalIntelligence && cockpit.causalIntelligence.insights ? cockpit.causalIntelligence.insights : 0],
+      ["lab", cockpit.discoveryLab && cockpit.discoveryLab.discoveries ? cockpit.discoveryLab.discoveries.length : 0],
+      ["forks", cockpit.realityFork && cockpit.realityFork.proposals ? cockpit.realityFork.proposals : 0],
+      ["ghost", cockpit.ghostEngineer && cockpit.ghostEngineer.confidence ? Math.round(cockpit.ghostEngineer.confidence * 100) + "%" : "n/a"]
+    ];
+    document.getElementById("cockpit-metrics").innerHTML = metrics.map(([label, value]) => \`<div class="metric"><div class="label">\${label}</div><div class="value">\${value}</div></div>\`).join("");
 
     const svg = d3.select("#canvas")
       .attr("width", width)
@@ -2169,6 +2492,14 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       { name: "/index", usage: "/index", description: "re-index workspace and generate file capsules" },
       { name: "/distill", usage: "/distill", description: "analyze workspace and update the project brain context" },
       { name: "/synthesize", usage: "/synthesize", description: "auto-generate structural changes based on background heuristics" },
+      { name: "/twin", usage: "/twin [build|read|status]", description: "build or inspect the Codebase Digital Twin" },
+      { name: "/repair", usage: "/repair [analyze|status|clear]", description: "inspect the Predictive Repair Daemon queue" },
+      { name: "/learn", usage: "/learn [read|learn]", description: "read or refresh Engineering Memory" },
+      { name: "/intent", usage: "/intent <product intent>", description: "compile intent into an implementation contract" },
+      { name: "/causal", usage: "/causal [build|read|status|query <question>]", description: "build or query Causal Software Intelligence" },
+      { name: "/lab", usage: "/lab [run|status|clear]", description: "run the Autonomous Discovery Lab" },
+      { name: "/fork", usage: "/fork [plan|fork|status|clear] <intent>", description: "plan or materialize alternate implementation realities" },
+      { name: "/ghost", usage: "/ghost [learn|profile|predict|divergence|patch] <input>", description: "learn and replay the local engineer's implementation style" },
       { name: "/fix", usage: "/fix", description: "apply a background-resolved fix for a current linter/compiler error" },
       { name: "/hologram", usage: "/hologram start <cmd>", description: "run command with V8 telemetry injection for live memory debugging" },
       { name: "/entangle", usage: "/entangle <path>", description: "quantum-link a second repository to sync AST mutations in real-time" },
@@ -2208,7 +2539,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     const commandList = [
       "/help", "/status", "/index", "/dashboard", "/sync", "/setup", "/clear",
       "/model", "/cost", "/compact", "/capsule", "/memory", "/approvals", "/steps", "/undo",
-      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/hologram", "/entangle", "/inspect", "/preview", "/fix"
+      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/preview", "/fix"
     ];
     // Priority 1: Exact match
     let command = inputCmd;
@@ -2263,6 +2594,30 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
         return { wasHandled: true, shouldExit: false };
       case "/synthesize":
         await this.runSynthesize();
+        return { wasHandled: true, shouldExit: false };
+      case "/twin":
+        await this.runDigitalTwin(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/repair":
+        await this.runPredictiveRepair(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/learn":
+        await this.runEngineeringMemory(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/intent":
+        await this.runIntentCompile(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/causal":
+        await this.runCausalIntelligence(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/lab":
+        await this.runDiscoveryLab(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/fork":
+        await this.runRealityFork(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/ghost":
+        await this.runGhostEngineer(args);
         return { wasHandled: true, shouldExit: false };
       case "/fix":
         await this.runFix();
@@ -2529,6 +2884,13 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     const doctorChoices = ["brief", "full", "voice", "fix"];
     const setupChoices = ["noninteractive", "model=", "cloud=", "theme=", "key=", "endpoint=", "voice_lang=", "voice_speed=", "voice_voice="];
     const voiceChoices = ["on", "off", "setup"];
+    const twinChoices = ["build", "read", "status"];
+    const repairChoices = ["analyze", "status", "clear"];
+    const learnChoices = ["read", "learn"];
+    const causalChoices = ["build", "read", "status", "query"];
+    const labChoices = ["run", "status", "clear"];
+    const forkChoices = ["plan", "fork", "status", "clear"];
+    const ghostChoices = ["learn", "profile", "status", "predict", "divergence", "patch", "clear"];
 
     let pool: string[] = [];
     switch (cmd) {
@@ -2550,6 +2912,27 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
         break;
       case "/voice":
         pool = voiceChoices;
+        break;
+      case "/twin":
+        pool = twinChoices;
+        break;
+      case "/repair":
+        pool = repairChoices;
+        break;
+      case "/learn":
+        pool = learnChoices;
+        break;
+      case "/causal":
+        pool = causalChoices;
+        break;
+      case "/lab":
+        pool = labChoices;
+        break;
+      case "/fork":
+        pool = forkChoices;
+        break;
+      case "/ghost":
+        pool = ghostChoices;
         break;
       default:
         pool = [];

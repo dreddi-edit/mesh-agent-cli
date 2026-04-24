@@ -17,6 +17,9 @@ interface RuntimeRunRecord {
   exitCode?: number;
   stdoutPath: string;
   stderrPath: string;
+  autopsyPath?: string;
+  inspectorHookPath?: string;
+  nodeOptions?: string;
 }
 
 interface RunProfile {
@@ -30,6 +33,7 @@ export class RuntimeObserver {
   public readonly workspaceHash: string;
   public readonly basePath: string;
   private readonly processes = new Map<string, ChildProcessWithoutNullStreams>();
+  private readonly autopsyHookPath: string;
 
   constructor(private readonly workspaceRoot: string) {
     this.workspaceHash = crypto
@@ -37,7 +41,9 @@ export class RuntimeObserver {
       .update(path.resolve(workspaceRoot))
       .digest("hex")
       .slice(0, 24);
-    this.basePath = path.join(os.homedir(), ".config", "mesh", "runtime", this.workspaceHash);
+    const stateRoot = process.env.MESH_STATE_DIR || path.join(os.homedir(), ".config", "mesh");
+    this.basePath = path.join(stateRoot, "runtime", this.workspaceHash);
+    this.autopsyHookPath = path.join(this.basePath, "autopsy-hook.cjs");
   }
 
   async start(args: Record<string, unknown>): Promise<{
@@ -59,7 +65,13 @@ export class RuntimeObserver {
     await fs.mkdir(runDir, { recursive: true });
     const stdoutPath = path.join(runDir, "stdout.log");
     const stderrPath = path.join(runDir, "stderr.log");
+    const autopsyPath = path.join(runDir, "autopsy.json");
     const cwd = path.resolve(this.workspaceRoot, profile.cwd || ".");
+    const hookPath = await this.ensureAutopsyHook();
+    const nodeOptions = mergeNodeOptions(process.env.NODE_OPTIONS, [
+      "--enable-source-maps",
+      `--require=${hookPath}`
+    ]);
     const record: RuntimeRunRecord = {
       id,
       command,
@@ -68,15 +80,25 @@ export class RuntimeObserver {
       status: "running",
       startedAt: new Date().toISOString(),
       stdoutPath,
-      stderrPath
+      stderrPath,
+      autopsyPath,
+      inspectorHookPath: hookPath,
+      nodeOptions
     };
     await this.writeRecord(record);
 
     const stdoutHandle = await fs.open(stdoutPath, "a");
     const stderrHandle = await fs.open(stderrPath, "a");
+    const env = {
+      ...process.env,
+      ...(profile.env ?? {}),
+      NODE_OPTIONS: nodeOptions,
+      MESH_RUNTIME_AUTOPSY_PATH: autopsyPath,
+      MESH_RUNTIME_RUN_ID: id
+    };
     const child = spawn("sh", ["-c", command], {
       cwd,
-      env: { ...process.env, ...(profile.env ?? {}) }
+      env
     });
     this.processes.set(id, child);
     const timeoutMs = Number(args.timeoutMs ?? profile.timeoutMs ?? 0);
@@ -117,6 +139,73 @@ export class RuntimeObserver {
       stdoutPath,
       stderrPath,
       note: "Runtime observer started. Use runtime.capture_failure or runtime.explain_failure with this runId."
+    };
+  }
+
+  async captureDeepAutopsy(args: Record<string, unknown>): Promise<{
+    ok: true;
+    runId: string;
+    reportPath: string;
+    capturedAt: string;
+    reason: string;
+    frames: RuntimeAutopsyFrame[];
+    stackWithScope: any[];
+    errorSummary: string;
+    causalChain: string[];
+  }> {
+    const runId = String(args.runId ?? "");
+    const record = await this.readRecord(runId);
+    const reportPath = record.autopsyPath ?? path.join(path.dirname(record.stdoutPath), "autopsy.json");
+    const report = await this.readAutopsyReport(reportPath);
+
+    if (report) {
+      return {
+        ok: true,
+        runId,
+        reportPath,
+        capturedAt: report.capturedAt,
+        reason: report.reason,
+        frames: report.frames,
+        stackWithScope: report.frames.map((frame) => ({
+          file: frame.file,
+          line: frame.line,
+          column: frame.column,
+          raw: frame.raw,
+          functionName: frame.functionName,
+          scopes: frame.scopes
+        })),
+        errorSummary: report.errorSummary,
+        causalChain: report.causalChain
+      };
+    }
+
+    const stdoutTail = await tail(record.stdoutPath, 5000);
+    const stderrTail = await tail(record.stderrPath, 5000);
+    const combined = `${stderrTail}\n${stdoutTail}`;
+    const frames = extractStackFrames(combined);
+    const errorSummary = extractErrorSummary(combined);
+    const causalChain = buildCausalChain(errorSummary, frames);
+
+    return {
+      ok: true,
+      runId,
+      reportPath,
+      capturedAt: record.finishedAt ?? record.startedAt,
+      reason: "log-fallback",
+      frames: frames.map((frame) => ({
+        ...frame,
+        functionName: "(unknown)",
+        scopes: []
+      })),
+      stackWithScope: frames.map((frame) => ({
+        ...frame,
+        scope: {
+          local: { reason: "Inspector report missing; using log fallback", state: "best-effort" },
+          closure: {}
+        }
+      })),
+      errorSummary,
+      causalChain
     };
   }
 
@@ -260,6 +349,26 @@ export class RuntimeObserver {
     await fs.writeFile(path.join(this.basePath, record.id, "run.json"), JSON.stringify(record, null, 2), "utf8");
   }
 
+  private async ensureAutopsyHook(): Promise<string> {
+    await fs.mkdir(this.basePath, { recursive: true });
+    const current = await fs.readFile(this.autopsyHookPath, "utf8").catch(() => "");
+    const next = buildAutopsyHookSource();
+    if (current !== next) {
+      await fs.writeFile(this.autopsyHookPath, next, "utf8");
+    }
+    return this.autopsyHookPath;
+  }
+
+  private async readAutopsyReport(reportPath: string): Promise<RuntimeAutopsyReport | null> {
+    const raw = await fs.readFile(reportPath, "utf8").catch(() => "");
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as RuntimeAutopsyReport;
+    } catch {
+      return null;
+    }
+  }
+
   private async finishRun(runId: string, status: RuntimeStatus, exitCode: number): Promise<void> {
     const record = await this.readRecord(runId).catch(() => null);
     if (!record || record.status === "timeout") return;
@@ -274,6 +383,174 @@ async function tail(filePath: string, limit = 12000): Promise<string> {
   const raw = await fs.readFile(filePath, "utf8").catch(() => "");
   if (raw.length <= limit) return raw;
   return raw.slice(-limit);
+}
+
+interface RuntimeAutopsyFrame {
+  functionName: string;
+  file: string;
+  line: number;
+  column?: number;
+  raw: string;
+  scopes: RuntimeAutopsyScope[];
+}
+
+interface RuntimeAutopsyScope {
+  type: string;
+  properties: Record<string, string>;
+}
+
+interface RuntimeAutopsyReport {
+  ok: true;
+  runId: string;
+  capturedAt: string;
+  reason: string;
+  errorSummary: string;
+  causalChain: string[];
+  frames: RuntimeAutopsyFrame[];
+}
+
+function mergeNodeOptions(existing: string | undefined, additions: string[]): string {
+  const parts = [existing?.trim() ?? "", ...additions.map((entry) => entry.trim())].filter(Boolean);
+  return Array.from(new Set(parts)).join(" ");
+}
+
+function buildCausalChain(errorSummary: string, frames: Array<{ file: string; line: number; column?: number; raw: string }>): string[] {
+  const chain = [errorSummary || "No explicit error summary captured."];
+  for (const frame of frames.slice(0, 5)) {
+    chain.push(`${frame.file}:${frame.line}${frame.column ? `:${frame.column}` : ""}`);
+  }
+  return chain;
+}
+
+function buildAutopsyHookSource(): string {
+  return `const inspector = require("node:inspector");
+const fs = require("node:fs");
+const path = require("node:path");
+
+if (process.env.MESH_RUNTIME_AUTOPSY_PATH && !global.__meshRuntimeAutopsyHookInstalled) {
+  global.__meshRuntimeAutopsyHookInstalled = true;
+
+  const reportPath = process.env.MESH_RUNTIME_AUTOPSY_PATH;
+  const runId = process.env.MESH_RUNTIME_RUN_ID || "unknown";
+  const session = new inspector.Session();
+  let captured = false;
+
+  function writeFallbackReport(reason, error) {
+    try {
+      fs.writeFileSync(reportPath, JSON.stringify({
+        ok: true,
+        runId,
+        capturedAt: new Date().toISOString(),
+        reason,
+        errorSummary: error ? String(error.message || error) : "Inspector hook failed before pause capture.",
+        causalChain: [reason],
+        frames: []
+      }, null, 2), "utf8");
+    } catch {}
+  }
+
+  function serializeRemoteValue(value) {
+    if (!value) return "undefined";
+    if (Object.prototype.hasOwnProperty.call(value, "value")) {
+      const raw = value.value;
+      if (typeof raw === "string") return raw.length > 140 ? \`\${raw.slice(0, 137)}...\` : raw;
+      if (typeof raw === "number" || typeof raw === "boolean" || raw === null) return String(raw);
+      if (Array.isArray(raw)) return \`[array(\${raw.length})]\`;
+      if (typeof raw === "object") return JSON.stringify(raw).slice(0, 140);
+      return String(raw);
+    }
+    if (value.type) return String(value.type);
+    return "unavailable";
+  }
+
+  function post(method, params) {
+    return new Promise((resolve, reject) => {
+      session.post(method, params || {}, (error, result) => {
+        if (error) reject(error);
+        else resolve(result);
+      });
+    });
+  }
+
+  async function collectScope(scope) {
+    const objectId = scope && scope.object && scope.object.objectId;
+    if (!objectId) {
+      return { type: scope.type || "unknown", properties: {} };
+    }
+    const response = await post("Runtime.getProperties", {
+      objectId,
+      ownProperties: true,
+      accessorPropertiesOnly: false
+    }).catch(() => ({ result: [] }));
+    const properties = {};
+    for (const entry of (response.result || []).slice(0, 8)) {
+      if (!entry || entry.name === "__proto__") continue;
+      properties[entry.name] = serializeRemoteValue(entry.value);
+    }
+    return { type: scope.type || "unknown", properties };
+  }
+
+  function normalizeFrameUrl(rawUrl) {
+    if (!rawUrl) return "unknown";
+    try {
+      if (String(rawUrl).startsWith("file://")) {
+        return path.relative(process.cwd(), new URL(rawUrl).pathname);
+      }
+      return path.relative(process.cwd(), String(rawUrl));
+    } catch {
+      return String(rawUrl);
+    }
+  }
+
+  session.connect();
+  Promise.all([
+    post("Runtime.enable"),
+    post("Debugger.enable"),
+    post("Debugger.setPauseOnExceptions", { state: "all" }),
+    post("Debugger.setAsyncCallStackDepth", { maxDepth: 8 })
+  ]).catch((error) => writeFallbackReport("inspector-init-failed", error));
+
+  session.on("Debugger.paused", async (message) => {
+    if (captured) return;
+    captured = true;
+    try {
+      const frames = [];
+      for (const frame of (message.params.callFrames || []).slice(0, 12)) {
+        const scopes = [];
+        for (const scope of (frame.scopeChain || []).slice(0, 4)) {
+          scopes.push(await collectScope(scope));
+        }
+        frames.push({
+          functionName: frame.functionName || "(anonymous)",
+          file: normalizeFrameUrl(frame.url),
+          line: Number(frame.location && frame.location.lineNumber ? frame.location.lineNumber + 1 : 0),
+          column: Number(frame.location && frame.location.columnNumber ? frame.location.columnNumber + 1 : 0),
+          raw: [frame.functionName || "(anonymous)", frame.url, frame.location && frame.location.lineNumber].filter(Boolean).join(" @ "),
+          scopes
+        });
+      }
+      const description = message.params.data && (message.params.data.description || message.params.data.text);
+      const reason = message.params.reason || "exception";
+      const errorSummary = description || reason;
+      const causalChain = [errorSummary].concat(frames.slice(0, 5).map((frame) => \`\${frame.file}:\${frame.line}\${frame.column ? ":" + frame.column : ""}\`));
+      fs.writeFileSync(reportPath, JSON.stringify({
+        ok: true,
+        runId,
+        capturedAt: new Date().toISOString(),
+        reason,
+        errorSummary,
+        causalChain,
+        frames
+      }, null, 2), "utf8");
+    } catch (error) {
+      writeFallbackReport("inspector-pause-failed", error);
+    } finally {
+      try {
+        await post("Debugger.resume");
+      } catch {}
+    }
+  });
+}`;
 }
 
 function extractErrorSummary(output: string): string {

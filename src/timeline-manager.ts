@@ -14,6 +14,7 @@ export interface TimelineCommandRecord {
   command: string;
   startedAt: string;
   finishedAt: string;
+  durationMs: number;
   exitCode: number;
   ok: boolean;
   stdoutPath: string;
@@ -69,7 +70,11 @@ export class TimelineManager {
       .update(path.resolve(workspaceRoot))
       .digest("hex")
       .slice(0, 24);
-    this.basePath = path.join(os.homedir(), ".config", "mesh", "timelines", this.workspaceHash);
+    const requestedStateRoot = process.env.MESH_STATE_DIR || path.join(os.homedir(), ".config", "mesh");
+    const stateRoot = isInsidePath(this.workspaceRoot, requestedStateRoot)
+      ? path.join(os.tmpdir(), "mesh-state")
+      : requestedStateRoot;
+    this.basePath = path.join(stateRoot, "timelines", this.workspaceHash);
   }
 
   async create(args: TimelineCreateArgs = {}): Promise<{ ok: true; timeline: TimelineRecord }> {
@@ -173,13 +178,15 @@ export class TimelineManager {
     const stderrPath = path.join(runDir, "stderr.log");
     const startedAt = new Date().toISOString();
     const result = await runShell(command, timeline.root, args.timeoutMs ?? 120_000);
+    const finishedAt = new Date().toISOString();
     await fs.writeFile(stdoutPath, result.stdout, "utf8");
     await fs.writeFile(stderrPath, result.stderr, "utf8");
 
     const commandRecord: TimelineCommandRecord = {
       command,
       startedAt,
-      finishedAt: new Date().toISOString(),
+      finishedAt,
+      durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)),
       exitCode: result.exitCode,
       ok: result.ok,
       stdoutPath,
@@ -209,6 +216,8 @@ export class TimelineManager {
     for (const id of ids) {
       const timeline = await this.readRecord(id);
       const diffStat = await gitOutput(["diff", "--stat"], timeline.root);
+      const diffNumStat = await gitOutput(["diff", "--numstat"], timeline.root);
+      const diffNameOnly = await gitOutput(["diff", "--name-only"], timeline.root);
       const diffPreview = await gitOutput(["diff", "--", "."], timeline.root);
       const lastCommand = timeline.commands.at(-1);
       comparisons.push({
@@ -219,8 +228,11 @@ export class TimelineManager {
         verdict: timeline.verdict ?? "unknown",
         root: timeline.root,
         diffStat: diffStat || "No tracked diff.",
+        changedFiles: parseChangedFiles(diffNameOnly),
+        changedLineCount: parseChangedLineCount(diffNumStat),
         diffPreview: trimLog(diffPreview, 8000),
-        lastCommand
+        lastCommand,
+        commandDurationMs: lastCommand?.durationMs ?? null
       });
     }
     return { ok: true, comparisons };
@@ -316,6 +328,30 @@ async function runShell(command: string, cwd: string, timeoutMs: number): Promis
   });
 }
 
+function parseChangedLineCount(diffNumStat: string): number {
+  return diffNumStat
+    .split(/\r?\n/g)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .reduce((total, line) => {
+      const match = line.match(/^(\d+|-)\t(\d+|-)\t/);
+      if (!match) return total;
+      const added = match[1] === "-" ? 0 : Number(match[1]);
+      const removed = match[2] === "-" ? 0 : Number(match[2]);
+      return total + added + removed;
+    }, 0);
+}
+
+function parseChangedFiles(diffNameOnly: string): string[] {
+  const files = new Set<string>();
+  for (const line of diffNameOnly.split(/\r?\n/g)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    files.add(trimmed);
+  }
+  return Array.from(files);
+}
+
 async function runWithInput(command: string, args: string[], input: string, cwd: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     const child = spawn(command, args, { cwd });
@@ -362,4 +398,9 @@ function sanitizeId(value: string): string {
   const safe = value.replace(/[^a-zA-Z0-9._-]+/g, "");
   if (!safe) throw new Error("Invalid timeline id");
   return safe;
+}
+
+function isInsidePath(parent: string, child: string): boolean {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }

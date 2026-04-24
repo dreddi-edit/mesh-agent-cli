@@ -80,6 +80,7 @@ Mesh can "see" your code as it runs.
 -   **V8 Telemetry**: Injects a specialized `node:inspector` script into your process via `NODE_OPTIONS`.
 -   **Uncaught Exception Freezing**: When a crash occurs, Mesh freezes the V8 engine, dumps the **full call stack**, and captures all **local variable values** at the moment of failure.
 -   **`runtime.start`, `runtime.capture_failure`, `runtime.fix_failure`**: The automated pipeline where the agent receives the memory dump and patches the bug.
+-   **Current v1 behavior**: Node-backed runs capture real inspector pause data when possible; non-Node processes fall back to stack/log reconstruction.
 
 ---
 
@@ -90,7 +91,7 @@ Mesh is the first agent that turns any local codebase into a visual IDE. Using a
 ### Core Capabilities
 -   **Intent-Based Design**: Alt+Click any element to open a prompt field. Describe changes like "Make this a glassmorphism card" or "Modernize this button."
 -   **Zero-Latency Ghost Styles**: The agent emits immediate CSS `PREVIEW_STYLE` blocks. Mesh pushes these to the browser via CDP in milliseconds for instant feedback before the permanent code is even written.
--   **Multimodal Vision Loop**: After a ghost patch, Mesh captures a precise screenshot of the element and sends it back to the LLM (Claude 3.5 Sonnet) for visual verification. The agent "sees" if the design is correct and self-corrects before patching the file.
+-   **Multimodal Vision Loop**: After a ghost patch, Mesh captures a precise screenshot of the element and sends it back to the LLM (Claude Sonnet 4.5) for visual verification. The agent "sees" if the design is correct and self-corrects before patching the file.
 -   **Smart Paradigm Detection**: Mesh automatically detects if a project uses Tailwind CSS. It translates visual intents into utility classes (e.g., `p-4` -> `p-16`) instead of generic inline styles.
 -   **Sibling & Parent Awareness**: The agent receives the surrounding HTML context to ensure layout changes (like Flexbox or Grid) are structurally sound.
 
@@ -111,7 +112,7 @@ A specialized engine for multi-repo orchestration.
 
 ---
 
-## 🌐 7. MCP Protocol & External Integrations
+## 🌐 8. MCP Protocol & External Integrations
 
 Mesh acts as an MCP (Model Context Protocol) Client to seamlessly add third-party tools.
 
@@ -120,7 +121,7 @@ Mesh acts as an MCP (Model Context Protocol) Client to seamlessly add third-part
 
 ---
 
-## 📊 8. Control Plane & UI (Dashboard & Multi-Modal)
+## 📊 9. Control Plane & UI (Dashboard & Multi-Modal)
 
 Tools to bridge the terminal and the visual realm.
 
@@ -131,10 +132,41 @@ Tools to bridge the terminal and the visual realm.
 -   **`frontend.preview`**: Uses Chrome CDP to take headless screenshots of URLs and renders them directly in the terminal via Kitty/iTerm2 image protocols.
 -   **`web.inspect_ui`**: Triggers a Playwright headless browser to screenshot and evaluate web UI visually.
 -   **`web.read_docs`**: Fetches and cleans HTML from the web (strips scripts/styles) for the agent to read external docs natively.
+-   **Current v1 behavior**: The overlay captures React source hints and recent network activity, then passes that evidence to the agent loop for route tracing.
+-   **Live Architecture Cockpit**: `/dashboard` now renders a cockpit snapshot that combines Digital Twin, repair queue, Engineering Memory, timelines, runtime runs, git/index state, and a health score.
 
 ---
 
-## 🤖 9. Agent OS (Swarms & Delegation)
+## 🧠 10. Digital Twin, Memory & Intent Compiler
+
+Mesh maintains a persistent local model of the repo and uses it to turn intent into verified engineering work.
+
+-   **`workspace.digital_twin` / `/twin`**: Builds `.mesh/digital-twin.json` with files, symbols, routes, tests, env names, deploy/config hints, git state, and risk hotspots.
+-   **`workspace.predictive_repair` / `/repair`**: Analyzes diagnostics, watcher signals, dirty files, risk hotspots, and learned rules, then stores prepared fixes in `.mesh/predictive-repair.json`.
+-   **`workspace.engineering_memory` / `/learn`**: Records accepted/rejected patterns, risk modules, reviewer preferences, and repo-specific rules in `.mesh/engineering-memory.json`.
+-   **`workspace.intent_compile` / `/intent`**: Turns product intent into `.mesh/intent-compiler/latest.json` with likely files, interfaces, tests, risks, rollout, rollback, and verification command.
+-   **`workspace.causal_intelligence` / `/causal`**: Builds `.mesh/causal-intelligence.json`, a causal graph linking files, symbols, routes, risks, tests, repair signals, Engineering Memory rules, and git change pressure.
+-   **`workspace.discovery_lab` / `/lab`**: Runs an autonomous opportunity scan and writes `.mesh/discovery-lab.json` with ranked experiments, evidence, expected impact, verification commands, and recommended tools.
+-   **`workspace.reality_fork` / `/fork`**: Converts an intent into multiple scored implementation realities and can materialize them as isolated timelines with per-fork contracts.
+-   **`workspace.ghost_engineer` / `/ghost`**: Learns the local engineer's repo-specific implementation style from Git, dirty work, Digital Twin, Causal Intelligence, and Engineering Memory. It predicts how the engineer would approach a goal, detects plan divergence, and can materialize a style-conformant autopilot timeline.
+
+### Implemented Moonshot Stack
+-   **Multiverse Fix Racing**: `agent.race_fixes` creates parallel candidate timelines, verifies them, scores telemetry, and recommends a winner.
+-   **Failure Autopsy**: `runtime.capture_deep_autopsy` captures inspector-backed Node crash reports with scope data and log fallback.
+-   **UI-To-Code X-Ray**: `/inspect` overlay captures React source hints, network activity, route evidence, and sends it into the agent loop.
+-   **Codebase Digital Twin**: `.mesh/digital-twin.json` summarizes files, symbols, routes, tests, env, deploy/config, git, and risk hotspots.
+-   **Predictive Repair Daemon**: `.mesh/predictive-repair.json` stores diagnostic and watcher-driven repair candidates.
+-   **Engineering Memory**: `.mesh/engineering-memory.json` persists repo rules, risk modules, accepted/rejected patterns, and learned events.
+-   **Intent Compiler**: `.mesh/intent-compiler/latest.json` turns product intent into likely files, risks, tests, rollout, rollback, and verification.
+-   **Live Architecture Cockpit**: `/dashboard` reads `workspace.cockpit_snapshot` for index, git, repair, memory, timelines, runtime, causal, discovery, reality fork, and ghost state.
+-   **Causal Software Intelligence**: `.mesh/causal-intelligence.json` turns repo evidence into causal insights and queryable recommendations.
+-   **Autonomous Discovery Lab**: `.mesh/discovery-lab.json` proposes evidence-backed improvement experiments.
+-   **Reality Fork Engine**: `.mesh/reality-forks/latest.json` compares alternate future implementations and can spawn their timelines.
+-   **Ghost Engineer Replay**: `.mesh/ghost-engineer/profile.json` models the engineer's local style and produces predictions, divergence checks, and autopilot timelines.
+
+---
+
+## 🤖 11. Agent OS (Swarms & Delegation)
 
 For massive tasks, Mesh spawns specialized workers.
 
@@ -146,7 +178,7 @@ For massive tasks, Mesh spawns specialized workers.
 
 ---
 
-## 🛡 10. Safety, Reliability & DX
+## 🛡 12. Safety, Reliability & DX
 
 -   **Surgical Undo**: `/undo` reverts the last 50 edits step-by-step using an internal content stack in `LocalToolBackend`.
 -   **Semantic Undo**: `workspace.semantic_undo` uses Git to surgically `git revert -n` specific concepts based on commit history.
@@ -156,7 +188,7 @@ For massive tasks, Mesh spawns specialized workers.
 
 ---
 
-## ⚙️ 11. Exhaustive Command & Tool Reference
+## ⚙️ 13. Exhaustive Command & Tool Reference
 
 ### Complete Slash Commands
 | Command | Usage | Description |
@@ -167,6 +199,14 @@ For massive tasks, Mesh spawns specialized workers.
 | `/index` | `/index` | Re-index workspace and generate file capsules. |
 | `/distill` | `/distill` | Analyze workspace and update the project brain context. |
 | `/synthesize` | `/synthesize`| Auto-generate structural changes based on background heuristics. |
+| `/twin` | `/twin [build\|read\|status]` | Build or inspect the Codebase Digital Twin. |
+| `/repair` | `/repair [analyze\|status\|clear]` | Inspect the Predictive Repair queue. |
+| `/learn` | `/learn [read\|learn]` | Read or refresh Engineering Memory. |
+| `/intent` | `/intent <product intent>` | Compile product intent into an implementation contract. |
+| `/causal` | `/causal [build\|read\|status\|query <question>]` | Build or query Causal Software Intelligence. |
+| `/lab` | `/lab [run\|status\|clear]` | Run the Autonomous Discovery Lab. |
+| `/fork` | `/fork [plan\|fork\|status\|clear] <intent>` | Plan or materialize alternate implementation realities. |
+| `/ghost` | `/ghost [learn\|profile\|predict\|divergence\|patch] <input>` | Learn and replay the local engineer's implementation style. |
 | `/fix` | `/fix` | Apply a background-resolved fix for a current linter/compiler error. |
 | `/hologram` | `/hologram <cmd>`| Run command with V8 telemetry injection for live memory debugging. |
 | `/entangle` | `/entangle <path>`| Quantum-link a second repository to sync AST mutations in real-time. |
@@ -186,7 +226,7 @@ For massive tasks, Mesh spawns specialized workers.
 | `/voice` | `/voice [on\|off]`| Toggle or configure Speech-to-Speech mode. |
 | `/exit" | `/exit` | Quit. |
 
-### Complete Agent Tool Roster (68 Local Tools)
+### Complete Agent Tool Roster (80 Local Tools)
 *(Tools grouped by domain, exactly as exposed by `LocalToolBackend`)*
 
 **Filesystem Core:**
@@ -214,4 +254,4 @@ For massive tasks, Mesh spawns specialized workers.
 `web.read_docs`, `web.inspect_ui`, `frontend.preview`
 
 **Void Protocol & Internal Memory:**
-`workspace.session_index_symbols`, `workspace.generate_lexicon`, `workspace.get_index_status`, `workspace.index_status`, `workspace.check_sync`, `workspace.index_everything`
+`workspace.session_index_symbols`, `workspace.generate_lexicon`, `workspace.get_index_status`, `workspace.index_status`, `workspace.check_sync`, `workspace.index_everything`, `workspace.digital_twin`, `workspace.predictive_repair`, `workspace.engineering_memory`, `workspace.intent_compile`, `workspace.cockpit_snapshot`, `workspace.causal_intelligence`, `workspace.discovery_lab`, `workspace.reality_fork`, `workspace.ghost_engineer`
