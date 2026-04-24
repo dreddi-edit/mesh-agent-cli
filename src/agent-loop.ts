@@ -92,6 +92,19 @@ const RECOMMENDED_SYSTEM_VOICE_BY_LANGUAGE: Record<string, string> = {
   pt: "Luciana"
 };
 
+const VOICE_EXIT_PATTERNS = [
+  /^\/voice off$/,
+  /^(voice|voice mode|voice chat)\s+(off|stop|exit|quit|disable)(\s+(please|now))?$/,
+  /^(stop|exit|quit|disable)\s+(voice|voice mode|voice chat)(\s+(please|now))?$/,
+  /^(stop listening|stop recording)$/,
+  /^(voice|sprachmodus|stimmmodus)\s+(aus|off)(\s+bitte)?$/,
+  /^(beende|beenden|stoppe|stopp)\s+(voice|sprachmodus|stimmmodus)(\s+bitte)?$/,
+  /^(zuruck|zuruck zum text|zuruck zum textmodus)$/,
+  /^(zurück|zurück zum text|zurück zum textmodus)$/,
+  /^(textmodus|text modus)\s+(an|zuruck)$/,
+  /^(textmodus|text)\s+bitte$/
+];
+
 interface WireTool {
   wireName: string;
   tool: ToolDefinition;
@@ -448,6 +461,36 @@ export class AgentLoop {
     });
   }
 
+  private normalizeVoiceCommand(text: string): string {
+    return text
+      .trim()
+      .toLowerCase()
+      .normalize("NFKD")
+      .replace(/\p{Diacritic}/gu, "")
+      .replace(/[^\p{L}\p{N}\/\s]+/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  private isVoiceExitCommand(text: string): boolean {
+    const normalized = this.normalizeVoiceCommand(text);
+    if (!normalized) {
+      return false;
+    }
+    return VOICE_EXIT_PATTERNS.some((pattern) => pattern.test(normalized));
+  }
+
+  private getVoiceExitHint(): string {
+    const language = this.getVoiceReplyLanguage().split("-")[0];
+    if (language === "de") {
+      return 'Sage "Voice aus" oder "beende Sprachmodus", um Voice zu verlassen.';
+    }
+    if (language === "en") {
+      return 'Say "voice off" or "stop voice mode" to leave voice mode.';
+    }
+    return 'Say "voice off" or "Voice aus" to leave voice mode.';
+  }
+
   async runCli(initialPrompt?: string): Promise<void> {
     await this.checkInit();
     this.sessionCapsule = await this.sessionStore.load();
@@ -562,6 +605,13 @@ export class AgentLoop {
       }
 
       if (!userInput) {
+        rl.close();
+        continue;
+      }
+
+      if (this.voiceMode && this.isVoiceExitCommand(userInput)) {
+        this.voiceMode = false;
+        this.renderSystemMessage(pc.green("Voice mode disabled. Back to text input."));
         rl.close();
         continue;
       }
@@ -1614,6 +1664,9 @@ export class AgentLoop {
         }
 
         output.write(`\nVoice mode: ${this.voiceMode ? pc.green("ON") : pc.red("OFF")}\n`);
+        if (this.voiceMode) {
+          output.write(`${pc.dim(this.getVoiceExitHint())}\n`);
+        }
         return { wasHandled: true, shouldExit: false };
       default:
         output.write(`\nUnknown command: ${inputCmd} (resolved to ${command}). Use /help.\n`);
