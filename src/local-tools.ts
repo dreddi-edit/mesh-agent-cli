@@ -46,7 +46,7 @@ async function collectFiles(start: string, limit: number): Promise<string[]> {
     const entries = await fs.readdir(current, { withFileTypes: true });
     for (const entry of entries) {
       if (files.length >= limit) break;
-      if (entry.name.startsWith(".") && entry.name !== ".env") continue;
+      if (entry.name.startsWith(".")) continue;
 
       const nextPath = path.join(current, entry.name);
       if (entry.isDirectory()) {

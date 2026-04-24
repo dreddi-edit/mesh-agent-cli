@@ -7,8 +7,12 @@ import pc from "picocolors";
 import keytar from "keytar";
 import "dotenv/config";
 
+// These are the public Mesh auth endpoints. The anon key is a Supabase public
+// client key (not a secret) — it is intentionally committed and relies on
+// Row Level Security for data isolation. Override via env vars if self-hosting.
+// nosec: public-supabase-anon-key
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://msmonxiacxhendxehezw.supabase.co";
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY ||
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || // nosec
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1zbW9ueGlhY3hoZW5keGVoZXp3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY5NDU3NTMsImV4cCI6MjA5MjUyMTc1M30.K-FQFpcOwtJAIAfn5lTzmrox_6cv_8qqXGxi9IgosB8";
 
 const SESSION_DIR = path.join(os.homedir(), ".config", "mesh");

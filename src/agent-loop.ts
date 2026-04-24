@@ -866,23 +866,22 @@ export class AgentLoop {
 
         // Tool Security Check
         if (selectedTool.tool.requiresApproval && !this.autoApproveTools) {
-          if (hooks?.askPermission) {
-            const allowed = await hooks.askPermission(`Allow ${selectedTool.tool.name} to run?`);
-            if (!allowed) {
-              this.transcript.push({
-                role: "user",
-                content: [
-                  {
-                    toolResult: {
-                      toolUseId: response.toolUseId,
-                      status: "error",
-                      content: [{ text: "User denied permission to run this tool." }]
-                    }
+          const denied = !hooks?.askPermission
+            || !(await hooks.askPermission(`Allow ${selectedTool.tool.name} to run?`));
+          if (denied) {
+            this.transcript.push({
+              role: "user",
+              content: [
+                {
+                  toolResult: {
+                    toolUseId: response.toolUseId,
+                    status: "error",
+                    content: [{ text: hooks?.askPermission ? "User denied permission to run this tool." : "Tool requires interactive approval but no TTY is available." }]
                   }
-                ]
-              });
-              continue;
-            }
+                }
+              ]
+            });
+            continue;
           }
         }
 
