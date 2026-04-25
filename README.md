@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/dreddi-edit/mesh-agent-cli/main/assets/mesh-banner.svg" alt="Mesh - Terminal-first AI engineering agent" width="100%">
+  <img src="https://cdn.jsdelivr.net/npm/@edgarelmo/mesh-agent-cli/assets/mesh-banner.svg" alt="Mesh - Terminal-first AI engineering agent" width="100%">
 </p>
 
 <p align="center">
