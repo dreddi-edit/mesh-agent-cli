@@ -77,6 +77,12 @@ Mesh stores project-specific artifacts in `.mesh/` and persistent per-workspace 
 - macOS, Linux, or any environment where npm global binaries are available on `PATH`.
 - Optional for voice mode on macOS: Homebrew with `ffmpeg` and `whisper-cpp`.
 
+## Performance Settings
+
+- `MESH_INDEX_PARALLELISM`: shared indexing concurrency for CLI and mesh-core paths. Default: `12`.
+- `MESH_EMBEDDING_MODEL`: local retrieval embedding model. Default: `Xenova/nomic-embed-code`, with `Xenova/all-MiniLM-L6-v2` fallback.
+- `BEDROCK_MAX_TOKENS`: default model output cap. Default: `3000`; write-heavy turns can request up to `4096`, read/search turns are capped lower.
+
 ## Package Commands
 
 The npm package exposes two equivalent global commands:

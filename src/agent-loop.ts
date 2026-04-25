@@ -36,54 +36,62 @@ import { ContextArtifactStore } from "./context-artifacts.js";
 import { PersistedSessionCapsule, SessionCapsuleStore } from "./session-capsule-store.js";
 import { MeshPortal } from "./mesh-portal.js";
 import { ToolBackend, ToolDefinition } from "./tool-backend.js";
-import { VoiceManager } from "./voice-manager.js";
+import { VoiceDependencyStatus, VoiceManager } from "./voice-manager.js";
 
 const SYSTEM_PROMPT = [
+  "# Identity",
   "You are Mesh, a high-performance terminal AI coding agent designed by edgarelmo.",
   "Your purpose is to assist developers with complex engineering tasks directly within their workspace.",
-  "Response Contract:",
-  "- Be terse by default. Do not greet, pitch capabilities, or ask broad 'what do you want to do' questions.",
-  "- No emojis, decorative symbols, or hype language.",
-  "- For simple acknowledgements or greetings, answer in one short sentence.",
-  "- For coding work, lead with the result or the next concrete action. Only explain details when they affect the user's decision.",
-  "- Do not list menus of capabilities unless the user explicitly asks for help or options.",
-  "- Tool results arrive as mesh.tool_result.v2 envelopes. Treat summary/facts/refs as evidence. Use workspace.open_artifact only for the exact missing detail; never ask for broad artifact dumps.",
-  "Core Principles:",
-  "1. Efficiency: Follow the CAPSULE-FIRST hierarchy: Prefer 'workspace.ask_codebase' with the right mode, then 'workspace.read_file', 'workspace.read_dir_overview', and exact raw reads only when needed.",
-  "2. Local Code Intelligence: 'workspace.ask_codebase' uses the persistent local index and returns citations. Use modes: architecture, bug, edit-impact, test-impact, ownership, recent-change, runtime-path.",
-  "2a. Symbol and Impact Tools: Use 'workspace.explain_symbol' for definitions/callers and 'workspace.impact_map' before risky edits.",
-  "3. Void-Protocol (MAX COMPRESSION): Use 'workspace.generate_lexicon' to get a dictionary of project terms. Then use #ID in 'workspace.alien_patch' (e.g. !1 > { #A = a: #B() }) for near-zero token edits.",
-  "3. Ghost Timeline Lifecycle: When proposing a critical fix, use 'agent.race_fixes' to try multiple parallel strategies. Compare results and promote the best one. For single manual fixes, use 'workspace.timeline_create', apply a patch, run verification, and promote.",
-  "4. Predictive Pathing: You will sometimes see [PREDICTIVE CONTEXT] in your prompt. This is Mesh pre-loading likely relevant dependencies based on your last actions.",
-  "5. Time-Travel AST Diffing: Use 'workspace.get_recent_changes' to see background modifications without re-reading files.",
-  "6. Symbolic Trace Routing: Use 'workspace.trace_symbol' to trace data flow deterministically.",
-  "7. Multi-Agent OS: For broad work, create role-scoped workers with 'agent.spawn' using .mesh/agents definitions, review timelines with 'agent.review', and merge with 'agent.merge_verified'.",
-  "8. Micro-Edits: For simple renames, use 'workspace.rename_symbol'.",
-  "9. Parallelism: Batch only independent tool calls. Prefer one high-signal index query over multiple raw reads.",
-  "10. Runtime Cognition: Use 'runtime.start', 'runtime.capture_failure', and 'runtime.explain_failure' for live command/test debugging. Use 'frontend.preview' for real terminal screenshots via Chrome CDP; use 'web.inspect_ui' only when Playwright-style inspection is needed.",
-  "11. Moonshot OS: Use 'workspace.digital_twin' before major work, 'workspace.intent_compile' for product asks, 'workspace.predictive_repair' for failing diagnostics, 'workspace.engineering_memory' for repo-specific rules, and 'workspace.cockpit_snapshot' for operational status.",
-  "12. Legendary Moonshots: Use 'workspace.causal_intelligence' for causal repo reasoning, 'workspace.discovery_lab' for autonomous improvement experiments, and 'workspace.reality_fork' to compare alternate implementation realities before risky work.",
-  "12a. Ghost Engineer Replay: Use 'workspace.ghost_engineer' to learn the user's repo-specific engineering style, predict how they would implement a goal, check divergence, and materialize a style-conformant timeline plan.",
-  "13. Plan-First & Finalization: Use 'agent.plan'.",
-  "14. Action-Oriented: Focus on solving the user's problem. Give concise, direct final answers.",
-  "15. Adaptability: Match the language of the user (German or English).",
-  "16. Mesh-Alien-OS (MAX EFFICIENCY): To save 90% tokens, use 'workspace.session_index_symbols' first to get IDs for file symbols. Then use 'workspace.alien_patch' with Symbolic Opcodes:",
-  "    Opcode Rosetta Stone: e: (export) | s: (async) | f: (function) | c: (const) | l: (let) | r: (return) | a: (await) | i: (if) | p: (Promise) | cn: (console.log) | th: (throw new Error)",
-  "    Patch Format: !ID > { [ALIENT_CODE] }",
-  "Token Law: raw tool output is stored locally, not in context. Answer from compressed evidence unless a precise artifact slice is required.",
-  "Operating Environment: You run as a CLI tool on the user's machine. Minimize I/O and token usage by leveraging the Mesh-Compression cache aggressively. If you feel you lack context, suggest the user run '/index' to pre-cache the entire workspace."
-].join("\n");
+  "",
+  "# Rules",
+  "- **Terse & Concise**: Be terse by default. Do not greet, pitch capabilities, or ask broad 'what do you want to do' questions.",
+  "- **No Fluff**: No emojis, decorative symbols, or hype language.",
+  "- **Action-Oriented**: Lead with the result or the next concrete action. Only explain details when they affect the user's decision.",
+  "- **Adaptability**: Match the language of the user (German or English).",
+  "- **Never** execute destructive terminal commands without explicit user permission.",
+  "- **Token Law**: Raw tool output is stored locally, not in context. Answer from compressed evidence.",
+  "",
+  "# Capabilities",
+  "- **CAPSULE-FIRST**: Prefer 'workspace.ask_codebase' with the right mode, then 'workspace.read_file' or 'workspace.read_dir_overview'.",
+  "- **Symbol & Impact**: Use 'workspace.explain_symbol' for definitions/callers and 'workspace.impact_map' before risky edits.",
+  "- **Time-Travel Diffing**: Use 'workspace.get_recent_changes' to see background modifications without re-reading files.",
+  "- **Trace Routing**: Use 'workspace.trace_symbol' to trace data flow deterministically.",
+  "- **Runtime Debugging**: Use 'runtime.start', 'runtime.capture_failure', and 'runtime.explain_failure' for live command/test debugging.",
+  "- **Micro-Edits**: For simple renames, use 'workspace.rename_symbol'.",
+  "- **Alien-Patching (Max Compression)**: To save 90% tokens, use 'workspace.session_index_symbols' first, then 'workspace.alien_patch' with Symbolic Opcodes.",
+  "  *Opcode Rosetta Stone*: `e:` (export) | `s:` (async) | `f:` (function) | `c:` (const) | `l:` (let) | `r:` (return) | `a:` (await) | `i:` (if) | `p:` (Promise)",
+  "  *Patch Format*: `!ID > { [ALIEN_CODE] }`",
+  "- **Multi-Agent Orchestration**: Create role-scoped workers with 'agent.spawn', review timelines with 'agent.review', and merge with 'agent.merge_verified'.",
+  "- **Ghost Timeline Lifecycle**: Use 'agent.race_fixes' or 'workspace.timeline_create' to parallelize and verify changes before promotion.",
+  "- **Repo Intelligence**: Use 'workspace.digital_twin' before major work and 'workspace.predictive_repair' for failing diagnostics.",
+  "",
+  "# Limitations",
+  "- You do not have unrestricted local file access. You must use tools.",
+  "- Context windows are limited. Always rely on summarized capsules.",
+  "",
+  "# Personalization",
+  "Follow the user's specific coding style based on their engineering memory ('workspace.ghost_engineer').",
+  "",
+  "# Chain-of-Thought (CoT) Enforcement",
+  "Before making risky edits, running complex commands, or executing multi-step tools, you MUST emit a `<thought>` block following this strict 5-step framework:",
+  "1. What exactly is being asked?",
+  "2. What information is critical?",
+  "3. What approaches exist?",
+  "4. Which is best and why?",
+  "5. What are the risks/limitations?"
+].join("\\n");
 
 const VOICE_SYSTEM_PROMPT = [
-  "Voice mode is active.",
+  "# Voice Mode Active",
   "Respond for spoken conversation, not for markdown reading.",
-  "Use short natural sentences.",
-  "Reply in plain text only.",
-  "Never use emojis, bullet lists, markdown formatting, headings, code fences, or decorative symbols.",
-  "Keep answers very short unless the user explicitly asks for more detail.",
-  "Avoid reading punctuation-heavy structures aloud.",
-  "If the user asks a coding question, answer briefly first and only give commands or code when truly necessary."
-].join("\n");
+  "",
+  "## Voice Contract",
+  "- **Short & Natural**: Use short natural sentences. Reply in plain text only.",
+  "- **No Formatting**: Never use emojis, bullet lists, markdown formatting, headings, code fences, or decorative symbols.",
+  "- **Conciseness**: Keep answers very short unless the user explicitly asks for more detail.",
+  "- **Readability**: Avoid reading punctuation-heavy structures aloud.",
+  "- **Code**: If the user asks a coding question, answer briefly first and only give commands or code when truly necessary."
+].join("\\n");
 
 const VOICE_LANGUAGE_CHOICES = [
   { name: "auto", message: "Auto-detect", hint: "Use Whisper language detection" },
@@ -461,6 +469,8 @@ export class AgentLoop {
   private voiceMode = false;
   private voiceLanguage = "en";
   private prefetchQueue: string[] = [];
+  private pendingPrefetchQueue: string[] = [];
+  private currentTurnPreferredTools: string[] = [];
   private dashboardEventWrite: Promise<void> = Promise.resolve();
   private dashboardActionTimer: NodeJS.Timeout | null = null;
   private dashboardActionRunning = false;
@@ -494,7 +504,7 @@ export class AgentLoop {
       temperature: config.bedrock.temperature,
       maxTokens: config.bedrock.maxTokens
     });
-    
+
     const colorStr = config.agent.themeColor || "cyan";
     const colorFn = pc[colorStr as keyof typeof pc];
     if (typeof colorFn === "function") {
@@ -661,7 +671,7 @@ export class AgentLoop {
 
   private async handleInspect(url: string): Promise<void> {
     const port = new URL(url).port || "3000";
-    
+
     // 1. Check if server is already running
     const isRunning = await new Promise(resolve => {
       const socket = new http.ClientRequest({ port: Number(port), method: 'HEAD', timeout: 500 });
@@ -676,7 +686,7 @@ export class AgentLoop {
         const pkgPath = path.join(this.config.agent.workspaceRoot, "package.json");
         const pkg = JSON.parse(await fs.readFile(pkgPath, "utf8"));
         const devScript = pkg.scripts?.dev || pkg.scripts?.start;
-        
+
         if (devScript) {
           const { spawn } = await import("node:child_process");
           const serverProc = spawn("npm", ["run", pkg.scripts?.dev ? "dev" : "start"], {
@@ -686,7 +696,7 @@ export class AgentLoop {
           });
           serverProc.unref();
           output.write(pc.green(`[Mesh Portal] Dev server launched in background. Waiting for port ${port}...\n`));
-          
+
           // Wait for port to open
           for (let i = 0; i < 20; i++) {
             await new Promise(r => setTimeout(r, 1000));
@@ -766,13 +776,13 @@ export class AgentLoop {
       ? await this.backend.callTool("workspace.trace_symbol", { path: relPath, symbol: componentName }).catch(() => null)
       : null;
     const populatedRequestSummaries = requestSummaries.filter(Boolean);
-    
+
     if (type === "PROMPT") {
       process.stdout.write(pc.cyan(`\n[Visual AI] Designing for ${pc.bold(relPath)}:${sourceLine || line || 0}...\n`));
       process.stdout.write(pc.dim(`  " ${prompt} "\n`));
 
       // Detect Styling Paradigm
-      const hasTailwind = await fs.access(path.join(this.config.agent.workspaceRoot, "tailwind.config.js")).then(() => true).catch(() => 
+      const hasTailwind = await fs.access(path.join(this.config.agent.workspaceRoot, "tailwind.config.js")).then(() => true).catch(() =>
                           fs.access(path.join(this.config.agent.workspaceRoot, "tailwind.config.ts")).then(() => true).catch(() => false));
 
       const evidenceLines = [
@@ -818,7 +828,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
                 await this.portal.applyGhostStyles(styles);
                 previewSent = true;
                 process.stdout.write(pc.green("\n[Ghost Sync] Live preview applied. Capturing for Vision check...\n"));
-                
+
                 // Vision Verification Step
                 await new Promise(r => setTimeout(r, 300)); // Wait for render
                 const base64 = await this.portal.captureElementScreenshot();
@@ -863,11 +873,11 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
 
     await this.checkInit();
     this.sessionCapsule = await this.sessionStore.load();
-    
+
     // Load persistent history
     try {
       const historyRaw = await fs.readFile(this.historyPath, "utf-8");
-      this.persistentHistory = historyRaw.split("\n").filter(Boolean).reverse(); // readline expects newest first? No, readline history is old to new. 
+      this.persistentHistory = historyRaw.split("\n").filter(Boolean).reverse(); // readline expects newest first? No, readline history is old to new.
       // Actually readline history is [older, ..., newer]
       this.persistentHistory = historyRaw.split("\n").filter(Boolean);
     } catch {
@@ -1128,9 +1138,16 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
       this.renderSystemMessage(autoCompactMessage);
     }
 
+    if (this.pendingPrefetchQueue.length > 0) {
+      this.prefetchQueue.push(...this.pendingPrefetchQueue.splice(0));
+    }
+
     const tools = await this.backend.listTools();
-    const wireTools = selectWireToolsForTurn(toWireTools(tools), userInput);
-    const toolSpecs = toToolSpecs(wireTools);
+    const allWireTools = toWireTools(tools);
+    const preferredWireTools = selectWireToolsForTurn(allWireTools, userInput);
+    this.currentTurnPreferredTools = preferredWireTools.map((item) => item.tool.name);
+    const toolSpecs = toToolSpecs(allWireTools);
+    const wireTools = allWireTools;
     const wireToolMap = new Map(wireTools.map((item) => [item.wireName, item]));
 
     const preTurnLength = this.transcript.length;
@@ -1141,6 +1158,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     this.abortController = new AbortController();
     const maxSteps = this.maxStepsForInput(userInput);
     const toolBudget = this.toolBudgetForInput(userInput);
+    const maxTokensOverride = this.maxTokensForInput(userInput);
     let scheduledToolCalls = 0;
     const seenToolSignatures = new Set<string>();
     const toolFamilyCounts = new Map<string, number>();
@@ -1159,9 +1177,10 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
             const stream = this.llm.converseStream(
               prepared.messages,
               prepared.tools,
-              prepared.systemPrompt,
+              prepared.systemPromptArray,
               this.currentModelId,
-              this.abortController.signal
+              this.abortController.signal,
+              maxTokensOverride
             );
 
             for await (const chunk of stream) {
@@ -1206,9 +1225,10 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
             response = await this.llm.converse(
               prepared.messages,
               prepared.tools,
-              prepared.systemPrompt,
+              prepared.systemPromptArray,
               this.currentModelId,
-              this.abortController.signal
+              this.abortController.signal,
+              maxTokensOverride
             );
 
             if (response.usage) {
@@ -1225,9 +1245,10 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
           response = await this.llm.converse(
             prepared.messages,
             prepared.tools,
-            prepared.systemPrompt,
+            prepared.systemPromptArray,
             this.currentModelId,
-            this.abortController.signal
+            this.abortController.signal,
+            maxTokensOverride
           );
 
           if (response.usage) {
@@ -1256,7 +1277,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
         for (const tu of response.toolUses) {
           const sel = wireToolMap.get(tu.name);
           if (!sel) { approved.set(tu.toolUseId, false); continue; }
-          
+
           if (silent) {
             approved.set(tu.toolUseId, true);
           } else if (sel.tool.requiresApproval && !this.autoApproveTools) {
@@ -1315,7 +1336,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
               text: "Tool requires interactive approval but no TTY is available."
             };
           }
-          
+
           this.emitPulse("tool_start", tu.input.path as string, tu.name);
           if (!silent) {
             if (spinner) {
@@ -1326,21 +1347,45 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
           }
 
           try {
+            // 5. Fact Verification Pre-flight (RecallMax)
+            if ((sel.tool.name === "workspace.write_file" || sel.tool.name === "workspace.patch_file" || sel.tool.name === "workspace.alien_patch") && this.transcript.length >= 10) {
+              const preflightPrompt = `CRITICAL PRE-FLIGHT CHECK: You are about to modify a file (${tu.input.path || 'unknown'}). Based on the long context history, is there any contradictory fact or limitation that makes this edit unsafe or incorrect? Reply with ONLY 'SAFE' or 'UNSAFE: [reason]'.`;
+              try {
+                const checkRes = await this.llm.converse([{ role: "user", content: [{ text: preflightPrompt }] }], [], "You are a Fact Verification Module.");
+                const checkText = checkRes.kind === "text" ? checkRes.text.trim().toUpperCase() : "";
+                if (checkText.startsWith("UNSAFE")) {
+                  if (!silent && spinner) {
+                     spinner.fail(pc.red(`Fact Verification Blocked Edit: ${checkText}`));
+                     // We intentionally throw so the tool fails cleanly
+                  }
+                  return { toolUseId: tu.toolUseId, status: "error" as const, text: `Fact Verification Pre-flight failed: ${checkText}` };
+                }
+              } catch (e) { /* Ignore pre-flight timeout/error */ }
+            }
+
             const raw = await this.backend.callTool(sel.tool.name, tu.input, { onProgress: silent ? undefined : hooks?.onCommandChunk });
-            
+
             // Neural Path Prefetching
             if (sel.tool.name === "workspace.read_file" || sel.tool.name === "workspace.expand_execution_path") {
               const filePath = String(tu.input.path ?? "");
               if (filePath) {
-                const graph: any = await this.backend.callTool("workspace.get_file_graph", { path: filePath }).catch(() => null);
-                if (graph?.ok && graph.dependencies) {
-                  for (const dep of graph.dependencies.slice(0, 2)) {
-                    const capsule: any = await this.backend.callTool("workspace.read_file", { path: dep, tier: "low" }).catch(() => null);
-                    if (capsule?.content) {
-                      this.prefetchQueue.push(`File: ${dep}\n${capsule.content}`);
+                void (async () => {
+                  const graph: any = await this.backend.callTool("workspace.get_file_graph", { path: filePath }).catch(() => null);
+                  if (graph?.ok && graph.dependencies) {
+                    await Promise.all(
+                      graph.dependencies.slice(0, 2).map(async (dep: string) => {
+                        const capsule: any = await this.backend.callTool("workspace.read_file", { path: dep, tier: "low" }).catch(() => null);
+                        const content = capsule?.capsule ?? capsule?.content;
+                        if (content) {
+                          this.pendingPrefetchQueue.push(`File: ${dep}\n${content}`);
+                        }
+                      })
+                    );
+                    if (this.pendingPrefetchQueue.length > 6) {
+                      this.pendingPrefetchQueue = this.pendingPrefetchQueue.slice(-6);
                     }
                   }
-                }
+                })().catch(() => {});
               }
             }
 
@@ -1365,7 +1410,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
             if (errorCount >= 2) {
               resultText += "\n\n[MESH SYSTEM WARNING] This exact error has occurred multiple times. DO NOT retry the same action. Either try a different approach or stop and ask the user for clarification.";
             }
-            
+
             if (!silent) hooks?.onToolEnd?.(tu.name, false, this.normalizeCapsuleLine(resultText, 120));
             return { toolUseId: tu.toolUseId, status: "error" as const, text: this.clampToolResultText(sel.tool.name, resultText) };
           }
@@ -1392,6 +1437,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
       }
       this.abortController = null;
       this.currentTurnRouteContext = null;
+      this.currentTurnPreferredTools = [];
     }
 
     return await this.forceFinalAnswer(lastAssistantText, preTurnLength);
@@ -1400,17 +1446,21 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
   private prepareModelInput(currentTurnStart: number, toolSpecs: ToolSpec[]): {
     messages: ConverseMessage[];
     tools: ToolSpec[];
-    systemPrompt: string;
+    systemPromptArray: Array<{ text: string; cache_control?: any }>;
     report: ContextBudgetReport;
   } {
-    const systemPrompt = this.buildRuntimeSystemPrompt();
+    const systemPrompt = SYSTEM_PROMPT;
+    const dynamicRuntimeContext = [
+      this.buildDynamicRuntimeContext(),
+      this.currentTurnRouteContext
+    ].filter(Boolean).join("\n\n");
     const assembled = this.contextAssembler.assemble({
       transcript: this.transcript,
       currentTurnStart,
       tools: toolSpecs,
       systemPrompt,
       sessionSummary: this.sessionCapsule?.summary ?? null,
-      runtimeContext: this.currentTurnRouteContext
+      runtimeContext: dynamicRuntimeContext
     });
     this.lastContextReport = assembled.report;
     this.turnContextReports.push(assembled.report);
@@ -1419,7 +1469,12 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
         `Context firewall blocked oversized request (${assembled.report.totalTokens}/${assembled.report.maxInputTokens} estimated tokens). Narrow the request or run /clear.`
       );
     }
-    return { ...assembled, systemPrompt };
+    return {
+      messages: assembled.messages,
+      tools: assembled.tools,
+      systemPromptArray: assembled.systemPromptArray,
+      report: assembled.report
+    };
   }
 
   private async forceFinalAnswer(lastAssistantText: string, currentTurnStart: number): Promise<string> {
@@ -1433,7 +1488,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     const response = await this.llm.converse(
       prepared.messages,
       prepared.tools,
-      prepared.systemPrompt,
+      prepared.systemPromptArray,
       this.currentModelId,
       this.abortController?.signal
     );
@@ -1474,6 +1529,17 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
       return 5;
     }
     return 3;
+  }
+
+  private maxTokensForInput(inputText: string): number {
+    const lower = inputText.toLowerCase();
+    if (/(fix|edit|change|patch|implement|build|add|remove|refactor|write|commit|beheb|änder|aender|bau|mach)/i.test(lower)) {
+      return 4096;
+    }
+    if (/(list|read|grep|search|find|show|status|explain|summarize|zeige|lies|suche|liste)/i.test(lower)) {
+      return 800;
+    }
+    return this.config.bedrock.maxTokens;
   }
 
   private toolFamilyFor(wireName: string): string {
@@ -1720,10 +1786,10 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     const leftLine = "───";
     const rightLineLen = width - leftLine.length - label.length;
     const rightLine = rightLineLen > 0 ? "─".repeat(rightLineLen) : "";
-    
+
     const top = `${this.themeColor(leftLine)}${pc.white(pc.bold(label))}${this.themeColor(rightLine)}`;
     const bottom = `${this.themeColor("❯")} `;
-    
+
     return `\n${top}\n${bottom}`;
   }
 
@@ -1878,7 +1944,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     output.write(this.themeColor("\n" + "═".repeat(40) + "\n"));
     output.write(this.themeColor(pc.bold("  MESH SETUP WIZARD\n")));
     output.write(this.themeColor("═".repeat(40) + "\n"));
-    
+
     const current = await loadUserSettings();
 
     try {
@@ -1957,7 +2023,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
       };
 
       await saveUserSettings(newSettings);
-      
+
       // Apply changes to runtime state
       this.currentModelId = modelId;
       const colorFn = pc[themeColor as keyof typeof pc];
@@ -1969,7 +2035,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
       this.applyVoiceSettings(voice);
 
       output.write(pc.green("\n✔ Settings saved and applied!\n"));
-      
+
       // Immediate UI refresh with new colors
       output.write(this.useAnsi ? "\x1b[2J\x1b[H" : "\n");
       this.printBanner();
@@ -2132,7 +2198,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
       await fs.mkdir(meshDir, { recursive: true });
       await fs.mkdir(path.join(meshDir, "index"), { recursive: true });
       await fs.mkdir(path.join(meshDir, "history"), { recursive: true });
-      
+
       const instructions = [
         "# Mesh Project Instructions 🛸",
         "",
@@ -2149,7 +2215,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
         ""
       ].join("\n");
       await fs.writeFile(path.join(meshDir, "instructions.md"), instructions);
-      
+
       await fs.writeFile(path.join(meshDir, "architecture.md"), "# Architecture\n\n*Generated during indexing...*");
       await fs.writeFile(path.join(meshDir, "dependency_graph.md"), "# Dependency Graph\n\n*Generated during indexing...*");
     }
@@ -2178,7 +2244,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     if (!metaExists) {
       output.write(`${pc.cyan("◈")} ${pc.bold("New workspace detected. Initializing intelligence...")}\n`);
       await this.runIndexing();
-      
+
       const meta = {
         firstIndexedAt: new Date().toISOString(),
         lastIndexedAt: new Date().toISOString(),
@@ -2211,7 +2277,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
       const res = await this.backend.callTool("agent.invoke_sub_agent", {
         prompt: "Read the most important files in this workspace (like package.json, config files, and core source files). Analyze the tech stack, naming conventions, state management, and architectural patterns. Write a concise, bullet-point markdown guide (max 15 bullets) that a senior engineer would need to perfectly blend into this codebase. Focus ONLY on conventions, not features."
       });
-      
+
       const summary = (res as any).summary || (res as any).error;
       if (!summary) throw new Error("Sub-agent failed to generate summary.");
 
@@ -2231,11 +2297,11 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     try {
       const intentRaw = await fs.readFile(intentPath, "utf8");
       const intent = JSON.parse(intentRaw);
-      
+
       output.write(pc.cyan(`\n[Predictive Synthesis] Analyzing your recent change: ${intent.message}\n`));
-      
-      const syntheticPrompt = `You are a Predictive Synthesis orchestrator. I recently modified '${intent.file}'. 
-The heuristic engine detected this intent: "${intent.message}". 
+
+      const syntheticPrompt = `You are a Predictive Synthesis orchestrator. I recently modified '${intent.file}'.
+The heuristic engine detected this intent: "${intent.message}".
 Here is the git diff:
 ${intent.diff}
 
@@ -2247,7 +2313,7 @@ Your task:
 
       // Clear the intent file so it doesn't trigger again
       await fs.unlink(intentPath).catch(() => {});
-      
+
       // Inject into the main loop
       await this.runSingleTurn(syntheticPrompt);
     } catch (e) {
@@ -2262,7 +2328,7 @@ Your task:
     }
     const command = args.slice(1).join(" ");
     output.write(pc.cyan(`\n[Live Memory Hologram] Injecting telemetry proxy into '${command}'...\n`));
-    
+
     // Auto-instruct the agent to run the telemetry tool and standby for errors
     await this.runSingleTurn(`Execute the command '${command}' using 'workspace.run_with_telemetry'. If the process crashes and you receive a memory dump of the V8 engine, analyze the exact variable states, find the root cause, and fix it using 'workspace.alien_patch' or 'workspace.patch_surgical'.`);
   }
@@ -2347,10 +2413,10 @@ Your task:
       const entry = backend.speculativeFixes.entries().next().value;
       const file = entry[0];
       const patch = entry[1];
-      
+
       output.write(pc.cyan(`\n[🧠 Mesh Resolving] Applying pre-computed fix for '${file}'...\n`));
-      
-      const syntheticPrompt = `I have a pre-computed speculative fix for the error in '${file}'. 
+
+      const syntheticPrompt = `I have a pre-computed speculative fix for the error in '${file}'.
 Please review this patch and apply it using 'workspace.alien_patch' if it looks correct:
 ${patch}
 
@@ -2749,7 +2815,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
 
   private setupGhostText(rl: readline.Interface, input: NodeJS.ReadableStream, output: NodeJS.WritableStream) {
     if (!this.useAnsi) return;
-    
+
     // Remove only our previous listener if it exists
     if (this.ghostTextListener) {
       input.removeListener("keypress", this.ghostTextListener);
@@ -2782,7 +2848,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
           lastGhostText = "";
         }
       }
-      
+
       setTimeout(() => {
         const line = (rl as any).line || "";
         if (line.startsWith("/") && !line.includes(" ")) {
@@ -2879,7 +2945,10 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     const report = this.peakContextReport();
     if (report) {
       const saved = Math.max(0, this.turnArtifactCharsStored - this.turnArtifactEnvelopeChars);
-      output.write(pc.dim(`\ncontext est: ${formatTokenCount(report.totalTokens)}/${formatTokenCount(report.maxInputTokens)} · tools ${report.toolsOut}/${report.toolsIn} · messages ${report.messagesOut}/${report.messagesIn}${saved > 0 ? ` · raw saved ~${formatTokenCount(Math.ceil(saved / 4))} tok` : ""}`));
+      const model = MODEL_OPTIONS.find((o) => this.currentModelId.includes(o.value) || o.value.includes(this.currentModelId));
+      const { inputPer1k } = model?.pricing ?? { inputPer1k: 0.003 };
+      const turnCostUsd = (report.totalTokens * inputPer1k) / 1000;
+      output.write(pc.dim(`\ncontext est: ${formatTokenCount(report.totalTokens)}/${formatTokenCount(report.maxInputTokens)} · $${turnCostUsd.toFixed(4)} · tools ${report.toolsOut}/${report.toolsIn} · messages ${report.messagesOut}/${report.messagesIn}${saved > 0 ? ` · raw saved ~${formatTokenCount(Math.ceil(saved / 4))} tok` : ""}`));
       void this.writeContextMetrics(report, saved);
     }
     if (this.turnToolCalls > 0 || report) output.write("\n");
@@ -3234,11 +3303,11 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
 
     try {
       const pickedValue = await prompt.run();
-      
+
       // Restore CLI state
       (rl as any).resume();
       this.setupGhostText(rl, input, output);
-      
+
       const picked = MODEL_OPTIONS.find((o) => o.value === pickedValue)!;
       this.currentModelId = picked.value;
       output.write(`\nmodel switched: ${this.themeColor(picked.label)}\n`);
@@ -3251,7 +3320,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       });
 
       const shouldSave = await confirmPrompt.run();
-      
+
       // Restore CLI state again
       (rl as any).resume();
       this.setupGhostText(rl, input, output);
@@ -3282,8 +3351,8 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
 
     if (parts.length <= 1 && !line.endsWith(" ")) {
       const hits = commands.filter((item) => item.startsWith(cmd));
-      // If we have matches, return them. If multiple, it might jump, 
-      // but ghost text already showed the first one. 
+      // If we have matches, return them. If multiple, it might jump,
+      // but ghost text already showed the first one.
       // To avoid jump, we only return the best match if it's a prefix.
       if (hits.length > 1) {
         return [[hits[0]], cmd];
@@ -3545,8 +3614,10 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       let voiceDeps = await this.voiceManager.checkDependencies();
       output.write(this.themeColor(`\n${pc.bold("Voice Diagnostics")}\n`));
       for (const dep of voiceDeps) {
-        const icon = dep.ok ? pc.green("✔") : pc.red("✘");
-        output.write(`${icon} ${dep.name.padEnd(15)} ${dep.ok ? pc.green("Available") : pc.red("Missing")}\n`);
+        const required = dep.required !== false;
+        const icon = dep.ok ? pc.green("✔") : required ? pc.red("✘") : pc.yellow("•");
+        const status = dep.ok ? pc.green("Available") : required ? pc.red("Missing") : pc.yellow("Optional");
+        output.write(`${icon} ${dep.name.padEnd(15)} ${status}\n`);
         if (!dep.ok && dep.hint) {
           output.write(`   ${pc.dim(`Hint: ${dep.hint}`)}\n`);
         }
@@ -3611,8 +3682,8 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
   }
 
   private async ensureVoiceCoreDependencies(
-    existingDeps?: { name: string; ok: boolean; hint?: string }[]
-  ): Promise<{ name: string; ok: boolean; hint?: string }[]> {
+    existingDeps?: VoiceDependencyStatus[]
+  ): Promise<VoiceDependencyStatus[]> {
     const voiceDeps = existingDeps ?? await this.voiceManager.checkDependencies();
     const missingCore = voiceDeps
       .filter((dep) => !dep.ok && (dep.name === "ffmpeg" || dep.name === "whisper-cpp"))
@@ -3639,17 +3710,33 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       return voiceDeps;
     }
 
-    output.write(this.themeColor(`\nInstalling: ${missingCore.join(", ")}\n`));
+    const spinner = this.useAnsi
+      ? ora({
+          text: `Installing voice dependencies (${missingCore.join(", ")})...`,
+          color: "cyan",
+          stream: output
+        }).start()
+      : undefined;
+    if (!spinner) {
+      output.write(this.themeColor(`\nInstalling voice dependencies (${missingCore.join(", ")})...\n`));
+    }
     try {
-      await this.voiceManager.installCoreDependencies(missingCore);
+      await this.voiceManager.installCoreDependencies(missingCore, { quiet: true });
       const updatedDeps = await this.voiceManager.checkDependencies();
-      output.write(pc.green("\nVoice dependency installation complete.\n"));
-      for (const dep of updatedDeps) {
+      if (spinner) {
+        spinner.succeed(`Voice dependencies installed: ${missingCore.join(", ")}`);
+      } else {
+        output.write(pc.green("\nVoice dependency installation complete.\n"));
+      }
+      for (const dep of updatedDeps.filter((dep) => dep.required !== false)) {
         const icon = dep.ok ? pc.green("✔") : pc.red("✘");
         output.write(`${icon} ${dep.name.padEnd(15)} ${dep.ok ? pc.green("Available") : pc.red("Missing")}\n`);
       }
       return updatedDeps;
     } catch (error) {
+      if (spinner) {
+        spinner.fail("Voice dependency installation failed.");
+      }
       const message = error instanceof Error ? error.message : String(error);
       output.write(pc.red(`\nVoice dependency installation failed: ${message}\n`));
       return voiceDeps;
@@ -3666,7 +3753,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     const modelInfo = this.voiceManager.getWhisperModelInfo();
     const confirmPrompt = new Confirm({
       name: "installWhisperModel",
-      message: `Download Whisper ${modelInfo.name} model to ${targetPath}? (${modelInfo.sizeLabel})`,
+      message: `Download Whisper ${modelInfo.name} model? (${modelInfo.sizeLabel})`,
       initial: true
     });
     const confirmed = Boolean(await confirmPrompt.run().catch(() => false));
@@ -3675,12 +3762,31 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       return false;
     }
 
-    output.write(this.themeColor(`\nDownloading Whisper ${modelInfo.name} model to ${targetPath}\n`));
+    const spinner = this.useAnsi
+      ? ora({
+          text: `Downloading Whisper ${modelInfo.name} model (${modelInfo.sizeLabel})...`,
+          color: "cyan",
+          stream: output
+        }).start()
+      : undefined;
+    if (!spinner) {
+      output.write(this.themeColor(`\nDownloading Whisper ${modelInfo.name} model (${modelInfo.sizeLabel})...\n`));
+    }
     try {
       await this.voiceManager.installWhisperModel();
-      output.write(pc.green("\nWhisper model download complete.\n"));
+      if (spinner) {
+        spinner.succeed(`Whisper ${modelInfo.name} model downloaded.`);
+      } else {
+        output.write(pc.green("\nWhisper model download complete.\n"));
+      }
+      if (targetPath) {
+        output.write(`${pc.dim("model:")} ${pc.dim(path.basename(targetPath))}\n`);
+      }
       return true;
     } catch (error) {
+      if (spinner) {
+        spinner.fail("Whisper model download failed.");
+      }
       const message = error instanceof Error ? error.message : String(error);
       output.write(pc.red(`\nWhisper model download failed: ${message}\n`));
       return false;
@@ -3713,8 +3819,12 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     output.write(`\nSession capsule exported to ${targetPath}\n`);
   }
 
-  private buildRuntimeSystemPrompt(): string {
-    const sections = [SYSTEM_PROMPT];
+  private buildDynamicRuntimeContext(): string {
+    const sections: string[] = [];
+
+    if (this.currentTurnPreferredTools.length > 0) {
+      sections.push(`[TOOL ROUTING]\nFor this turn, prefer these tools when useful: ${this.currentTurnPreferredTools.slice(0, 24).join(", ")}`);
+    }
 
     if (this.gitStatusContext) {
       sections.push(`\n[GIT REPOSITORY STATUS]\nCurrent branch: ${clampBlock(this.gitStatusContext, 1_200)}`);
@@ -3768,7 +3878,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     const retainedMessages = Math.min(12, sourceMessages);
     const retained = this.transcript.slice(-retainedMessages);
     const older = this.transcript.slice(0, Math.max(0, sourceMessages - retainedMessages));
-    const summary = this.buildSessionCapsuleSummary(older, retained);
+    const summary = await this.buildSessionCapsuleSummary(older, retained);
 
     this.sessionCapsule = {
       summary,
@@ -3784,7 +3894,32 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     return `${prefix} Retained ${retainedMessages} recent messages, compressed ${saved} older messages into capsule.`;
   }
 
-  private buildSessionCapsuleSummary(older: ConverseMessage[], retained: ConverseMessage[]): string {
+  private async buildSessionCapsuleSummary(older: ConverseMessage[], retained: ConverseMessage[]): Promise<string> {
+    const baseSummary = this.buildHeuristicSessionCapsuleSummary(older, retained);
+
+    const prompt = `You are a memory compression module for an autonomous AI agent.
+Your task is to refine the following raw heuristic session summary into a highly condensed, intent-preserving "Session Capsule".
+CRITICAL RULES:
+1. Preserve Tone, User Intent, Key Decisions, and Emotional Register.
+2. Maintain the structure: Summary, Decisions, Open Threads, Next Actions, Files Touched.
+3. Keep it terse and under 800 words.
+4. Output ONLY the refined capsule text. Do not add conversational filler.
+
+Raw Heuristic Summary:
+${baseSummary}`;
+
+    try {
+      const response = await this.llm.converse([{ role: "user", content: [{ text: prompt }] }], [], "You are a memory compression module.");
+      if (response.kind === "text" && response.text.trim()) {
+        return response.text;
+      }
+    } catch (err) {
+      // Fallback
+    }
+    return baseSummary;
+  }
+
+  private buildHeuristicSessionCapsuleSummary(older: ConverseMessage[], retained: ConverseMessage[]): string {
     const userRequests: string[] = [];
     const assistantReplies: string[] = [];
     const toolCalls: string[] = [];
@@ -3832,7 +3967,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
           ...assistantReplies.slice(-4),
           ...toolResults.filter((entry) => /saved|updated|created|switched|cleared|exported|connected|indexed/i.test(entry))
         ].map((entry) => this.normalizeCapsuleLine(entry, 160)),
-        8
+        20
       ),
       openThreads: uniqueLimited(
         [
@@ -3840,7 +3975,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
           ...userRequests.slice(-5),
           ...toolResults.filter((entry) => /error|failed|denied|omitted|unknown/i.test(entry))
         ].map((entry) => this.normalizeCapsuleLine(entry, 160)),
-        8
+        20
       ),
       nextActions: uniqueLimited(
         [
@@ -3848,14 +3983,14 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
           ...assistantReplies.filter((entry) => /next|should|can|recommend|suggest/i.test(entry)),
           retained.length ? `Continue from ${retained.length} preserved recent messages.` : ""
         ].map((entry) => this.normalizeCapsuleLine(entry, 160)),
-        8
+        15
       ),
       filesTouched: uniqueLimited(
         [
           ...(previous?.filesTouched ?? []),
           ...filesTouched
         ].map((entry) => this.normalizeCapsuleLine(entry, 120)),
-        12
+        50
       ),
       toolActivity: uniqueLimited(
         [
@@ -3863,7 +3998,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
           ...toolCalls.slice(-8),
           ...toolResults.slice(-4)
         ].map((entry) => this.normalizeCapsuleLine(entry, 160)),
-        12
+        20
       )
     };
 

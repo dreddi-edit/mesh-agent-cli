@@ -6,10 +6,17 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import ignore, { Ignore } from "ignore";
 import { MeshCoreAdapter, MeshCallSite, MeshSymbol } from "./mesh-core-adapter.js";
+import { CacheManager } from "./cache-manager.js";
+import { pipeline, env } from "@xenova/transformers";
+
+// Optional: configure transformers env to avoid local caching issues
+env.allowLocalModels = false;
 
 const execFileAsync = promisify(execFile);
 
 const INDEX_SCHEMA_VERSION = 1;
+const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
+const DEFAULT_EMBEDDING_MODEL = process.env.MESH_EMBEDDING_MODEL || "Xenova/nomic-embed-code";
 const DEFAULT_SKIP_DIRS = [
   ".git",
   ".mesh",
@@ -140,7 +147,7 @@ interface IndexedChunk {
   text: string;
   lineStart: number;
   lineEnd: number;
-  vector: Record<string, number>;
+  vector: number[];
 }
 
 interface IndexedFileRecord {
@@ -161,7 +168,7 @@ interface IndexedFileRecord {
   git: GitFileHistory;
   capsule: StructuredCapsule;
   chunks: IndexedChunk[];
-  textVector: Record<string, number>;
+  textVector: number[];
 }
 
 interface PersistedWorkspaceIndex {
@@ -185,7 +192,8 @@ export class WorkspaceIndex {
 
   constructor(
     private readonly workspaceRoot: string,
-    private readonly meshCore: MeshCoreAdapter
+    private readonly meshCore: MeshCoreAdapter,
+    private readonly cacheManager: CacheManager
   ) {
     this.workspaceHash = crypto
       .createHash("sha256")
@@ -236,7 +244,7 @@ export class WorkspaceIndex {
     };
     const indexedFiles: IndexedFileRecord[] = [];
     const total = files.length;
-    const concurrency = 6;
+    const concurrency = INDEX_PARALLELISM;
     let completed = 0;
 
     for (let i = 0; i < files.length; i += concurrency) {
@@ -288,8 +296,28 @@ export class WorkspaceIndex {
 
     const index = await this.ensureIndex();
     const queryTokens = tokenize(normalizedQuery);
-    const queryVector = vectorize(normalizedQuery);
+    const queryVector = await vectorize(normalizedQuery);
     const safeLimit = Math.max(1, Math.min(limit, 25));
+
+    // Check RAG semantic cache
+    const cachedResults = await this.cacheManager.getSimilarRagQuery(queryVector, 0.95);
+    if (cachedResults) {
+      const status = await this.status();
+      return {
+        ok: true,
+        query: normalizedQuery,
+        mode,
+        indexStatus: status,
+        resultsFound: cachedResults.length,
+        results: cachedResults.slice(0, safeLimit),
+        topMatches: cachedResults.slice(0, safeLimit).map((result) => ({
+          path: result.file,
+          score: result.score,
+          snippet: `[Fonte: ${result.file}]\n${result.purpose}`
+        }))
+      };
+    }
+
     const results: CodeSearchResult[] = [];
 
     for (const record of index.files) {
@@ -357,8 +385,8 @@ export class WorkspaceIndex {
     results.sort((left, right) => right.score - left.score);
     const sliced = results.slice(0, safeLimit);
     const status = await this.status();
-    return {
-      ok: true,
+    const response = {
+      ok: true as const,
       query: normalizedQuery,
       mode,
       indexStatus: status,
@@ -367,9 +395,14 @@ export class WorkspaceIndex {
       topMatches: sliced.map((result) => ({
         path: result.file,
         score: result.score,
-        snippet: result.purpose
+        snippet: `[Fonte: ${result.file}]\n${result.purpose}`
       }))
     };
+
+    // Cache the RAG query
+    await this.cacheManager.setRagQuery(queryVector, sliced);
+
+    return response;
   }
 
   async explainSymbol(symbol: string): Promise<{
@@ -577,8 +610,8 @@ export class WorkspaceIndex {
       risks,
       testLinks: []
     };
-    const chunks = buildChunks(relativePath, raw, capsule, symbols, routes, isTest);
-    const textVector = vectorize([
+    const chunks = await buildChunks(relativePath, raw, capsule, symbols, routes, isTest);
+    const textVector = await vectorize([
       relativePath,
       purpose,
       exports.join(" "),
@@ -768,6 +801,14 @@ function normalizeRelPath(filePath: string): string {
   return filePath.replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/^\/+/, "");
 }
 
+function parseIntegerInRange(value: string | undefined, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, Math.trunc(parsed)));
+}
+
 function tokenize(value: string): string[] {
   return value
     .toLowerCase()
@@ -776,22 +817,34 @@ function tokenize(value: string): string[] {
     .filter((token) => token.length > 1 && !STOP_WORDS.has(token));
 }
 
-function vectorize(value: string): Record<string, number> {
-  const vector: Record<string, number> = {};
-  for (const token of tokenize(value)) {
-    vector[token] = (vector[token] ?? 0) + 1;
+let embeddingPipeline: any = null;
+async function getEmbeddingPipeline() {
+  if (!embeddingPipeline) {
+    try {
+      embeddingPipeline = await pipeline("feature-extraction", DEFAULT_EMBEDDING_MODEL, {
+        quantized: true
+      });
+    } catch {
+      embeddingPipeline = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2", {
+        quantized: true
+      });
+    }
   }
-  const magnitude = Math.sqrt(Object.values(vector).reduce((sum, next) => sum + next * next, 0)) || 1;
-  for (const key of Object.keys(vector)) {
-    vector[key] = Number((vector[key] / magnitude).toFixed(6));
-  }
-  return vector;
+  return embeddingPipeline;
 }
 
-function cosine(left: Record<string, number>, right: Record<string, number>): number {
+async function vectorize(value: string): Promise<number[]> {
+  if (!value || value.trim() === "") return [];
+  const extractor = await getEmbeddingPipeline();
+  const output = await extractor(value, { pooling: "mean", normalize: true });
+  return Array.from(output.data);
+}
+
+function cosine(left: number[], right: number[]): number {
+  if (!left || !right || left.length === 0 || right.length === 0 || left.length !== right.length) return 0;
   let dot = 0;
-  for (const [key, value] of Object.entries(left)) {
-    dot += value * (right[key] ?? 0);
+  for (let i = 0; i < left.length; i++) {
+    dot += left[i] * right[i];
   }
   return dot;
 }
@@ -1069,14 +1122,14 @@ function inferPurpose(
   return firstComment ? firstComment.replace(/\s+/g, " ").slice(0, 240) : `Source file ${relativePath}`;
 }
 
-function buildChunks(
+async function buildChunks(
   relativePath: string,
   raw: string,
   capsule: StructuredCapsule,
   symbols: SymbolRecord[],
   routes: RouteRecord[],
   isTest: boolean
-): IndexedChunk[] {
+): Promise<IndexedChunk[]> {
   const chunks: IndexedChunk[] = [
     {
       id: `${relativePath}:file`,
@@ -1090,7 +1143,7 @@ function buildChunks(
       ].join("\n"),
       lineStart: 1,
       lineEnd: raw.split(/\r?\n/g).length,
-      vector: vectorize(capsule.purpose)
+      vector: await vectorize(capsule.purpose)
     }
   ];
   for (const symbol of symbols.slice(0, 80)) {
@@ -1101,7 +1154,7 @@ function buildChunks(
       text,
       lineStart: symbol.lineStart,
       lineEnd: symbol.lineEnd,
-      vector: vectorize(text)
+      vector: await vectorize(text)
     });
   }
   for (const route of routes) {
@@ -1112,7 +1165,7 @@ function buildChunks(
       text,
       lineStart: route.line,
       lineEnd: route.line,
-      vector: vectorize(text)
+      vector: await vectorize(text)
     });
   }
   return chunks;

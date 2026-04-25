@@ -35,6 +35,9 @@ The most advanced part of Mesh's architecture, designed to save 90% of tokens.
 -   **Medium-Tier**: Structural data (exports, symbols, imports, dependencies).
 -   **High-Tier**: Full semantic context including side-effects and risk profiles.
 
+### Smart Cache Invalidation
+-   **Content Hashing**: Uses robust MD5 `contentHash` tracking alongside `mtimeMs`. The agent avoids expensive re-indexing during git checkouts or timestamp updates if the actual file content hasn't changed.
+
 ### Mesh-Alien-OS (Void Protocol)
 When tokens are tight, Mesh switches to **Alien Mode**:
 -   **`workspace.generate_lexicon`**: Generates a project-specific dictionary where every common term gets a numeric ID (e.g., `1: "AuthManager"`).
@@ -52,10 +55,11 @@ Mesh runs a complete search engine locally.
 
 -   **Indexer**: Scans 10,000+ files, respects `.gitignore`, and generates persistent capsules in `~/.config/mesh/indexes/`.
 -   **Hybrid Search**: 
-    -   **Vector Similarity**: Using local embeddings (`all-Minilm-L6-v2`).
+    -   **Vector Similarity**: Using local dense embeddings (`@xenova/transformers` with `all-MiniLM-L6-v2`) via fully asynchronous AST-aware pipelines.
     -   **Keyword Signals**: BM25-style matching for exact symbol names.
     -   **AST Signals**: Boosts files that define searched symbols.
--   **`workspace.ask_codebase`**: The entry point for the agent to query the repo with modes like `architecture`, `bug`, or `test-impact`.
+-   **Semantic Cache**: Uses an in-memory L1 Cosine Similarity cache (`> 0.95` similarity threshold) to instantly short-circuit repeated or highly similar RAG queries, saving token generation costs.
+-   **`workspace.ask_codebase`**: The entry point for the agent to query the repo with modes like `architecture`, `bug`, or `test-impact`. Returns strict `[Fonte: path]` attribution for zero-hallucination source tracking.
 
 ---
 

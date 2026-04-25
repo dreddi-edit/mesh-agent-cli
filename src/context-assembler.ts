@@ -27,6 +27,7 @@ export interface ContextBudgetReport {
 export interface AssembledModelInput {
   messages: ConverseMessage[];
   tools: ToolSpec[];
+  systemPromptArray: Array<{ text: string; cache_control?: any }>;
   report: ContextBudgetReport;
 }
 
@@ -65,12 +66,23 @@ export class ContextAssembler {
     let trimmedChars = 0;
 
     const runtimeContext = this.clampText(args.runtimeContext ?? "", 2_800);
-    const summaryMessage = args.sessionSummary
-      ? this.messageFromText("user", `Session capsule:\n${this.clampText(args.sessionSummary, 1_600)}`)
-      : null;
-    const runtimeMessage = runtimeContext
-      ? this.messageFromText("user", `Local compressed context:\n${runtimeContext}`)
-      : null;
+    const sessionSummary = this.clampText(args.sessionSummary ?? "", 1_600);
+
+    // Context Deduplication (RecallMax)
+    // If runtime context is heavily duplicated in the session summary, reduce the summary.
+    let finalSummary = sessionSummary;
+    if (runtimeContext && sessionSummary && sessionSummary.includes(runtimeContext.slice(0, 100))) {
+      finalSummary = sessionSummary.replace(runtimeContext, "[Context Deduplicated]").trim();
+    }
+
+    const systemPromptArray = [
+      {
+        text: args.systemPrompt,
+        ...(args.systemPrompt.length > 1000 ? { cache_control: { type: "ephemeral" } } : {})
+      },
+      ...(finalSummary ? [{ text: `Session capsule:\n${finalSummary}` }] : []),
+      ...(runtimeContext ? [{ text: `Local compressed context:\n${runtimeContext}` }] : [])
+    ];
 
     const retainedHistory: ConverseMessage[] = [];
     let historyTokens = 0;
@@ -103,8 +115,6 @@ export class ContextAssembler {
 
     const tools = trimToolSpecs(args.tools, this.toolTokenBudget);
     const messages = [
-      ...(summaryMessage ? [summaryMessage] : []),
-      ...(runtimeMessage ? [runtimeMessage] : []),
       ...retainedHistory,
       ...compactCurrent
     ];
@@ -112,17 +122,29 @@ export class ContextAssembler {
     let report = this.report(args, messages, tools, trimmedChars);
     const protectedTailCount = Math.max(1, compactCurrent.length);
     while (report.totalTokens > this.maxInputTokens && messages.length > protectedTailCount) {
-      trimmedChars += estimateCharsForMessage(messages[0]);
-      messages.shift();
+      const oldest = messages[0];
+      let compressed = false;
+
+      // Token-Density History Compression
+      // Instead of instantly dropping the turn, we aggressively prune its content first
+      if (oldest.content.length > 0) {
+        for (const block of oldest.content) {
+          if ('text' in block && block.text.length > 500 && !block.text.includes("[Turn semantically compressed]")) {
+            trimmedChars += block.text.length - 100;
+            block.text = block.text.substring(0, 100) + "... [Turn semantically compressed due to token budget]";
+            compressed = true;
+          }
+        }
+      }
+
+      if (!compressed) {
+        trimmedChars += estimateCharsForMessage(messages[0]);
+        messages.shift();
+      }
       report = this.report(args, messages, tools, trimmedChars);
     }
 
-    if (report.totalTokens > this.maxInputTokens && tools.length > 0) {
-      tools.splice(Math.max(1, Math.floor(tools.length / 2)));
-      report = this.report(args, messages, tools, trimmedChars);
-    }
-
-    return { messages, tools, report };
+    return { messages, tools, systemPromptArray, report };
   }
 
   private report(
@@ -130,6 +152,7 @@ export class ContextAssembler {
       transcript: ConverseMessage[];
       tools: ToolSpec[];
       systemPrompt: string;
+      sessionSummary?: string | null;
       runtimeContext?: string | null;
     },
     messages: ConverseMessage[],
@@ -137,7 +160,7 @@ export class ContextAssembler {
     trimmedChars: number
   ): ContextBudgetReport {
     const runtimeContextTokens = estimateTokens(args.runtimeContext ?? "");
-    const systemTokens = estimateTokens(args.systemPrompt);
+    const systemTokens = estimateTokens(args.systemPrompt) + estimateTokens(args.sessionSummary ?? "") + runtimeContextTokens;
     const toolTokens = estimateTokens(JSON.stringify(tools));
     const currentTurnTokens = messages.reduce((sum, message) => sum + estimateTokensForMessage(message), 0);
     return {
@@ -183,11 +206,14 @@ export class ContextAssembler {
         .map((item) => ("text" in item ? item.text : ""))
         .filter(Boolean)
         .join("\n");
+      const compacted = scope === "history"
+        ? compactToolResultToOneLiner(text, block.toolResult.status)
+        : text;
       return {
         toolResult: {
           toolUseId: block.toolResult.toolUseId,
           status: block.toolResult.status,
-          content: [{ text: this.clampText(text, scope === "current" ? this.toolResultTokenBudget * 4 : 900) }]
+          content: [{ text: this.clampText(compacted, scope === "current" ? this.toolResultTokenBudget * 4 : 200) }]
         }
       };
     }
@@ -234,7 +260,10 @@ export class ContextAssembler {
 
   private clampText(text: string, maxChars: number): string {
     if (text.length <= maxChars) return text;
-    return `${text.slice(0, Math.max(0, maxChars - 80))}\n[context trimmed: ${text.length - maxChars} chars omitted]`;
+    const keep = Math.floor((maxChars - 80) / 2);
+    const head = text.slice(0, keep);
+    const tail = text.slice(-keep);
+    return `${head}\n...[context trimmed: ${text.length - maxChars} chars omitted]...\n${tail}`;
   }
 }
 
@@ -250,24 +279,49 @@ export function estimateCharsForMessage(message: ConverseMessage): number {
   return JSON.stringify(message).length;
 }
 
-function trimToolSpecs(tools: ToolSpec[], maxTokens: number): ToolSpec[] {
-  const retained: ToolSpec[] = [];
-  let total = 0;
-  const ordered = [...tools].sort((left, right) => Number(left.name !== "workspace_open_artifact") - Number(right.name !== "workspace_open_artifact"));
-  for (const tool of ordered) {
-    const compact = compactToolSpec(tool);
-    const cost = estimateTokens(JSON.stringify(compact));
-    if (retained.length > 0 && total + cost > maxTokens) continue;
-    retained.push(compact);
-    total += cost;
+function compactToolResultToOneLiner(text: string, status?: "success" | "error"): string {
+  const raw = String(text || "").trim();
+  if (!raw) return `tool result -> ${status || "unknown"}`;
+
+  const toolMatch = raw.match(/Tool called:\s*([^\n]+)/i);
+  const toolName = toolMatch?.[1]?.trim() || "tool";
+  const statusLabel = status || (/error|failed|exception/i.test(raw) ? "error" : "success");
+
+  try {
+    const jsonStart = raw.indexOf("{");
+    if (jsonStart >= 0) {
+      const parsed = JSON.parse(raw.slice(jsonStart));
+      const result = parsed?.result ?? parsed;
+      const paths = [
+        ...(Array.isArray(result?.matches) ? result.matches.map((item: any) => item.path || item.file) : []),
+        ...(Array.isArray(result?.results) ? result.results.map((item: any) => item.path || item.file) : []),
+        ...(Array.isArray(result?.topMatches) ? result.topMatches.map((item: any) => item.path || item.file) : [])
+      ].filter(Boolean).slice(0, 3);
+      if (paths.length > 0) {
+        return `${toolName} -> ${statusLabel}: ${paths.length} matches: ${paths.join(", ")}`;
+      }
+      const primary = result?.summary || result?.note || result?.error || result?.path || result?.ok;
+      if (primary !== undefined) {
+        return `${toolName} -> ${statusLabel}: ${String(primary).replace(/\s+/g, " ").slice(0, 140)}`;
+      }
+    }
+  } catch {
+    // Fall back to first-line extraction.
   }
-  return retained.length ? retained : tools.slice(0, 1).map(compactToolSpec);
+
+  const firstLine = raw.split(/\r?\n/).find((line) => line.trim()) || raw;
+  return `${toolName} -> ${statusLabel}: ${firstLine.replace(/\s+/g, " ").slice(0, 160)}`;
+}
+
+function trimToolSpecs(tools: ToolSpec[], maxTokens: number): ToolSpec[] {
+  void maxTokens;
+  return tools.map(compactToolSpec);
 }
 
 function compactToolSpec(tool: ToolSpec): ToolSpec {
   return {
     name: tool.name,
-    description: clamp(tool.description ?? "", 220),
+    description: clamp(tool.description ?? "", 80),
     inputSchema: compactSchema(tool.inputSchema ?? { type: "object", properties: {} }, 0)
   };
 }
@@ -280,7 +334,7 @@ function compactSchema(value: unknown, depth: number): Record<string, unknown> {
   for (const key of ["type", "required", "properties", "items", "enum", "description", "default"]) {
     if (!(key in input)) continue;
     if (key === "description") {
-      output[key] = clamp(String(input[key] ?? ""), 120);
+      output[key] = clamp(String(input[key] ?? ""), 40);
     } else if (key === "properties" && input[key] && typeof input[key] === "object" && !Array.isArray(input[key])) {
       const properties: Record<string, unknown> = {};
       for (const [propName, propValue] of Object.entries(input[key] as Record<string, unknown>).slice(0, 12)) {

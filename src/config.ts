@@ -208,7 +208,7 @@ export async function loadConfig(): Promise<AppConfig> {
       bearerToken: localSettings.customApiKey || userSettings.customApiKey || resolveBearerToken(),
       modelId: localSettings.modelId || userSettings.modelId,
       temperature: optionalNumber("BEDROCK_TEMPERATURE", 0),
-      maxTokens: optionalNumber("BEDROCK_MAX_TOKENS", 1200)
+      maxTokens: optionalNumber("BEDROCK_MAX_TOKENS", 3000)
     },
     agent: {
       maxSteps: optionalNumber("AGENT_MAX_STEPS", 8),

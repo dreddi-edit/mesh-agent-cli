@@ -6,7 +6,7 @@
  * Using CommonJS for maximum compatibility during installation.
  */
 
-const { execSync } = require('child_process');
+const { execSync, spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -45,6 +45,14 @@ function askYesNo(question) {
       resolve(normalized === 'y' || normalized === 'yes');
     });
   });
+}
+
+function tailLines(value, count = 14) {
+  return String(value || '')
+    .trim()
+    .split(/\r?\n/)
+    .slice(-count)
+    .join('\n');
 }
 
 async function main() {
@@ -93,10 +101,26 @@ async function main() {
   }
 
   try {
-    execSync(`${brewPath} install ${missing.join(' ')}`, { stdio: 'inherit' });
+    console.log(`\n  Installing with Homebrew: \x1b[1m${missing.join(', ')}\x1b[0m`);
+    console.log('  This can take a few minutes. Detailed Homebrew output is hidden unless something fails.\n');
+    const result = spawnSync(brewPath, ['install', ...missing], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        HOMEBREW_NO_ENV_HINTS: '1'
+      }
+    });
+    if (result.status !== 0) {
+      const detail = tailLines(`${result.stdout || ''}\n${result.stderr || ''}`);
+      throw new Error(detail || `brew install exited with code ${result.status}`);
+    }
     console.log('\n  \x1b[32m✓\x1b[0m Voice dependencies installed.\n');
   } catch (e) {
     console.log('\n  \x1b[31m✘\x1b[0m Installation failed.');
+    if (e && e.message) {
+      console.log(`\n${e.message}\n`);
+    }
     console.log(`  Retry with: \x1b[36mbrew install ${missing.join(' ')}\x1b[0m`);
     console.log(`  Or run \x1b[36mmesh doctor voice fix\x1b[0m\n`);
   }

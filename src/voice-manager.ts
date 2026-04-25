@@ -1,4 +1,4 @@
-import { spawn, execFileSync, execSync } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -63,6 +63,18 @@ export interface WhisperModelOption {
   url: string;
 }
 
+export interface VoiceDependencyStatus {
+  name: string;
+  ok: boolean;
+  hint?: string;
+  required: boolean;
+}
+
+interface InstallCoreDependenciesOptions {
+  quiet?: boolean;
+}
+
+const AUDIO_SAMPLE_RATE = "16000";
 const MACOS_SAY_RATE = "260";
 const MACOS_VOICE_BY_LANGUAGE: Record<string, string> = {
   de: "Anna",
@@ -121,7 +133,9 @@ export class VoiceManager {
         .filter(Boolean)
         .map((dir) => path.join(dir, command))),
       path.join("/opt/homebrew/bin", command),
-      path.join("/usr/local/bin", command)
+      path.join("/usr/local/bin", command),
+      path.join("/usr/bin", command),
+      path.join("/bin", command)
     ];
 
     for (const candidate of candidates) {
@@ -266,18 +280,42 @@ export class VoiceManager {
     }
   }
 
-  async installCoreDependencies(packages: string[] = ["ffmpeg", "whisper-cpp"]): Promise<void> {
+  async installCoreDependencies(
+    packages: string[] = ["ffmpeg", "whisper-cpp"],
+    options: InstallCoreDependenciesOptions = {}
+  ): Promise<void> {
     const brewPath = this.resolveBinary("brew");
     if (brewPath === "brew") {
       throw new Error("Homebrew not found. Install Homebrew first from https://brew.sh");
     }
 
     return new Promise((resolve, reject) => {
-      const proc = spawn(brewPath, ["install", ...packages], { stdio: "inherit" });
+      const quiet = options.quiet !== false;
+      let brewOutput = "";
+      const proc = spawn(brewPath, ["install", ...packages], {
+        stdio: quiet ? ["ignore", "pipe", "pipe"] : "inherit",
+        env: {
+          ...process.env,
+          HOMEBREW_NO_ENV_HINTS: "1"
+        }
+      });
+      if (quiet) {
+        const appendOutput = (chunk: Buffer) => {
+          brewOutput += chunk.toString();
+          if (brewOutput.length > 24_000) {
+            brewOutput = brewOutput.slice(-24_000);
+          }
+        };
+        proc.stdout?.on("data", appendOutput);
+        proc.stderr?.on("data", appendOutput);
+      }
       proc.on("error", (err) => reject(new Error(`brew spawn failed: ${err.message}`)));
       proc.on("close", (code) => {
         if (code === 0) resolve();
-        else reject(new Error(`brew install failed with code ${code}`));
+        else {
+          const detail = brewOutput.trim().split(/\r?\n/).slice(-18).join("\n");
+          reject(new Error(`brew install failed with code ${code}${detail ? `\n${detail}` : ""}`));
+        }
       });
     });
   }
@@ -285,25 +323,40 @@ export class VoiceManager {
   /**
    * Check if necessary binaries are available
    */
-  async checkDependencies(): Promise<{ name: string; ok: boolean; hint?: string }[]> {
+  async checkDependencies(): Promise<VoiceDependencyStatus[]> {
     const ffmpegPath = this.resolveBinary("ffmpeg");
-    const afplayPath = this.resolveBinary("afplay");
     const whisperPath = this.resolveBinary(this.config.whisperPath!);
     const piperPath = this.resolveBinary(this.config.piperPath!);
     const deps = [
-      { name: "ffmpeg", cmd: `${ffmpegPath} -version`, hint: "brew install ffmpeg" },
-      { name: "afplay", cmd: `${afplayPath} --help`, hint: "Built-in on macOS" },
-      { name: "whisper-cpp", cmd: `${whisperPath} --help`, hint: "brew install whisper-cpp" },
-      { name: "piper", cmd: `${piperPath} --version`, hint: "Download from github.com/rhasspy/piper" }
+      { name: "ffmpeg", command: ffmpegPath, args: ["-version"], hint: "brew install ffmpeg", required: true },
+      { name: "whisper-cpp", command: whisperPath, args: ["--help"], hint: "brew install whisper-cpp", required: true }
     ];
 
-    const results = [];
+    if (process.platform === "darwin") {
+      deps.push({
+        name: "macOS say",
+        command: this.resolveBinary("say"),
+        args: ["-v", "?"],
+        hint: "Built into macOS",
+        required: false
+      });
+    } else {
+      deps.push({
+        name: "piper",
+        command: piperPath,
+        args: ["--version"],
+        hint: "Download from github.com/rhasspy/piper",
+        required: false
+      });
+    }
+
+    const results: VoiceDependencyStatus[] = [];
     for (const dep of deps) {
       try {
-        execSync(dep.cmd, { stdio: "ignore" });
-        results.push({ name: dep.name, ok: true });
+        execFileSync(dep.command, dep.args, { stdio: "ignore" });
+        results.push({ name: dep.name, ok: true, required: dep.required });
       } catch {
-        results.push({ name: dep.name, ok: false, hint: dep.hint });
+        results.push({ name: dep.name, ok: false, hint: dep.hint, required: dep.required });
       }
     }
     return results;
@@ -323,7 +376,7 @@ export class VoiceManager {
       "-f", "avfoundation",
       "-i", `:${inputId}`,
       "-t", durationSeconds.toString(),
-      "-ar", "16000",
+      "-ar", AUDIO_SAMPLE_RATE,
       "-ac", "1",
       "-c:a", "pcm_s16le",
       "-af", "volume=1.8",
@@ -361,6 +414,7 @@ export class VoiceManager {
       "-l", whisperLanguage
     ];
     const whisperPath = this.resolveBinary(this.config.whisperPath!);
+    const startTime = performance.now();
 
     return new Promise((resolve, reject) => {
       let output = "";
@@ -370,7 +424,9 @@ export class VoiceManager {
       proc.stdout.on("data", (data) => (output += data.toString()));
       proc.stderr.on("data", (data) => (errorOutput += data.toString()));
       proc.on("close", (code) => {
+        const elapsedMs = (performance.now() - startTime).toFixed(2);
         if (code === 0) {
+          console.debug(`[Mesh:Voice] Transcribed audio in ${elapsedMs}ms`);
           resolve({
             text: output.trim(),
             language: whisperLanguage === "auto" ? this.extractDetectedLanguage(errorOutput) : whisperLanguage
@@ -466,6 +522,7 @@ export class VoiceManager {
       return;
     }
 
+    const startTime = performance.now();
     const configuredLanguage = this.normalizeLanguage(this.config.voiceLanguage);
     const normalizedLanguage = configuredLanguage === "auto"
       ? this.normalizeLanguage(language)
@@ -476,6 +533,8 @@ export class VoiceManager {
     if (!shouldUsePiper) {
       if (process.platform === "darwin") {
         this.speakWithMacOsSay(speechText, normalizedLanguage);
+        const elapsedMs = (performance.now() - startTime).toFixed(2);
+        console.debug(`[Mesh:Voice] macOS TTS completed in ${elapsedMs}ms`);
         return;
       }
       if (!piperModel) {
@@ -486,7 +545,7 @@ export class VoiceManager {
     const resolvedPiperModel = piperModel!;
 
     const tempAudio = path.join(os.tmpdir(), `mesh_speech_${Date.now()}.wav`);
-    
+
     // piper -m model.onnx --output_file out.wav
     const args = [
       "-m", resolvedPiperModel,
@@ -499,13 +558,28 @@ export class VoiceManager {
       proc.on("error", (err) => reject(new Error(`piper spawn failed: ${err.message}`)));
       proc.stdin.write(speechText);
       proc.stdin.end();
-      
+
       proc.on("close", (code) => {
         if (code === 0) {
-          // Play the file
-          const play = spawn("afplay", [tempAudio]);
-          play.on("error", (err) => reject(new Error(`afplay spawn failed: ${err.message}`)));
+          const piperElapsed = (performance.now() - startTime).toFixed(2);
+          console.debug(`[Mesh:Voice] Piper generated audio in ${piperElapsed}ms`);
+
+          // Play the file with cross-platform detection
+          let playerCmd = "aplay";
+          let playerArgs = [tempAudio];
+
+          if (process.platform === "win32") {
+            playerCmd = "powershell";
+            playerArgs = ["-c", `(New-Object Media.SoundPlayer '${tempAudio}').PlaySync()`];
+          } else if (process.platform === "darwin") {
+            playerCmd = "afplay";
+          }
+
+          const play = spawn(playerCmd, playerArgs);
+          play.on("error", (err) => reject(new Error(`${playerCmd} spawn failed: ${err.message}`)));
           play.on("close", () => {
+             const totalElapsed = (performance.now() - startTime).toFixed(2);
+             console.debug(`[Mesh:Voice] Total TTS + playback completed in ${totalElapsed}ms`);
              fs.unlink(tempAudio).catch(() => {});
              resolve();
           });

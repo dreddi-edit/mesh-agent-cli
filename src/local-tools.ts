@@ -3,6 +3,7 @@ import path from "node:path";
 import { exec, spawn, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import os from "node:os";
+import crypto from "node:crypto";
 import ignore, { Ignore } from "ignore";
 
 // Lazy-loaded transformers for Local RAG
@@ -26,7 +27,12 @@ class VectorManager {
       if (!transformersPipeline) {
         throw new Error("transformers_not_installed");
       }
-      this.model = await transformersPipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+      const preferredModel = process.env.MESH_EMBEDDING_MODEL || "Xenova/nomic-embed-code";
+      try {
+        this.model = await transformersPipeline('feature-extraction', preferredModel);
+      } catch {
+        this.model = await transformersPipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+      }
       this.isDownloading = false;
       return this.model;
     } catch (err: any) {
@@ -58,7 +64,7 @@ const vectorManager = new VectorManager();
 const execAsync = promisify(exec);
 
 import { MeshCoreAdapter } from "./mesh-core-adapter.js";
-import { CacheManager } from "./cache-manager.js";
+import { CacheManager, CapsuleBatchRequest } from "./cache-manager.js";
 import { ToolBackend, ToolCallOpts, ToolDefinition } from "./tool-backend.js";
 import { AppConfig } from "./config.js";
 import { BedrockLlmClient } from "./llm-client.js";
@@ -70,6 +76,20 @@ import { captureFrontendPreview } from "./terminal-preview.js";
 import { openContextArtifact } from "./context-artifacts.js";
 
 const SKIP_DIRS = [".git", "node_modules", "dist", ".mesh"];
+const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
+const CAPSULE_TIERS = ["low", "medium", "high"] as const;
+
+function parseIntegerInRange(value: string | undefined, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, Math.trunc(parsed)));
+}
+
+function normalizeCapsuleTier(value: string): "low" | "medium" | "high" {
+  return CAPSULE_TIERS.includes(value as any) ? value as "low" | "medium" | "high" : "medium";
+}
 
 function toPosixRelative(root: string, absolutePath: string): string {
   return path.relative(root, absolutePath).split(path.sep).join("/");
@@ -264,13 +284,13 @@ async function collectFiles(start: string, limit: number, workspaceRoot: string)
     const entries = await fs.readdir(current, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
       if (files.length >= limit) break;
-      
+
       const absolutePath = path.join(current, entry.name);
       const relativePath = path.relative(workspaceRoot, absolutePath).split(path.sep).join("/");
 
       // Skip hidden files except .github
       if (entry.name.startsWith(".") && entry.name !== ".github") continue;
-      
+
       // Check ignore filter
       if (ig.ignores(relativePath)) continue;
 
@@ -302,7 +322,7 @@ export class LocalToolBackend implements ToolBackend {
   private readonly agentOs: AgentOs;
 
   constructor(private readonly workspaceRoot: string, private readonly config?: AppConfig) {
-    this.cache = new CacheManager(config ?? { 
+    this.cache = new CacheManager(config ?? {
       agent: {
         workspaceRoot,
         maxSteps: 8,
@@ -317,12 +337,12 @@ export class LocalToolBackend implements ToolBackend {
           microphone: "default",
           transcriptionModel: "small"
         }
-      }, 
-      bedrock: { endpointBase: "", modelId: "", temperature: 0, maxTokens: 0 }, 
-      mcp: { args: [] }, 
-      supabase: {} 
+      },
+      bedrock: { endpointBase: "", modelId: "", temperature: 0, maxTokens: 0 },
+      mcp: { args: [] },
+      supabase: {}
     });
-    this.workspaceIndex = new WorkspaceIndex(workspaceRoot, this.meshCore);
+    this.workspaceIndex = new WorkspaceIndex(workspaceRoot, this.meshCore, this.cache);
     this.timelines = new TimelineManager(workspaceRoot);
     this.runtimeObserver = new RuntimeObserver(workspaceRoot);
     this.agentOs = new AgentOs(workspaceRoot, this.timelines);
@@ -346,7 +366,7 @@ export class LocalToolBackend implements ToolBackend {
           const stat = await fs.stat(absPath);
           const rel = toPosixRelative(this.workspaceRoot, absPath);
           const mtimeMs = Math.floor(stat.mtimeMs);
-          
+
           // Capture structural diff for Time-Travel AST Diffing & Predictive Synthesis
           try {
             const { stdout } = await execAsync(`git diff -U1 "${rel}"`, { cwd: this.workspaceRoot });
@@ -396,10 +416,10 @@ export class LocalToolBackend implements ToolBackend {
           setTimeout(async () => {
             const currentStat = await fs.stat(absPath).catch(() => null);
             if (!currentStat || Math.floor(currentStat.mtimeMs) !== mtimeMs) return;
-            
+
             const raw = await fs.readFile(absPath, "utf8").catch(() => null);
             if (!raw) return;
-            
+
             if (this.meshCore.isAvailable) {
               const summaries = await this.meshCore.summarizeAllTiers(rel, raw);
               await this.cache.setCapsule(rel, "low", summaries.low, mtimeMs);
@@ -413,8 +433,8 @@ export class LocalToolBackend implements ToolBackend {
                   if (!(diag as any).ok) {
                     await this.recordPredictiveRepairSignal(rel, diag);
                     // Pre-compute a fix using a sub-agent (0-token cost for main turn)
-                    const fixResult = await this.invokeSubAgent({ 
-                      prompt: `The file '${rel}' has the following error. Generate a precise alien_patch to fix it without changing logic:\n${(diag as any).output}` 
+                    const fixResult = await this.invokeSubAgent({
+                      prompt: `The file '${rel}' has the following error. Generate a precise alien_patch to fix it without changing logic:\n${(diag as any).output}`
                     }).catch(() => null);
                     if (fixResult && (fixResult as any).summary) {
                       this.speculativeFixes.set(rel, (fixResult as any).summary);
@@ -1137,9 +1157,9 @@ export class LocalToolBackend implements ToolBackend {
           type: "object",
           required: ["subTasks"],
           properties: {
-            subTasks: { 
-              type: "array", 
-              items: { 
+            subTasks: {
+              type: "array",
+              items: {
                 type: "object",
                 required: ["id", "prompt"],
                 properties: {
@@ -1550,7 +1570,7 @@ export class LocalToolBackend implements ToolBackend {
 
   private async readFile(args: Record<string, unknown>): Promise<unknown> {
     const requestedPath = String(args.path ?? "").trim();
-    const tier = String(args.tier ?? "medium").trim();
+    const tier = normalizeCapsuleTier(String(args.tier ?? "medium").trim());
     if (!requestedPath) {
       throw new Error("workspace.read_file requires 'path'");
     }
@@ -1568,8 +1588,20 @@ export class LocalToolBackend implements ToolBackend {
     const mtimeMs = Math.floor(stat.mtimeMs);
     const relativePath = toPosixRelative(this.workspaceRoot, absolutePath);
 
-    // Try cache first for the requested tier
-    const cached = await this.cache.getCapsule(relativePath, tier, mtimeMs);
+    // Fast path: Try cache first using mtimeMs
+    let cached = await this.cache.getCapsule(relativePath, tier, mtimeMs);
+    let raw = "";
+    let contentHash = "";
+
+    if (!cached) {
+      // Fast path missed. Read file to compute hash.
+      raw = await fs.readFile(absolutePath, "utf8");
+      contentHash = crypto.createHash("sha1").update(raw).digest("hex");
+
+      // Smart Invalidation: Check again with contentHash (e.g. mtime changed but content identical)
+      cached = await this.cache.getCapsule(relativePath, tier, mtimeMs, contentHash);
+    }
+
     if (cached) {
       return {
         ok: true,
@@ -1581,28 +1613,34 @@ export class LocalToolBackend implements ToolBackend {
       };
     }
 
-    // Cache miss – read file and generate ALL tiers via mesh-core
-    const raw = await fs.readFile(absolutePath, "utf8");
-    const TIERS = ["low", "medium", "high"] as const;
+    // Cache miss: generate the requested tier inline and fill the rest in the background.
     let requestedContent = raw.slice(0, 12000); // fallback if mesh-core unavailable
 
     if (this.meshCore.isAvailable) {
-      const results = await this.meshCore.summarizeAllTiers(relativePath, raw);
-      // Persist all tiers to L1 + L2 cache in parallel
-      await Promise.all(
-        TIERS.map((t) => {
-          const content = results[t] ?? "";
-          if (t === tier) requestedContent = content;
-          return this.cache.setCapsule(relativePath, t, content, mtimeMs);
-        })
-      );
-    } else {
-      // mesh-core not available – cache the raw content for all tiers
-      await Promise.all(
-        TIERS.map((t) =>
-          this.cache.setCapsule(relativePath, t, raw.slice(0, 12000), mtimeMs)
+      const results = await this.meshCore.summarizeSelectedTiers(relativePath, raw, [tier]);
+      requestedContent = results[tier] || requestedContent;
+      await this.cache.setCapsule(relativePath, tier, requestedContent, mtimeMs, contentHash);
+
+      const remainingTiers = CAPSULE_TIERS.filter((candidate) => candidate !== tier);
+      void this.meshCore
+        .summarizeSelectedTiers(relativePath, raw, remainingTiers)
+        .then((backgroundResults) =>
+          Promise.all(
+            remainingTiers.map((candidate) =>
+              this.cache.setCapsule(relativePath, candidate, backgroundResults[candidate] || "", mtimeMs, contentHash)
+            )
+          )
         )
-      );
+        .catch(() => {});
+    } else {
+      await this.cache.setCapsule(relativePath, tier, requestedContent, mtimeMs, contentHash);
+      void Promise.all(
+        CAPSULE_TIERS
+          .filter((candidate) => candidate !== tier)
+          .map((candidate) =>
+            this.cache.setCapsule(relativePath, candidate, raw.slice(0, 12000), mtimeMs, contentHash)
+          )
+      ).catch(() => {});
     }
 
     return {
@@ -1815,7 +1853,7 @@ export class LocalToolBackend implements ToolBackend {
     try {
       const response = await fetch(url);
       if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
-      
+
       const html = await response.text();
       // Extremely basic HTML to text conversion to avoid heavy dependencies
       const text = html
@@ -1846,7 +1884,7 @@ export class LocalToolBackend implements ToolBackend {
     try {
       // Sync to shadow (ignoring node_modules and .git)
       await execAsync(`rsync -a --exclude node_modules --exclude .git --exclude dist ${this.workspaceRoot}/ ${shadowRoot}/`);
-      
+
       onProgress?.(`[Shadow Workspace] Running: ${command}\n`);
       const TIMEOUT_MS = 60_000;
 
@@ -2062,10 +2100,10 @@ export class LocalToolBackend implements ToolBackend {
         output: result.stdout || result.stderr
       };
     } catch (err: any) {
-      return { 
-        ok: false, 
-        message: "Verification FAILED in ghost timeline. Patch rejected.", 
-        error: err.stdout || err.stderr || err.message 
+      return {
+        ok: false,
+        message: "Verification FAILED in ghost timeline. Patch rejected.",
+        error: err.stdout || err.stderr || err.message
       };
     }
   }
@@ -2095,13 +2133,13 @@ export class LocalToolBackend implements ToolBackend {
 
     const lines = content.split(/\r?\n/g);
     const originalContent = content;
-    
+
     // We replace the body but try to keep the signature if the user only provided a partial body
     // For now, we assume the user provides the full body content
     const newLines = [...lines];
     const removedCount = sym.lineEnd - sym.lineStart + 1;
-    
-    // We assume the LLM provides the implementation. We wrap it in the original signature 
+
+    // We assume the LLM provides the implementation. We wrap it in the original signature
     // to be safe, but let's try a direct replace of the lines first.
     newLines.splice(sym.lineStart - 1, removedCount, expandedCode);
     const appliedContent = newLines.join("\n");
@@ -2152,11 +2190,11 @@ export class LocalToolBackend implements ToolBackend {
       }
     }
 
-    return { 
-      ok: true, 
-      path: rel, 
-      id, 
-      symbol: entry.name, 
+    return {
+      ok: true,
+      path: rel,
+      id,
+      symbol: entry.name,
       patched: true,
       quantumSync: syncLogs.length > 0 ? syncLogs : undefined
     };
@@ -2171,7 +2209,7 @@ export class LocalToolBackend implements ToolBackend {
       // Find the most recent commit matching the concept in message
       const { stdout: commits } = await execAsync(`git log --grep="${concept}" --format="%H" -n 1`, { cwd: this.workspaceRoot });
       const hash = commits.trim();
-      
+
       if (!hash) {
         return { ok: false, error: `No recent commit found matching concept "${concept}".` };
       }
@@ -2180,9 +2218,9 @@ export class LocalToolBackend implements ToolBackend {
       // We use -n to not commit immediately so we can check AST stability
       await execAsync(`git revert -n ${hash}`, { cwd: this.workspaceRoot });
 
-      return { 
-        ok: true, 
-        message: `Concept "${concept}" has been surgically removed. Workspace state is now in 'uncommitted revert'. Please verify and commit.` 
+      return {
+        ok: true,
+        message: `Concept "${concept}" has been surgically removed. Workspace state is now in 'uncommitted revert'. Please verify and commit.`
       };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
@@ -2199,7 +2237,7 @@ export class LocalToolBackend implements ToolBackend {
     await this.saveBackup(requestedPath);
     const content = await fs.readFile(absolutePath, "utf8");
     const originalContent = content;
-    
+
     // Robust RegExp replacement for symbol definition and usage
     // Avoids replacing partial words like `myOldNameVar` if oldName is `OldName`
     const regex = new RegExp(`\\b${oldName}\\b`, "g");
@@ -2243,7 +2281,7 @@ export class LocalToolBackend implements ToolBackend {
     try {
       await execAsync(`git checkout -b ${branchName}`, { cwd: this.workspaceRoot });
       await execAsync(`git add .`, { cwd: this.workspaceRoot });
-      
+
       const fullMessage = `${commitMessage}\n\n[Mesh Semantic Trace]\nBased on plan: ${this.agentPlan.slice(0, 200)}...`;
       // Use spawn to safely pass multiline commit messages
       await new Promise((resolve, reject) => {
@@ -2388,9 +2426,9 @@ session.post('Debugger.setPauseOnExceptions', { state: 'uncaught' });
 session.on('Debugger.paused', async (message) => {
   console.error('\\n[Mesh Telemetry] 🚨 UNCAUGHT EXCEPTION DETECTED 🚨');
   console.error('[Mesh Telemetry] Freezing V8 Engine and dumping memory state...\\n');
-  
+
   const callFrames = message.params.callFrames.slice(0, 3);
-  
+
   const getProps = (objectId) => new Promise(resolve => {
     session.post('Runtime.getProperties', { objectId, ownProperties: true }, (err, res) => {
       resolve(err ? [] : res.result);
@@ -2400,7 +2438,7 @@ session.on('Debugger.paused', async (message) => {
   for (let i = 0; i < callFrames.length; i++) {
     const frame = callFrames[i];
     console.error(\`\\n► Frame \${i}: \${frame.functionName || '<anonymous>'} (\${frame.url}:\${frame.location.lineNumber + 1})\`);
-    
+
     for (const scope of frame.scopeChain) {
       if (scope.type === 'local' || scope.type === 'closure') {
         const props = await getProps(scope.object.objectId);
@@ -2416,7 +2454,7 @@ session.on('Debugger.paused', async (message) => {
       }
     }
   }
-  
+
   console.error('\\n[Mesh Telemetry] Dump complete. Exiting.');
   process.exit(1);
 });
@@ -2537,7 +2575,7 @@ session.on('Debugger.paused', async (message) => {
       const absPath = ensureInsideRoot(this.workspaceRoot, match.path);
       const content = await fs.readFile(absPath, "utf8").catch(() => "");
       if (!content) continue;
-      
+
       const record = await this.meshCore.getDetailedRecord(match.path, content);
       if (!record) continue;
 
@@ -2603,20 +2641,26 @@ session.on('Debugger.paused', async (message) => {
     });
 
     const tools = await this.listTools();
-    const safeTools = tools.filter(t => ["workspace.list_files", "workspace.read_file", "workspace.grep_capsules", "workspace.list_symbols"].includes(t.name));
+    const safeTools = tools
+      .filter(t => ["workspace.list_files", "workspace.read_file", "workspace.grep_capsules", "workspace.list_symbols"].includes(t.name))
+      .map((tool) => ({
+        name: tool.name,
+        description: tool.description ?? "",
+        inputSchema: tool.inputSchema ?? { type: "object", properties: {} }
+      }));
 
     const messages: any[] = [{ role: "user", content: [{ text: prompt }] }];
     let iterations = 0;
-    
+
     while (iterations < 5) {
       const response = await llm.converse(messages, safeTools as any[], "You are a fast research sub-agent. Gather data and summarize.", "us.anthropic.claude-haiku-4-5-20251001-v1:0");
-      
+
       if (response.kind === "text") {
         return { ok: true, summary: response.text };
       }
-      
+
       messages.push({ role: "assistant", content: response.toolUses.map(tu => ({ toolUse: tu })) as any });
-      
+
       const toolResults = await Promise.all(response.toolUses.map(async (tu) => {
         try {
           const res = await this.callTool(tu.name, tu.input);
@@ -2625,7 +2669,7 @@ session.on('Debugger.paused', async (message) => {
           return { toolUseId: tu.toolUseId, status: "error", content: [{ text: (e as Error).message }] };
         }
       }));
-      
+
       messages.push({ role: "user", content: toolResults.map(tr => ({ toolResult: tr })) as any });
       iterations++;
     }
@@ -2636,7 +2680,10 @@ session.on('Debugger.paused', async (message) => {
   private async raceFixes(args: Record<string, unknown>, onProgress?: (chunk: string) => void): Promise<unknown> {
     const task = String(args.task ?? "").trim();
     const verificationCommand = String(args.verificationCommand ?? "").trim();
-    const candidateCount = Math.max(1, Math.min(Number(args.candidates) || 3, 5));
+    const requestedCandidates = Number(args.candidates);
+    const looksSimple = !/(multi|across|refactor|runtime|crash|exception|architecture|migration|several|multiple)/i.test(task);
+    const defaultCandidates = looksSimple ? 1 : 3;
+    const candidateCount = Math.max(1, Math.min(Number.isFinite(requestedCandidates) ? requestedCandidates : defaultCandidates, 5));
 
     if (!task || !verificationCommand) throw new Error("race_fixes requires task and verificationCommand");
     if (!this.config) throw new Error("Agent configuration not available.");
@@ -2672,6 +2719,7 @@ session.on('Debugger.paused', async (message) => {
       "Standard idiomatic approach: Use common patterns."
     ];
 
+    const controller = new AbortController();
     const results = await Promise.all(Array.from({ length: candidateCount }).map(async (_, i) => {
       const strategy = strategies[i % strategies.length];
       onProgress?.(`[Candidate ${i + 1}] Generating fix with strategy: ${strategy.split(":")[0]}...\n`);
@@ -2686,7 +2734,16 @@ Generate a standard git patch (diff) to solve the problem.
 Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
 
       try {
-        const response = await llm.converse([{ role: "user", content: [{ text: prompt }] }], [], "Respond only with a raw git patch.");
+        if (controller.signal.aborted) {
+          return { id: i, status: "aborted", error: "Another candidate passed verification.", score: -1000 };
+        }
+        const response = await llm.converse(
+          [{ role: "user", content: [{ text: prompt }] }],
+          [],
+          "Respond only with a raw git patch.",
+          undefined,
+          controller.signal
+        );
         if (response.kind !== "text") {
           return { id: i, status: "error", error: "LLM failed to generate text." };
         }
@@ -2712,6 +2769,17 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
         }
 
         onProgress?.(`[Candidate ${i + 1}] Running verification: ${verificationCommand}...\n`);
+        if (controller.signal.aborted) {
+          return {
+            id: i,
+            timelineId,
+            strategy: strategy.split(":")[0],
+            status: "aborted",
+            error: "Another candidate passed verification before this run started.",
+            score: -1000,
+            metrics: { changedLines: 0, warningCount: 0, durationMs: 0 }
+          };
+        }
         const runRes = await this.timelines.run({ timelineId, command: verificationCommand });
         const comparison = await this.timelines.compare({ timelineIds: [timelineId] });
         const summary = comparison.comparisons[0] as Record<string, unknown> | undefined;
@@ -2725,7 +2793,7 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
           durationMs
         });
 
-        return {
+        const result = {
           id: i,
           timelineId,
           strategy: strategy.split(":")[0],
@@ -2741,7 +2809,22 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
           },
           comparison: summary
         };
+        if (runRes.ok && !controller.signal.aborted) {
+          controller.abort();
+        }
+        return result;
       } catch (err) {
+        if (controller.signal.aborted) {
+          return {
+            id: i,
+            timelineId: undefined,
+            strategy: strategy.split(":")[0],
+            status: "aborted",
+            error: "Another candidate passed verification.",
+            score: -1000,
+            metrics: { changedLines: 0, warningCount: 0, durationMs: 0 }
+          };
+        }
         return {
           id: i,
           timelineId: undefined,
@@ -2755,7 +2838,7 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
     }));
 
     const rankedResults = [...results].sort((left, right) => Number(right.score ?? -Infinity) - Number(left.score ?? -Infinity));
-    const winner = rankedResults.find((result) => result.verdict === "pass") ?? rankedResults[0] ?? null;
+    const winner = rankedResults.find((result) => (result as any).verdict === "pass") ?? rankedResults[0] ?? null;
 
     return {
       ok: true,
@@ -2808,7 +2891,7 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
       const subPath = typeof args.path === "string" ? args.path : "";
       const absolutePath = subPath ? ensureInsideRoot(this.workspaceRoot, subPath) : this.workspaceRoot;
       const relativePath = subPath ? toPosixRelative(this.workspaceRoot, absolutePath) : "";
-      
+
       const { stdout } = await execAsync(`git diff ${relativePath}`, { cwd: this.workspaceRoot });
       return { ok: true, diff: stdout || "No changes." };
     } catch (err) {
@@ -2825,7 +2908,7 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
     const absolutePath = ensureInsideRoot(this.workspaceRoot, requestedPath);
     await this.saveBackup(requestedPath);
     const content = await fs.readFile(absolutePath, "utf8");
-    
+
     // Backup original content for potential rollback
     const originalContent = content;
     let appliedContent = content;
@@ -2835,7 +2918,7 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
       // Try a more lenient match by trimming each line if exact match fails
       const searchLines = searchBlock.split("\n").map(l => l.trim());
       const contentLines = content.split("\n");
-      
+
       let foundIndex = -1;
       for (let i = 0; i <= contentLines.length - searchLines.length; i++) {
         let match = true;
@@ -2901,7 +2984,7 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
     const rel = toPosixRelative(this.workspaceRoot, absolutePath);
 
     const symbols = await this.meshCore.extractSymbols(rel, content);
-    
+
     return {
       ok: true,
       path: rel,
@@ -2931,7 +3014,7 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
       // Fuzzy search fallback
       const fuzzy = record.symbols.find(s => s.name.toLowerCase().includes(symbolName.toLowerCase()));
       if (!fuzzy) throw new Error(`Symbol '${symbolName}' not found in ${requestedPath}`);
-      
+
       const lines = content.split(/\r?\n/g);
       const snippet = lines.slice(fuzzy.lineStart - 1, fuzzy.lineEnd).join("\n");
       return { ok: true, path: rel, symbol: fuzzy.name, kind: fuzzy.kind, snippet };
@@ -2974,7 +3057,7 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
     const requestedPath = String(args.path ?? ".").trim();
     const base = ensureInsideRoot(this.workspaceRoot, requestedPath);
     const entries = await fs.readdir(base, { withFileTypes: true });
-    
+
     const results = [];
     for (const entry of entries) {
       if (entry.isFile() && (entry.name.endsWith(".ts") || entry.name.endsWith(".js") || entry.name.endsWith(".tsx"))) {
@@ -2982,7 +3065,7 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
         const rel = toPosixRelative(this.workspaceRoot, filePath);
         const stat = await fs.stat(filePath);
         const capsule = await this.cache.getCapsule(rel, "low", Math.floor(stat.mtimeMs));
-        
+
         if (capsule) {
           results.push({ path: rel, overview: capsule.content });
         } else {
@@ -3042,10 +3125,10 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
     const includePattern = typeof args.includePattern === "string" ? `--glob "${args.includePattern}"` : "";
 
     try {
-      const { stdout } = await execAsync(`rg --vimgrep --max-columns 200 ${includePattern} "${query}" .`, { 
-        cwd: absolutePath 
+      const { stdout } = await execAsync(`rg --vimgrep --max-columns 200 ${includePattern} "${query}" .`, {
+        cwd: absolutePath
       });
-      
+
       const lines = stdout.split("\n").filter(Boolean);
       const matches = lines.slice(0, 100).map(line => {
         const [file, lnum, col, ...rest] = line.split(":");
@@ -3197,7 +3280,7 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
       const errorContent = result.stderr + "\n" + result.stdout;
       const fileLineRegex = /([a-zA-Z0-9._\-\/]+\.(?:ts|js|tsx|js|py|go|c|cpp|rs|java|rb|php)):(\d+)/g;
       const matches = Array.from(errorContent.matchAll(fileLineRegex)).slice(0, 3); // Max 3 snippets
-      
+
       if (matches.length > 0) {
         const snippets = [];
         for (const match of matches) {
@@ -4616,37 +4699,58 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
   public async *indexEverything(): AsyncGenerator<{ current: number; total: number; path: string }> {
     const files = await collectFiles(this.workspaceRoot, 10000, this.workspaceRoot);
     const total = files.length;
-    const CONCURRENCY = 5;
     let completed = 0;
 
-    const processFile = async (absolutePath: string) => {
+    const processFile = async (absolutePath: string, existing?: unknown) => {
       const relativePath = toPosixRelative(this.workspaceRoot, absolutePath);
       const stat = await fs.stat(absolutePath);
       const mtimeMs = Math.floor(stat.mtimeMs);
 
-      const existing = await this.cache.getCapsule(relativePath, "medium", mtimeMs);
+      let raw = "";
+      let contentHash = "";
+
       if (!existing) {
-        const raw = await fs.readFile(absolutePath, "utf8");
-        const TIERS = ["low", "medium", "high"] as const;
+        raw = await fs.readFile(absolutePath, "utf8");
+        contentHash = crypto.createHash("sha1").update(raw).digest("hex");
+        existing = await this.cache.getCapsule(relativePath, "medium", mtimeMs, contentHash);
+      }
+
+      if (!existing) {
         if (this.meshCore.isAvailable) {
           const results = await this.meshCore.summarizeAllTiers(relativePath, raw);
-          await Promise.all(TIERS.map(t => this.cache.setCapsule(relativePath, t, results[t] || "", mtimeMs)));
+          await Promise.all(CAPSULE_TIERS.map(t => this.cache.setCapsule(relativePath, t, results[t] || "", mtimeMs, contentHash)));
         } else {
-          await Promise.all(TIERS.map(t => this.cache.setCapsule(relativePath, t, raw.slice(0, 12000), mtimeMs)));
+          await Promise.all(CAPSULE_TIERS.map(t => this.cache.setCapsule(relativePath, t, raw.slice(0, 12000), mtimeMs, contentHash)));
         }
       }
       return relativePath;
     };
 
-    for (let i = 0; i < total; i += CONCURRENCY) {
-      const chunk = files.slice(i, i + CONCURRENCY);
-      const results = await Promise.all(chunk.map(processFile));
+    for (let i = 0; i < total; i += INDEX_PARALLELISM) {
+      const chunk = files.slice(i, i + INDEX_PARALLELISM);
+      const batchRequests: CapsuleBatchRequest[] = [];
+      for (const absolutePath of chunk) {
+        const relativePath = toPosixRelative(this.workspaceRoot, absolutePath);
+        const stat = await fs.stat(absolutePath);
+        batchRequests.push({
+          filePath: relativePath,
+          tier: "medium",
+          mtimeMs: Math.floor(stat.mtimeMs)
+        });
+      }
+      const cachedBatch = await this.cache.getCapsuleBatch(batchRequests);
+      const results = await Promise.all(
+        chunk.map((absolutePath) => {
+          const relativePath = toPosixRelative(this.workspaceRoot, absolutePath);
+          return processFile(absolutePath, cachedBatch.get(`${relativePath}\u0000medium`));
+        })
+      );
       for (let j = 0; j < results.length; j++) {
         completed++;
         yield { current: completed, total, path: results[j] };
       }
     }
-    
+
     // Post-indexing: Update intelligence artifacts in .mesh/ and the persistent code graph.
     await this.updateIntelligence();
     await this.workspaceIndex.rebuild();
@@ -4663,7 +4767,7 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
 
     const files = await collectFiles(this.workspaceRoot, 1000, this.workspaceRoot);
     const tsFiles = files.filter(f => f.endsWith(".ts") || f.endsWith(".js"));
-    
+
     const architecture = [
       "# Project Architecture 🏛️",
       "",
@@ -4679,7 +4783,7 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
     ].join("\n");
 
     await fs.writeFile(architecturePath, architecture);
-    
+
     const depGraph = [
       "# Dependency Graph 🕸️",
       "",

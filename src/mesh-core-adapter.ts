@@ -164,11 +164,25 @@ export class MeshCoreAdapter {
   }
 
   async summarizeAllTiers(filePath: string, text: string): Promise<Record<"low" | "medium" | "high", string>> {
+    return this.summarizeSelectedTiers(filePath, text, ["low", "medium", "high"]);
+  }
+
+  async summarizeSelectedTiers(
+    filePath: string,
+    text: string,
+    tiers: Array<"low" | "medium" | "high">
+  ): Promise<Record<"low" | "medium" | "high", string>> {
     const content = String(text ?? "");
     const fallback = content.slice(0, 12000);
+    const selected = new Set(tiers);
+    const empty = { low: "", medium: "", high: "" } as Record<"low" | "medium" | "high", string>;
 
     if (!this.module || typeof this.module.buildWorkspaceFileRecord !== "function" || typeof this.module.buildWorkspaceFileView !== "function") {
-      return { low: fallback, medium: fallback, high: fallback };
+      return {
+        low: selected.has("low") ? fallback.slice(0, 6000) : "",
+        medium: selected.has("medium") ? fallback : "",
+        high: selected.has("high") ? fallback.slice(0, 24000) : ""
+      };
     }
 
     try {
@@ -178,19 +192,34 @@ export class MeshCoreAdapter {
         defaultCapsuleTier: "medium"
       });
 
-      const [low, medium, high] = await Promise.all([
-        this.module.buildWorkspaceFileView(record, "capsule", { tier: "ultra" }),
-        this.module.buildWorkspaceFileView(record, "capsule", { tier: "medium" }),
-        this.module.buildWorkspaceFileView(record, "capsule", { tier: "loose" })
-      ]);
+      const viewTasks: Array<Promise<void>> = [];
+      if (selected.has("low")) {
+        viewTasks.push(
+          this.module.buildWorkspaceFileView(record, "capsule", { tier: "ultra" })
+            .then((view) => { empty.low = String(view.content ?? "").slice(0, 6000); })
+        );
+      }
+      if (selected.has("medium")) {
+        viewTasks.push(
+          this.module.buildWorkspaceFileView(record, "capsule", { tier: "medium" })
+            .then((view) => { empty.medium = String(view.content ?? "").slice(0, 12000); })
+        );
+      }
+      if (selected.has("high")) {
+        viewTasks.push(
+          this.module.buildWorkspaceFileView(record, "capsule", { tier: "loose" })
+            .then((view) => { empty.high = String(view.content ?? "").slice(0, 24000); })
+        );
+      }
 
-      return {
-        low: String(low.content ?? "").slice(0, 6000),
-        medium: String(medium.content ?? "").slice(0, 12000),
-        high: String(high.content ?? "").slice(0, 24000)
-      };
+      await Promise.all(viewTasks);
+      return empty;
     } catch {
-      return { low: fallback, medium: fallback, high: fallback };
+      return {
+        low: selected.has("low") ? fallback.slice(0, 6000) : "",
+        medium: selected.has("medium") ? fallback : "",
+        high: selected.has("high") ? fallback.slice(0, 24000) : ""
+      };
     }
   }
 

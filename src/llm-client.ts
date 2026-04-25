@@ -93,13 +93,14 @@ export class BedrockLlmClient {
   async converse(
     messages: ConverseMessage[],
     tools: ToolSpec[],
-    systemPrompt: string,
+    systemPrompt: string | Array<{ text: string; cache_control?: any }>,
     modelIdOverride?: string,
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    maxTokensOverride?: number
   ): Promise<LlmResponse> {
     const activeModelId = modelIdOverride || this.options.modelId;
     const url = this.buildUrl(activeModelId);
-    const body = this.buildBody(messages, tools, systemPrompt);
+    const body = this.buildBody(messages, tools, systemPrompt, maxTokensOverride);
 
     const headers: Record<string, string> = {
       "content-type": "application/json"
@@ -130,13 +131,14 @@ export class BedrockLlmClient {
   async *converseStream(
     messages: ConverseMessage[],
     tools: ToolSpec[],
-    systemPrompt: string,
+    systemPrompt: string | Array<{ text: string; cache_control?: any }>,
     modelIdOverride?: string,
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    maxTokensOverride?: number
   ): AsyncGenerator<{ kind: "text" | "tool_use" | "stop"; text?: string; toolUse?: any; usage?: ConverseUsage }> {
     const activeModelId = modelIdOverride || this.options.modelId;
     const url = this.buildUrl(activeModelId).replace("/converse", "/converse-stream");
-    const body = this.buildBody(messages, tools, systemPrompt);
+    const body = this.buildBody(messages, tools, systemPrompt, maxTokensOverride);
 
     const headers: Record<string, string> = {
       "content-type": "application/json"
@@ -219,7 +221,8 @@ export class BedrockLlmClient {
   private buildBody(
     messages: ConverseMessage[],
     tools: ToolSpec[],
-    systemPrompt: string
+    systemPrompt: string | Array<{ text: string; cache_control?: any }>,
+    maxTokensOverride?: number
   ): Record<string, unknown> {
     // Map messages to ensure image/multimodal blocks are correctly structured
     const mappedMessages = messages.map(msg => ({
@@ -237,19 +240,24 @@ export class BedrockLlmClient {
       })
     }));
 
-    const body: Record<string, unknown> = {
-      messages: mappedMessages,
-      system: [
+    let systemArray: Array<{ text: string; cache_control?: any }>;
+    if (typeof systemPrompt === "string") {
+      systemArray = [
         { 
           text: systemPrompt,
-          // Anthropic/Bedrock cache control marker
-          // Supported by modern providers to cache the system prompt + tools
-          ...( (systemPrompt.length > 1000) ? { cache_control: { type: "ephemeral" } } : {} )
+          ...(systemPrompt.length > 1000 ? { cache_control: { type: "ephemeral" } } : {})
         }
-      ],
+      ];
+    } else {
+      systemArray = systemPrompt;
+    }
+
+    const body: Record<string, unknown> = {
+      messages: mappedMessages,
+      system: systemArray,
       inferenceConfig: {
         temperature: this.options.temperature,
-        maxTokens: this.options.maxTokens
+        maxTokens: maxTokensOverride ?? this.options.maxTokens
       }
     };
 

@@ -42,6 +42,6 @@ test("context assembler trims raw history and tool payloads before model calls",
 
   assert.ok(result.report.totalTokens <= result.report.maxInputTokens);
   assert.ok(result.report.messagesOut < transcript.length + 2);
-  assert.ok(result.report.toolsOut < 20);
+  assert.equal(result.report.toolsOut, 20);
   assert.doesNotMatch(JSON.stringify(result.messages), new RegExp(`x{5000}`));
 });

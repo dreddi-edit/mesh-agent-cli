@@ -15,6 +15,30 @@ const SKIP_DIRS = new Set([".git", "node_modules", "dist", ".mesh", ".next", ".t
 let stateCache: { at: number; value: Record<string, unknown> } | null = null;
 let graphCache: { key: string; value: Record<string, unknown> } | null = null;
 
+class Mutex {
+  private queue: Array<() => void> = [];
+  private locked = false;
+
+  async acquire(): Promise<void> {
+    if (!this.locked) {
+      this.locked = true;
+      return;
+    }
+    return new Promise(resolve => this.queue.push(resolve));
+  }
+
+  release(): void {
+    if (this.queue.length > 0) {
+      const next = this.queue.shift();
+      next?.();
+    } else {
+      this.locked = false;
+    }
+  }
+}
+
+const ioMutex = new Mutex();
+
 async function main(): Promise<void> {
   await fs.mkdir(dashboardDir, { recursive: true });
   const server = http.createServer(async (req, res) => {
@@ -27,6 +51,27 @@ async function main(): Promise<void> {
         return json(res, await buildState());
       }
       if (url.pathname === "/api/actions" && req.method === "POST") {
+        const contentType = req.headers["content-type"] || "";
+        if (!contentType.includes("application/json")) {
+          res.writeHead(415, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ ok: false, error: "Unsupported Media Type: Must be application/json" }));
+        }
+
+        const origin = req.headers["origin"];
+        const host = req.headers["host"];
+        if (origin) {
+          try {
+            const originUrl = new URL(origin);
+            if (originUrl.host !== host) {
+              res.writeHead(403, { "Content-Type": "application/json" });
+              return res.end(JSON.stringify({ ok: false, error: "Cross-Origin Request Blocked" }));
+            }
+          } catch {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ ok: false, error: "Invalid Origin" }));
+          }
+        }
+
         const body = await readRequestJson(req);
         return json(res, await enqueueAction(body));
       }
@@ -49,12 +94,22 @@ async function main(): Promise<void> {
 }
 
 function html(res: http.ServerResponse, body: string): void {
-  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  res.writeHead(200, {
+    "Content-Type": "text/html; charset=utf-8",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Content-Security-Policy": "default-src 'self' 'unsafe-inline'; img-src 'self' data:;"
+  });
   res.end(body);
 }
 
 function json(res: http.ServerResponse, payload: unknown): void {
-  res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+  res.writeHead(200, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY"
+  });
   res.end(JSON.stringify(payload));
 }
 
@@ -146,8 +201,15 @@ async function buildState(): Promise<Record<string, unknown>> {
 
 async function readRequestJson(req: http.IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
+  let length = 0;
   for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    length += buf.length;
+    if (length > 1024 * 1024) {
+      req.destroy();
+      throw new Error("Payload too large (OOM Protection)");
+    }
+    chunks.push(buf);
   }
   if (chunks.length === 0) return {};
   try {
@@ -163,27 +225,38 @@ async function enqueueAction(body: Record<string, unknown>): Promise<Record<stri
   if (!allowed.has(action)) {
     return { ok: false, error: "unsupported action" };
   }
-  const existing = await readJson(actionsPath, []);
-  const queue = Array.isArray(existing) ? existing : [];
-  const request = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    action,
-    status: "pending",
-    createdAt: new Date().toISOString()
-  };
-  queue.unshift(request);
-  await fs.mkdir(path.dirname(actionsPath), { recursive: true });
-  await fs.writeFile(actionsPath, JSON.stringify(queue.slice(0, 100), null, 2), "utf8");
+  await ioMutex.acquire();
+  let request;
+  try {
+    const existing = await readJson(actionsPath, []);
+    const queue = Array.isArray(existing) ? existing : [];
+    request = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      action,
+      status: "pending",
+      createdAt: new Date().toISOString()
+    };
+    queue.unshift(request);
+    await fs.mkdir(path.dirname(actionsPath), { recursive: true });
+    await fs.writeFile(actionsPath, JSON.stringify(queue.slice(0, 100), null, 2), "utf8");
+  } finally {
+    ioMutex.release();
+  }
   await appendEvent({ type: "dashboard_action", msg: `queued ${action}`, at: new Date().toISOString() });
   return { ok: true, request };
 }
 
 async function appendEvent(event: Record<string, unknown>): Promise<void> {
-  const existing = await readJson(eventsPath, []);
-  const events = Array.isArray(existing) ? existing : [];
-  events.unshift({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, ...event });
-  await fs.mkdir(path.dirname(eventsPath), { recursive: true });
-  await fs.writeFile(eventsPath, JSON.stringify(events.slice(0, 200), null, 2), "utf8");
+  await ioMutex.acquire();
+  try {
+    const existing = await readJson(eventsPath, []);
+    const events = Array.isArray(existing) ? existing : [];
+    events.unshift({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, ...event });
+    await fs.mkdir(path.dirname(eventsPath), { recursive: true });
+    await fs.writeFile(eventsPath, JSON.stringify(events.slice(0, 200), null, 2), "utf8");
+  } finally {
+    ioMutex.release();
+  }
 }
 
 async function collectFiles(root: string, limit: number): Promise<string[]> {

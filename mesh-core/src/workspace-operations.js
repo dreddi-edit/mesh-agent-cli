@@ -295,8 +295,12 @@ async function openLocalWorkspace(data = {}) {
 // ─── Background Indexer ───────────────────────────────────────────────────────
 // Queue-based: new files can be added while indexer is running.
 // Automatically stops when workspace changes.
-// Uses high parallelism: P3v3 x4 can handle 48 concurrent blob reads.
-const BG_INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_BG_INDEX_PARALLELISM, 48, 4, 128);
+const BG_INDEX_PARALLELISM = parseIntegerInRange(
+    process.env.MESH_INDEX_PARALLELISM ?? process.env.MESH_BG_INDEX_PARALLELISM,
+    12,
+    1,
+    128
+);
 
 const indexerQueues = new Map(); // workspaceId → { queue: Set, running: bool, folderName }
 
@@ -1713,15 +1717,137 @@ function isTestPairOf(candidatePath, activeFilePath) {
     );
 }
 
-/**
- * Optional vector similarity boost. Returns 0 until MESH_VECTOR_ENABLED is set
- * and .mesh/vectors/ files exist. Activation is deferred to Phase 57 benchmarks.
- * @param {string} _path
- * @param {string[]} _queryTokens
- * @returns {number}
- */
-function vectorBoost(_path, _queryTokens) {
-    return 0;
+const VECTOR_BOOST = parseIntegerInRange(process.env.MESH_VECTOR_BOOST, 30, 0, 500);
+let vectorExtractorPromise = null;
+
+function vectorEnabled() {
+    return String(process.env.MESH_VECTOR_ENABLED || '').toLowerCase() === 'true';
+}
+
+function vectorDirectory() {
+    if (!workspaceState.rootPath) return null;
+    return path.join(workspaceState.rootPath, '.mesh', 'vectors');
+}
+
+function cosineSimilarity(left, right) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length === 0 || left.length !== right.length) return 0;
+    let dot = 0;
+    let leftMag = 0;
+    let rightMag = 0;
+    for (let i = 0; i < left.length; i += 1) {
+        const l = Number(left[i]) || 0;
+        const r = Number(right[i]) || 0;
+        dot += l * r;
+        leftMag += l * l;
+        rightMag += r * r;
+    }
+    if (leftMag === 0 || rightMag === 0) return 0;
+    return dot / (Math.sqrt(leftMag) * Math.sqrt(rightMag));
+}
+
+function normalizeVectorRecord(pathValue, value) {
+    if (Array.isArray(value)) return { path: pathValue, vector: value };
+    if (!value || typeof value !== 'object') return null;
+    const vector = Array.isArray(value.vector)
+        ? value.vector
+        : Array.isArray(value.embedding)
+            ? value.embedding
+            : null;
+    if (!vector) return null;
+    return { path: String(value.path || value.file || pathValue || ''), vector };
+}
+
+async function readVectorRecords(dir) {
+    const records = [];
+    const indexPath = path.join(dir, 'index.json');
+    try {
+        const index = JSON.parse(await fs.promises.readFile(indexPath, 'utf8'));
+        const entries = Array.isArray(index)
+            ? index
+            : Array.isArray(index.entries)
+                ? index.entries
+                : Object.entries(index.files || index.vectors || {}).map(([filePath, value]) => (
+                    Array.isArray(value) || value?.vector || value?.embedding
+                        ? { path: filePath, vector: Array.isArray(value) ? value : value.vector, embedding: value?.embedding }
+                        : { path: filePath, value }
+                ));
+        for (const entry of entries) {
+            if (entry?.file || entry?.path || entry?.vector || entry?.embedding) {
+                const inline = normalizeVectorRecord(entry.path || entry.file, entry);
+                if (inline?.path && inline.vector) {
+                    records.push(inline);
+                    continue;
+                }
+            }
+            const filePath = entry?.path || entry?.file;
+            const vectorFile = entry?.vectorFile || entry?.filePath || entry?.value;
+            if (filePath && typeof vectorFile === 'string') {
+                const loaded = normalizeVectorRecord(filePath, JSON.parse(await fs.promises.readFile(path.join(dir, vectorFile), 'utf8')));
+                if (loaded?.path && loaded.vector) records.push(loaded);
+            }
+        }
+        if (records.length > 0) return records;
+    } catch {
+        // Fall through to scanning individual vector files.
+    }
+
+    try {
+        const files = await fs.promises.readdir(dir);
+        for (const fileName of files) {
+            if (!fileName.endsWith('.json') || fileName === 'index.json') continue;
+            try {
+                const raw = JSON.parse(await fs.promises.readFile(path.join(dir, fileName), 'utf8'));
+                const fallbackPath = decodeURIComponent(fileName.replace(/\.json$/, ''));
+                const record = normalizeVectorRecord(fallbackPath, raw);
+                if (record?.path && record.vector) records.push(record);
+            } catch {
+                // Ignore malformed vector files.
+            }
+        }
+    } catch {
+        return [];
+    }
+    return records;
+}
+
+async function getVectorExtractor() {
+    if (!vectorExtractorPromise) {
+        vectorExtractorPromise = (async () => {
+            const { pipeline } = await import('@xenova/transformers');
+            const model = process.env.MESH_EMBEDDING_MODEL || 'Xenova/all-MiniLM-L6-v2';
+            return pipeline('feature-extraction', model, { quantized: true });
+        })().catch(() => null);
+    }
+    return vectorExtractorPromise;
+}
+
+async function prepareVectorBoostScores(queryText) {
+    if (!vectorEnabled() || !queryText || VECTOR_BOOST <= 0) return new Map();
+    const dir = vectorDirectory();
+    if (!dir) return new Map();
+    try {
+        await fs.promises.access(dir);
+    } catch {
+        return new Map();
+    }
+
+    const [extractor, records] = await Promise.all([getVectorExtractor(), readVectorRecords(dir)]);
+    if (!extractor || records.length === 0) return new Map();
+
+    const output = await extractor(queryText, { pooling: 'mean', normalize: true });
+    const queryVector = Array.from(output.data || []);
+    const scores = new Map();
+    for (const record of records) {
+        const similarity = cosineSimilarity(queryVector, record.vector);
+        if (similarity > 0.05) {
+            scores.set(record.path, Number((similarity * VECTOR_BOOST).toFixed(3)));
+        }
+    }
+    return scores;
+}
+
+function vectorBoost(pathValue, vectorScores) {
+    return vectorScores instanceof Map ? Number(vectorScores.get(pathValue) || 0) : 0;
 }
 
 const RECENCY_BUCKETS = [
@@ -1746,7 +1872,7 @@ const FILE_ROLE_TEST_QUERY_BOOST = 20;
  *
  * @param {string} pathValue - File path to score
  * @param {{rawText:string, compactText:string, tokens:string[]}} queryContext
- * @param {{activeFile?:string, symbolHitFiles:Set<string>, calleeFiles:Set<string>, queryTokens:string[]}} opts
+ * @param {{activeFile?:string, symbolHitFiles:Set<string>, calleeFiles:Set<string>, queryTokens:string[], vectorScores?:Map<string, number>}} opts
  * @returns {{score:number, reasons:string[]}}
  */
 function hybridRankFiles(pathValue, queryContext, opts) {
@@ -1755,6 +1881,7 @@ function hybridRankFiles(pathValue, queryContext, opts) {
         symbolHitFiles = new Set(),
         calleeFiles    = new Set(),
         queryTokens    = [],
+        vectorScores   = new Map(),
     } = opts || {};
 
     const reasons = [];
@@ -1806,7 +1933,9 @@ function hybridRankFiles(pathValue, queryContext, opts) {
     if (roleBoost > 0) reasons.push(`role: ${role} (+${roleBoost})`);
 
     // ── 8. Vector boost (dormant hook — RET-02) ───────────────────────────────
-    const vBoost = vectorBoost(pathValue, queryTokens);
+    const vBoost = vectorBoost(pathValue, vectorScores);
+    const vectorReason = vBoost > 0 ? `vector (+${vBoost.toFixed(1)})` : null;
+    if (vectorReason) reasons.push(vectorReason);
 
     const score = pathScore
         + (symbolHit ? SYMBOL_HIT_BOOST : 0)
@@ -1817,7 +1946,11 @@ function hybridRankFiles(pathValue, queryContext, opts) {
         + roleBoost
         + vBoost;
 
-    return { score, reasons: reasons.slice(0, 4) };
+    const compactReasons = reasons.slice(0, 4);
+    if (vectorReason && !compactReasons.includes(vectorReason)) {
+        compactReasons.splice(Math.max(0, compactReasons.length - 1), 1, vectorReason);
+    }
+    return { score, reasons: compactReasons };
 }
 
 function buildWorkspaceQueryContext(rawQuery) {
@@ -1868,6 +2001,7 @@ async function searchWorkspace(data = {}) {
     const extensionHints = extractQueryExtensionHints(q);
     const queryContext = buildWorkspaceQueryContext(q);
     const snippets = resolveQueryIndexSnippets(q, MAX_QUERY_SNIPPETS);
+    const vectorScores = q ? await prepareVectorBoostScores(q).catch(() => new Map()) : new Map();
 
     // Pre-compute signal sets for hybridRankFiles (O(snippets) — done once, not per-file)
     const symbolHitFiles = new Set(snippets.map((s) => s.file));
@@ -1881,7 +2015,7 @@ async function searchWorkspace(data = {}) {
             }
         }
     }
-    const hybridOpts = { activeFile, symbolHitFiles, calleeFiles, queryTokens: queryContext.tokens };
+    const hybridOpts = { activeFile, symbolHitFiles, calleeFiles, queryTokens: queryContext.tokens, vectorScores };
 
     if (workspaceMetadataStore.enabled && isUploadWorkspace()) {
         const workspaceId = selectedWorkspaceId(data);

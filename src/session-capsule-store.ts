@@ -29,11 +29,29 @@ export class SessionCapsuleStore {
   async load(): Promise<PersistedSessionCapsule | null> {
     try {
       const raw = await fs.readFile(this.statePath, "utf8");
-      const parsed = JSON.parse(raw) as SessionStateShape;
-      if (!parsed?.capsule?.summary) {
+      const parsed = JSON.parse(raw) as Partial<SessionStateShape>;
+
+      const capsule = parsed?.capsule;
+      if (!capsule) {
         return null;
       }
-      return parsed.capsule;
+
+      // Data Contract Validation (data-quality-frameworks)
+      const isValidContract =
+        typeof capsule.summary === "string" &&
+        capsule.summary.length > 0 &&
+        typeof capsule.generatedAt === "string" &&
+        typeof capsule.sourceMessages === "number" &&
+        typeof capsule.retainedMessages === "number" &&
+        !isNaN(capsule.sourceMessages) &&
+        !isNaN(capsule.retainedMessages);
+
+      if (!isValidContract) {
+        console.warn(`[Mesh:DataQuality] Corrupt session state detected at ${this.statePath}. Discarding invalid capsule.`);
+        return null;
+      }
+
+      return capsule as PersistedSessionCapsule;
     } catch {
       return null;
     }
