@@ -81,6 +81,7 @@ import net from "node:net";
 import { IssuePipelineManager } from "./integrations/issues/manager.js";
 import { ChatopsManager } from "./integrations/chatops/manager.js";
 import { scoreSignal, TelemetryManager } from "./integrations/telemetry/manager.js";
+import { ReplayEngine } from "./runtime/replay.js";
 
 const SKIP_DIRS = [".git", "node_modules", "dist", ".mesh"];
 const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
@@ -357,6 +358,7 @@ export class LocalToolBackend implements ToolBackend {
   private readonly issuePipeline: IssuePipelineManager;
   private readonly chatops: ChatopsManager;
   private readonly telemetry: TelemetryManager;
+  private readonly replayEngine: ReplayEngine;
 
   constructor(private readonly workspaceRoot: string, private readonly config?: AppConfig) {
     this.cache = new CacheManager(config ?? {
@@ -398,6 +400,7 @@ export class LocalToolBackend implements ToolBackend {
       predictiveRepair: async () => this.predictiveRepair({ action: "analyze" })
     });
     this.telemetry = new TelemetryManager(workspaceRoot);
+    this.replayEngine = new ReplayEngine(workspaceRoot, this.timelines);
     void this.bootstrapRepoDnaMemory();
     void this.agentOs.ensureDefaultDefinitions();
     void this.runtimeObserver.writeDefaultRunbooks();
@@ -1166,6 +1169,18 @@ export class LocalToolBackend implements ToolBackend {
         }
       },
       {
+        name: "runtime.replay_trace",
+        description: "Production incident replay from OpenTelemetry trace IDs or Sentry event IDs, with optional commit-range divergence analysis.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            traceId: { type: "string" },
+            sentryEventId: { type: "string" },
+            commitRange: { type: "string", description: "Optional git commit range in form start..end." }
+          }
+        }
+      },
+      {
         name: "workspace.validate_patch",
         description: "Pre-Cognitive Ghost Execution: Test a surgical patch in memory without actually saving it. Useful to check if your code compiles before committing to it.",
         inputSchema: {
@@ -1604,6 +1619,12 @@ export class LocalToolBackend implements ToolBackend {
         return this.runtimeObserver.explainFailure(args);
       case "runtime.fix_failure":
         return this.runtimeObserver.fixFailure(args);
+      case "runtime.replay_trace":
+        return this.replayEngine.replayTrace({
+          traceId: typeof args.traceId === "string" ? args.traceId : undefined,
+          sentryEventId: typeof args.sentryEventId === "string" ? args.sentryEventId : undefined,
+          commitRange: typeof args.commitRange === "string" ? args.commitRange : undefined
+        });
       case "workspace.validate_patch":
         return this.validatePatch(args);
       case "workspace.trace_symbol":

@@ -2556,6 +2556,37 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     }
   }
 
+  private async runReplayTrace(args: string[]): Promise<void> {
+    const traceId = args[0];
+    const commitRange = args[1];
+    if (!traceId) {
+      output.write(pc.yellow("Usage: /replay <traceId|sentryEventId> [commitRange]\n"));
+      return;
+    }
+    const spinner = ora({ text: "Replaying production trace...", color: "cyan" }).start();
+    try {
+      const result: any = await this.backend.callTool("runtime.replay_trace", {
+        traceId,
+        commitRange
+      });
+      spinner.succeed(pc.cyan("Trace replay complete."));
+      output.write([
+        "",
+        `${pc.dim("trace:")} ${result.traceId}`,
+        `${pc.dim("path:")} ${result.reconstructedRequest?.method} ${result.reconstructedRequest?.path}`,
+        ...(result.divergence
+          ? [`${pc.dim("divergence:")} ${result.divergence.span} ${result.divergence.file ?? ""}:${result.divergence.line ?? ""}`]
+          : []),
+        ...(result.commitAnalysis
+          ? [`${pc.dim("likely introduced by:")} ${result.commitAnalysis.likelyIntroducedBy}`]
+          : []),
+        ""
+      ].join("\n"));
+    } catch (error) {
+      spinner.fail(pc.red(`Trace replay failed: ${(error as Error).message}`));
+    }
+  }
+
   private async runMeshBrain(args: string[]): Promise<void> {
     const action = (args[0] || "stats").replace("-", "_");
     const spinner = ora({ text: `Mesh Brain ${action}...`, color: "blue" }).start();
@@ -3120,6 +3151,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       { name: "/issues", usage: "/issues [scan|status] [provider]", description: "run issue-to-PR pipeline for GitHub/Linear/Jira tickets" },
       { name: "/chatops", usage: "/chatops [investigate|approve|status] [platform] [message|threadId]", description: "run Slack/Discord co-engineer investigation and approval flow" },
       { name: "/production", usage: "/production [refresh|status]", description: "show production telemetry impact signals and top regressions" },
+      { name: "/replay", usage: "/replay <traceId|sentryEventId> [commitRange]", description: "replay a production trace and detect divergence/introducing commit" },
       { name: "/brain", usage: "/brain [stats|query <error>|opt-out]", description: "query Mesh Brain global fix patterns and telemetry contribution status" },
       { name: "/learn", usage: "/learn [read|learn]", description: "read or refresh Engineering Memory" },
       { name: "/intent", usage: "/intent <product intent>", description: "compile intent into an implementation contract" },
@@ -3166,7 +3198,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     const commandList = [
       "/help", "/status", "/index", "/dashboard", "/sync", "/setup", "/clear",
       "/model", "/cost", "/compact", "/capsule", "/memory", "/approvals", "/steps", "/undo",
-      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/daemon", "/issues", "/chatops", "/production", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/preview", "/fix"
+      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/daemon", "/issues", "/chatops", "/production", "/replay", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/preview", "/fix"
     ];
     // Priority 1: Exact match
     let command = inputCmd;
@@ -3239,6 +3271,9 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
         return { wasHandled: true, shouldExit: false };
       case "/production":
         await this.runProductionStatus(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/replay":
+        await this.runReplayTrace(args);
         return { wasHandled: true, shouldExit: false };
       case "/brain":
         await this.runMeshBrain(args);
