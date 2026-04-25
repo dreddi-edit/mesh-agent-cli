@@ -72,19 +72,13 @@ export class SymptomBisectEngine {
   }
 
   private inferVerificationCommand(symptom: string): string {
-    if (/redirect|login|button|page|ui|click/i.test(symptom)) {
-      return "npm test";
-    }
-    if (/api|endpoint|request|response/i.test(symptom)) {
-      return "npm test";
-    }
+    if (/redirect|login|button|page|ui|click/i.test(symptom)) return "npm test -- --grep redirect || npm test";
+    if (/api|endpoint|request|response/i.test(symptom)) return "npm test -- --grep api || npm test";
     return "npm test";
   }
 
   private async readRecentCommits(depth: number): Promise<string[]> {
-    const { stdout } = await execAsync(`git rev-list --max-count=${depth} HEAD`, {
-      cwd: this.workspaceRoot
-    });
+    const { stdout } = await execAsync(`git rev-list --max-count=${depth} HEAD`, { cwd: this.workspaceRoot });
     return stdout.split(/\r?\n/g).map((line) => line.trim()).filter(Boolean);
   }
 
