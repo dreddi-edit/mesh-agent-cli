@@ -83,6 +83,9 @@ import { ChatopsManager } from "./integrations/chatops/manager.js";
 import { scoreSignal, TelemetryManager } from "./integrations/telemetry/manager.js";
 import { ReplayEngine } from "./runtime/replay.js";
 import { SymptomBisectEngine } from "./timeline/symptom-bisect.js";
+import { PersonaLoader } from "./agents/persona-loader.js";
+import { runCritic } from "./agents/critic.js";
+import { runRedTeam } from "./agents/redteam.js";
 
 const SKIP_DIRS = [".git", "node_modules", "dist", ".mesh"];
 const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
@@ -382,6 +385,7 @@ export class LocalToolBackend implements ToolBackend {
   private readonly telemetry: TelemetryManager;
   private readonly replayEngine: ReplayEngine;
   private readonly symptomBisect: SymptomBisectEngine;
+  private readonly personaLoader: PersonaLoader;
 
   constructor(private readonly workspaceRoot: string, private readonly config?: AppConfig) {
     this.cache = new CacheManager(config ?? {
@@ -425,6 +429,7 @@ export class LocalToolBackend implements ToolBackend {
     this.telemetry = new TelemetryManager(workspaceRoot);
     this.replayEngine = new ReplayEngine(workspaceRoot, this.timelines);
     this.symptomBisect = new SymptomBisectEngine(workspaceRoot, this.timelines);
+    this.personaLoader = new PersonaLoader(workspaceRoot);
     void this.bootstrapRepoDnaMemory();
     void this.agentOs.ensureDefaultDefinitions();
     void this.runtimeObserver.writeDefaultRunbooks();
@@ -1024,6 +1029,17 @@ export class LocalToolBackend implements ToolBackend {
             hypothesis: { type: "string" },
             verificationCommand: { type: "string" },
             promote: { type: "boolean", default: false }
+          }
+        }
+      },
+      {
+        name: "agent.assemble_team",
+        description: "Classify a task and auto-assemble specialist personas from .mesh/personas for coordinated execution.",
+        inputSchema: {
+          type: "object",
+          required: ["task"],
+          properties: {
+            task: { type: "string" }
           }
         }
       },
@@ -1653,6 +1669,8 @@ export class LocalToolBackend implements ToolBackend {
         });
       case "workspace.what_if":
         return this.whatIf(args, opts?.onProgress);
+      case "agent.assemble_team":
+        return this.personaLoader.assembleTeam(String(args.task ?? ""));
       case "workspace.finalize_task":
         return this.finalizeTask(args, opts?.onProgress);
       case "web.inspect_ui":
@@ -3662,15 +3680,32 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
   }
 
   private async timelinePromoteWithBrain(args: { timelineId: string }): Promise<unknown> {
+    const timeline = await this.timelines.readRecord(args.timelineId);
+    const compare = await this.timelines.compare({ timelineIds: [args.timelineId] });
+    const summary = (compare.comparisons?.[0] ?? {}) as Record<string, unknown>;
+    const critic = runCritic({
+      diffPreview: String(summary.diffPreview ?? ""),
+      verificationOk: timeline.verdict === "pass"
+    });
+    const redTeam = runRedTeam({
+      diffPreview: String(summary.diffPreview ?? "")
+    });
+    if (!critic.ok || !redTeam.ok) {
+      return {
+        ok: false,
+        timelineId: args.timelineId,
+        message: "Adversarial checks blocked promotion. Resolve findings or override explicitly.",
+        critic,
+        redTeam
+      };
+    }
+
     const result = await this.timelines.promote({ timelineId: args.timelineId });
     if (!result.ok) {
       return result;
     }
 
     try {
-      const timeline = await this.timelines.readRecord(args.timelineId);
-      const compare = await this.timelines.compare({ timelineIds: [args.timelineId] });
-      const summary = (compare.comparisons?.[0] ?? {}) as Record<string, unknown>;
       const lastCommand = timeline.commands.at(-1);
       const commandOutput = await fs.readFile(lastCommand?.stderrPath ?? "", "utf8").catch(() => "");
       const errorSignature = normalizeErrorSignature(commandOutput || lastCommand?.command || "timeline-promote");
@@ -3687,9 +3722,14 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
           lint: /\blint\b/.test(lastCommand?.command ?? "") ? (lastCommand?.ok ? "pass" : "fail") : "unknown"
         }
       });
-      return { ...result, meshBrain: contribution };
+      return { ...result, meshBrain: contribution, critic, redTeam };
     } catch (error) {
-      return { ...result, meshBrain: { ok: false, contributed: false, reason: (error as Error).message } };
+      return {
+        ...result,
+        meshBrain: { ok: false, contributed: false, reason: (error as Error).message },
+        critic,
+        redTeam
+      };
     }
   }
 
