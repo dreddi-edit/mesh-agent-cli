@@ -1,3 +1,5 @@
+import { handleBrainRequest } from "./brain";
+
 /**
  * Mesh LLM Proxy — Cloudflare Worker
  *
@@ -36,6 +38,11 @@ const CONVERSE_PATH_RE = /^\/model\/([^/]+)\/converse$/;
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
+    const brainResponse = await handleBrainRequest(req);
+    if (brainResponse) {
+      return brainResponse;
+    }
+
     if (req.method === "OPTIONS") {
       return corsPreflight();
     }

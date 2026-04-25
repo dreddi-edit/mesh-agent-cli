@@ -74,6 +74,7 @@ import { RuntimeObserver } from "./runtime-observer.js";
 import { AgentOs } from "./agent-os.js";
 import { captureFrontendPreview } from "./terminal-preview.js";
 import { openContextArtifact } from "./context-artifacts.js";
+import { MeshBrainClient, normalizeDiffPattern, normalizeErrorSignature } from "./mesh-brain.js";
 
 const SKIP_DIRS = [".git", "node_modules", "dist", ".mesh"];
 const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
@@ -320,6 +321,7 @@ export class LocalToolBackend implements ToolBackend {
   private readonly timelines: TimelineManager;
   private readonly runtimeObserver: RuntimeObserver;
   private readonly agentOs: AgentOs;
+  private readonly meshBrain: MeshBrainClient;
 
   constructor(private readonly workspaceRoot: string, private readonly config?: AppConfig) {
     this.cache = new CacheManager(config ?? {
@@ -340,12 +342,18 @@ export class LocalToolBackend implements ToolBackend {
       },
       bedrock: { endpointBase: "", modelId: "", temperature: 0, maxTokens: 0 },
       mcp: { args: [] },
-      supabase: {}
+      supabase: {},
+      telemetry: { contribute: false }
     });
     this.workspaceIndex = new WorkspaceIndex(workspaceRoot, this.meshCore, this.cache);
     this.timelines = new TimelineManager(workspaceRoot);
     this.runtimeObserver = new RuntimeObserver(workspaceRoot);
     this.agentOs = new AgentOs(workspaceRoot, this.timelines);
+    this.meshBrain = new MeshBrainClient({
+      workspaceRoot,
+      telemetryContribute: Boolean(config?.telemetry?.contribute),
+      endpoint: config?.telemetry?.meshBrainEndpoint
+    });
     void this.agentOs.ensureDefaultDefinitions();
     void this.runtimeObserver.writeDefaultRunbooks();
     this.startWatcher();
@@ -1297,6 +1305,18 @@ export class LocalToolBackend implements ToolBackend {
         }
       },
       {
+        name: "workspace.brain",
+        description: "Mesh Brain network-effect interface: query global fix patterns, read contribution stats, or opt out.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["stats", "query", "opt_out"], default: "stats" },
+            error: { type: "string", description: "Error text or signature to query globally learned patterns." },
+            limit: { type: "number", default: 5 }
+          }
+        }
+      },
+      {
         name: "workspace.intent_compile",
         description: "Intent Compiler: turn product intent into a repo-grounded implementation contract with likely files, risks, tests, rollout, and verification steps.",
         inputSchema: {
@@ -1467,7 +1487,7 @@ export class LocalToolBackend implements ToolBackend {
           timelineIds: Array.isArray(args.timelineIds) ? args.timelineIds.map(String) : []
         });
       case "workspace.timeline_promote":
-        return this.timelines.promote({ timelineId: String(args.timelineId ?? "") });
+        return this.timelinePromoteWithBrain({ timelineId: String(args.timelineId ?? "") });
       case "workspace.timeline_list":
         return this.timelines.list();
       case "workspace.finalize_task":
@@ -1528,6 +1548,8 @@ export class LocalToolBackend implements ToolBackend {
         return this.predictiveRepair(args, opts?.onProgress);
       case "workspace.engineering_memory":
         return this.engineeringMemory(args);
+      case "workspace.brain":
+        return this.meshBrainTool(args);
       case "workspace.intent_compile":
         return this.intentCompile(args);
       case "workspace.cockpit_snapshot":
@@ -3422,6 +3444,75 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
     return result;
   }
 
+  private async timelinePromoteWithBrain(args: { timelineId: string }): Promise<unknown> {
+    const result = await this.timelines.promote({ timelineId: args.timelineId });
+    if (!result.ok) {
+      return result;
+    }
+
+    try {
+      const timeline = await this.timelines.readRecord(args.timelineId);
+      const compare = await this.timelines.compare({ timelineIds: [args.timelineId] });
+      const summary = (compare.comparisons?.[0] ?? {}) as Record<string, unknown>;
+      const lastCommand = timeline.commands.at(-1);
+      const commandOutput = await fs.readFile(lastCommand?.stderrPath ?? "", "utf8").catch(() => "");
+      const errorSignature = normalizeErrorSignature(commandOutput || lastCommand?.command || "timeline-promote");
+      const diffPattern = normalizeDiffPattern(String(summary.diffPreview ?? ""));
+      const contribution = await this.meshBrain.contribute({
+        workspaceFingerprint: this.workspaceFingerprint(),
+        errorSignature,
+        diffPattern,
+        verificationResult: {
+          verdict: timeline.verdict ?? "unknown",
+          command: lastCommand?.command,
+          exitCode: lastCommand?.exitCode,
+          tsc: /\btsc\b/.test(lastCommand?.command ?? "") ? (lastCommand?.ok ? "pass" : "fail") : "unknown",
+          lint: /\blint\b/.test(lastCommand?.command ?? "") ? (lastCommand?.ok ? "pass" : "fail") : "unknown"
+        }
+      });
+      return { ...result, meshBrain: contribution };
+    } catch (error) {
+      return { ...result, meshBrain: { ok: false, contributed: false, reason: (error as Error).message } };
+    }
+  }
+
+  private async meshBrainTool(args: Record<string, unknown> = {}): Promise<unknown> {
+    const action = String(args.action ?? "stats");
+    if (action === "opt_out") {
+      await this.meshBrain.optOut();
+      return {
+        ok: true,
+        action,
+        message: "Mesh Brain contribution disabled for this workspace."
+      };
+    }
+    if (action === "query") {
+      const error = String(args.error ?? "").trim();
+      if (!error) {
+        throw new Error("workspace.brain query requires error");
+      }
+      const patterns = await this.meshBrain.query({
+        errorSignature: normalizeErrorSignature(error),
+        limit: Math.max(1, Math.min(Number(args.limit) || 5, 20))
+      });
+      return {
+        ok: true,
+        action,
+        patterns: patterns.patterns,
+        source: patterns.source
+      };
+    }
+    const stats = await this.meshBrain.status();
+    return { ok: true, action: "stats", ...stats };
+  }
+
+  private workspaceFingerprint(): string {
+    return crypto.createHash("sha256")
+      .update(path.resolve(this.workspaceRoot))
+      .digest("hex")
+      .slice(0, 24);
+  }
+
   private async predictiveRepair(args: Record<string, unknown> = {}, onProgress?: (chunk: string) => void): Promise<unknown> {
     const action = String(args.action ?? "analyze");
     const repairPath = this.meshArtifactPath("predictive-repair.json");
@@ -3446,6 +3537,11 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
     const memory: any = await this.engineeringMemory({ action: "read" }).catch(() => ({ memory: null }));
     const twinResult: any = await this.digitalTwin({ action: "build" }).catch(() => null);
     const outputText = String(diagnostics.output ?? diagnostics.stderr ?? diagnostics.stdout ?? "");
+    const errorSignature = normalizeErrorSignature(outputText);
+    const brainPatterns = await this.meshBrain.query({
+      errorSignature,
+      limit: Math.max(1, Math.min(Number(args.limit) || 5, 5))
+    }).catch(() => ({ ok: false, patterns: [], source: "local-fallback" as const }));
     const referencedFiles = uniqueStrings(Array.from(outputText.matchAll(/([A-Za-z0-9_./-]+\.(?:ts|tsx|js|jsx|mjs|cjs))(?::(\d+))?/g)).map((match) => match[1]), 25);
     const dirtyFiles = await this.readDirtyFilesForMemory();
     const riskFiles = new Set((twinResult?.twin?.riskHotspots ?? []).map((entry: any) => entry.file));
@@ -3462,6 +3558,13 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
           files: referencedFiles.length > 0 ? referencedFiles : dirtyFiles.slice(0, 10),
           riskFiles: referencedFiles.filter((file) => riskFiles.has(file)),
           diagnostics: outputText.slice(0, 8000),
+          errorSignature,
+          globalPatterns: (brainPatterns.patterns ?? []).slice(0, 5).map((pattern: any) => ({
+            score: pattern.score,
+            successRate: pattern.successRate,
+            usageCount: pattern.usageCount,
+            fixSummary: pattern.fixSummary
+          })),
           recommendedTool: "agent.race_fixes"
         }]
       : [];
@@ -3470,6 +3573,8 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
       updatedAt: new Date().toISOString(),
       diagnosticsOk: Boolean(diagnostics.ok),
       memoryDigest: memory?.memory?.rules?.slice?.(0, 10) ?? [],
+      brainPatternSource: brainPatterns.source,
+      brainPatterns: (brainPatterns.patterns ?? []).slice(0, 5),
       queue,
       history: [...(existing.history ?? []), ...(queue.length > 0 ? queue : [])].slice(-50)
     };

@@ -30,7 +30,10 @@ function testConfig(workspaceRoot) {
       maxTokens: 0
     },
     mcp: { args: [] },
-    supabase: {}
+    supabase: {},
+    telemetry: {
+      contribute: false
+    }
   };
 }
 

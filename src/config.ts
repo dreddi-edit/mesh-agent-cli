@@ -85,6 +85,10 @@ export interface UserSettings {
   modelId: string;
   themeColor: string;
   enableCloudCache: boolean;
+  telemetry?: {
+    mode?: string;
+    meshBrainEndpoint?: string;
+  };
   customApiKey?: string;
   customEndpoint?: string;
   voice: VoiceSettings;
@@ -122,6 +126,10 @@ export interface AppConfig {
   supabase: {
     url?: string;
     key?: string;
+  };
+  telemetry: {
+    contribute: boolean;
+    meshBrainEndpoint?: string;
   };
 }
 
@@ -225,6 +233,13 @@ export async function loadConfig(): Promise<AppConfig> {
     supabase: {
       url: process.env.SUPABASE_URL?.trim() || undefined,
       key: process.env.SUPABASE_KEY?.trim() || undefined
+    },
+    telemetry: {
+      contribute: String(localSettings.telemetry?.mode ?? "").trim().toLowerCase() === "contribute",
+      meshBrainEndpoint:
+        localSettings.telemetry?.meshBrainEndpoint?.trim() ||
+        process.env.MESH_BRAIN_ENDPOINT?.trim() ||
+        undefined
     }
   };
 }

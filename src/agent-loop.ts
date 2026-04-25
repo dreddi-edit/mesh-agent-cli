@@ -1740,7 +1740,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     const statusRows = [
       `mesh  ${this.config.agent.mode}  ${shortPathLabel(this.config.agent.workspaceRoot)}`,
       `branch: ${this.currentBranch}   model: ${shortModelName(this.currentModelId)}`,
-      "commands: /help /status /causal /lab /fork /ghost /dashboard /exit",
+      "commands: /help /status /causal /lab /fork /ghost /brain /dashboard /exit",
       "tip: Type / and press TAB for command completion"
     ];
 
@@ -1770,7 +1770,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
       [
         `${this.themeColor(pc.bold("mesh"))}  ${pc.dim(this.config.agent.mode)}  ${pc.dim(shortPathLabel(this.config.agent.workspaceRoot))}`,
         `${pc.dim("branch:")} ${this.themeColor(this.currentBranch)}   ${pc.dim("model:")} ${this.themeColor(shortModelName(this.currentModelId))}`,
-        `${pc.dim("commands:")} ${pc.magenta("/help")} ${pc.magenta("/status")} ${pc.magenta("/causal")} ${pc.magenta("/lab")} ${pc.magenta("/fork")} ${pc.magenta("/ghost")} ${pc.magenta("/dashboard")} ${pc.magenta("/exit")}`,
+        `${pc.dim("commands:")} ${pc.magenta("/help")} ${pc.magenta("/status")} ${pc.magenta("/causal")} ${pc.magenta("/lab")} ${pc.magenta("/fork")} ${pc.magenta("/ghost")} ${pc.magenta("/brain")} ${pc.magenta("/dashboard")} ${pc.magenta("/exit")}`,
         `${pc.dim("tip:")} ${pc.dim("Type / and press TAB for command completion")}`
       ].join("\n") + "\n"
     );
@@ -2469,6 +2469,53 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     }
   }
 
+  private async runMeshBrain(args: string[]): Promise<void> {
+    const action = (args[0] || "stats").replace("-", "_");
+    const spinner = ora({ text: `Mesh Brain ${action}...`, color: "blue" }).start();
+    try {
+      if (action === "query") {
+        const error = args.slice(1).join(" ").trim();
+        if (!error) {
+          spinner.stop();
+          output.write(pc.yellow("Usage: /brain query <error signature>\n"));
+          return;
+        }
+        const result: any = await this.backend.callTool("workspace.brain", { action, error, limit: 5 });
+        spinner.succeed(pc.blue("Mesh Brain query complete."));
+        output.write([
+          "",
+          `${pc.dim("source:")} ${result.source ?? "unknown"}`,
+          `${pc.dim("patterns:")} ${(result.patterns ?? []).length}`,
+          ...((result.patterns ?? []).slice(0, 5).map((pattern: any) =>
+            `${pc.blue("•")} score=${Number(pattern.score ?? 0).toFixed(2)} usage=${pattern.usageCount ?? 0} ${pattern.fixSummary ?? "Pattern match"}`
+          )),
+          ""
+        ].join("\n"));
+        return;
+      }
+
+      if (action === "opt_out") {
+        await this.backend.callTool("workspace.brain", { action });
+        spinner.succeed(pc.blue("Mesh Brain contributions disabled."));
+        output.write(pc.dim("You can still query global patterns; local contributions are now off.\n"));
+        return;
+      }
+
+      const result: any = await this.backend.callTool("workspace.brain", { action: "stats" });
+      spinner.succeed(pc.blue("Mesh Brain stats loaded."));
+      output.write([
+        "",
+        `${pc.dim("contribute:")} ${result.telemetryContribute ? pc.green("enabled") : pc.red("disabled")}`,
+        `${pc.dim("endpoint:")} ${result.endpoint ?? "local-only"}`,
+        `${pc.dim("contributions:")} ${result.contributions ?? 0}`,
+        `${pc.dim("last contribution:")} ${result.lastContributionAt ?? "never"}`,
+        ""
+      ].join("\n"));
+    } catch (error) {
+      spinner.fail(pc.red(`Mesh Brain failed: ${(error as Error).message}`));
+    }
+  }
+
   private async runEngineeringMemory(args: string[]): Promise<void> {
     const action = args[0] || "read";
     const spinner = ora({ text: `Engineering Memory ${action}...`, color: "magenta" }).start();
@@ -2982,6 +3029,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       { name: "/synthesize", usage: "/synthesize", description: "auto-generate structural changes based on background heuristics" },
       { name: "/twin", usage: "/twin [build|read|status]", description: "build or inspect the Codebase Digital Twin" },
       { name: "/repair", usage: "/repair [analyze|status|clear]", description: "inspect the Predictive Repair Daemon queue" },
+      { name: "/brain", usage: "/brain [stats|query <error>|opt-out]", description: "query Mesh Brain global fix patterns and telemetry contribution status" },
       { name: "/learn", usage: "/learn [read|learn]", description: "read or refresh Engineering Memory" },
       { name: "/intent", usage: "/intent <product intent>", description: "compile intent into an implementation contract" },
       { name: "/causal", usage: "/causal [build|read|status|query <question>]", description: "build or query Causal Software Intelligence" },
@@ -3027,7 +3075,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     const commandList = [
       "/help", "/status", "/index", "/dashboard", "/sync", "/setup", "/clear",
       "/model", "/cost", "/compact", "/capsule", "/memory", "/approvals", "/steps", "/undo",
-      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/preview", "/fix"
+      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/preview", "/fix"
     ];
     // Priority 1: Exact match
     let command = inputCmd;
@@ -3088,6 +3136,9 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
         return { wasHandled: true, shouldExit: false };
       case "/repair":
         await this.runPredictiveRepair(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/brain":
+        await this.runMeshBrain(args);
         return { wasHandled: true, shouldExit: false };
       case "/learn":
         await this.runEngineeringMemory(args);
