@@ -2587,6 +2587,58 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     }
   }
 
+  private async runSymptomBisect(args: string[]): Promise<void> {
+    const symptom = args.join(" ").trim();
+    if (!symptom) {
+      output.write(pc.yellow("Usage: /bisect <symptom> [verificationCommand]\n"));
+      return;
+    }
+    const spinner = ora({ text: "Running symptom bisect...", color: "yellow" }).start();
+    try {
+      const result: any = await this.backend.callTool("workspace.symptom_bisect", { symptom });
+      spinner.succeed(pc.yellow("Symptom bisect complete."));
+      output.write([
+        "",
+        `${pc.dim("symptom:")} ${result.symptom}`,
+        `${pc.dim("verification:")} ${result.verificationCommand ?? "n/a"}`,
+        `${pc.dim("culprit:")} ${result.culpritCommit ?? "undetermined"}`,
+        ...(result.authorHint ? [`${pc.dim("author:")} ${result.authorHint}`] : []),
+        ...(result.message ? [result.message] : []),
+        ""
+      ].join("\n"));
+    } catch (error) {
+      spinner.fail(pc.red(`Symptom bisect failed: ${(error as Error).message}`));
+    }
+  }
+
+  private async runWhatIf(args: string[]): Promise<void> {
+    const hypothesis = args.join(" ").trim();
+    if (!hypothesis) {
+      output.write(pc.yellow("Usage: /whatif <hypothesis>\n"));
+      return;
+    }
+    const spinner = ora({ text: "Running what-if analysis...", color: "magenta" }).start();
+    try {
+      const result: any = await this.backend.callTool("workspace.what_if", { hypothesis });
+      spinner.succeed(pc.magenta("What-if report generated."));
+      output.write([
+        "",
+        `${pc.dim("hypothesis:")} ${result.hypothesis}`,
+        `${pc.dim("verdict:")} ${result.verdict}`,
+        `${pc.dim("timeline:")} ${result.timelineId}`,
+        `${pc.dim("changed files:")} ${(result.changedFiles ?? []).length}`,
+        `${pc.dim("changed lines:")} ${result.changedLineCount ?? 0}`,
+        `${pc.dim("type errors:")} ${result.typeErrorsEstimate ?? 0}`,
+        `${pc.dim("tests broken:")} ${result.testsBrokenEstimate ?? 0}`,
+        `${pc.dim("bundle delta:")} ${result.bundleSizeDeltaKb ?? 0} KB`,
+        `${pc.dim("note:")} ${result.note ?? ""}`,
+        ""
+      ].join("\n"));
+    } catch (error) {
+      spinner.fail(pc.red(`What-if failed: ${(error as Error).message}`));
+    }
+  }
+
   private async runMeshBrain(args: string[]): Promise<void> {
     const action = (args[0] || "stats").replace("-", "_");
     const spinner = ora({ text: `Mesh Brain ${action}...`, color: "blue" }).start();
@@ -3152,6 +3204,8 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       { name: "/chatops", usage: "/chatops [investigate|approve|status] [platform] [message|threadId]", description: "run Slack/Discord co-engineer investigation and approval flow" },
       { name: "/production", usage: "/production [refresh|status]", description: "show production telemetry impact signals and top regressions" },
       { name: "/replay", usage: "/replay <traceId|sentryEventId> [commitRange]", description: "replay a production trace and detect divergence/introducing commit" },
+      { name: "/bisect", usage: "/bisect <symptom> [verificationCommand]", description: "autonomous symptom bisect over commit history" },
+      { name: "/whatif", usage: "/whatif <hypothesis>", description: "run a counterfactual migration analysis in isolated timeline" },
       { name: "/brain", usage: "/brain [stats|query <error>|opt-out]", description: "query Mesh Brain global fix patterns and telemetry contribution status" },
       { name: "/learn", usage: "/learn [read|learn]", description: "read or refresh Engineering Memory" },
       { name: "/intent", usage: "/intent <product intent>", description: "compile intent into an implementation contract" },
@@ -3198,7 +3252,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     const commandList = [
       "/help", "/status", "/index", "/dashboard", "/sync", "/setup", "/clear",
       "/model", "/cost", "/compact", "/capsule", "/memory", "/approvals", "/steps", "/undo",
-      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/daemon", "/issues", "/chatops", "/production", "/replay", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/preview", "/fix"
+      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/daemon", "/issues", "/chatops", "/production", "/replay", "/bisect", "/whatif", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/preview", "/fix"
     ];
     // Priority 1: Exact match
     let command = inputCmd;
@@ -3274,6 +3328,12 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
         return { wasHandled: true, shouldExit: false };
       case "/replay":
         await this.runReplayTrace(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/bisect":
+        await this.runSymptomBisect(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/whatif":
+        await this.runWhatIf(args);
         return { wasHandled: true, shouldExit: false };
       case "/brain":
         await this.runMeshBrain(args);

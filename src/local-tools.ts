@@ -82,6 +82,7 @@ import { IssuePipelineManager } from "./integrations/issues/manager.js";
 import { ChatopsManager } from "./integrations/chatops/manager.js";
 import { scoreSignal, TelemetryManager } from "./integrations/telemetry/manager.js";
 import { ReplayEngine } from "./runtime/replay.js";
+import { SymptomBisectEngine } from "./timeline/symptom-bisect.js";
 
 const SKIP_DIRS = [".git", "node_modules", "dist", ".mesh"];
 const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
@@ -198,6 +199,27 @@ function aggregateCohortRules(
     .sort((left, right) => right[1] - left[1])
     .map(([rule]) => rule)
     .slice(0, 25);
+}
+
+function estimateFailedTests(output: string): number {
+  const match = output.match(/# fail\s+(\d+)/);
+  if (match) return Number(match[1]);
+  const jestMatch = output.match(/(\d+)\s+failed/);
+  if (jestMatch) return Number(jestMatch[1]);
+  return /fail|failing/i.test(output) ? 1 : 0;
+}
+
+function countTypeErrors(output: string): number {
+  return output
+    .split(/\r?\n/g)
+    .filter((line) => /\berror TS\d+:/i.test(line))
+    .length;
+}
+
+function estimateBundleDelta(output: string): number {
+  const match = output.match(/bundle.*?([+-]?\d+(?:\.\d+)?)\s*kb/i);
+  if (!match) return 0;
+  return Number(match[1]);
 }
 
 function extractRouteHints(raw: string): Array<{ method: string; route: string; line: number }> {
@@ -359,6 +381,7 @@ export class LocalToolBackend implements ToolBackend {
   private readonly chatops: ChatopsManager;
   private readonly telemetry: TelemetryManager;
   private readonly replayEngine: ReplayEngine;
+  private readonly symptomBisect: SymptomBisectEngine;
 
   constructor(private readonly workspaceRoot: string, private readonly config?: AppConfig) {
     this.cache = new CacheManager(config ?? {
@@ -401,6 +424,7 @@ export class LocalToolBackend implements ToolBackend {
     });
     this.telemetry = new TelemetryManager(workspaceRoot);
     this.replayEngine = new ReplayEngine(workspaceRoot, this.timelines);
+    this.symptomBisect = new SymptomBisectEngine(workspaceRoot, this.timelines);
     void this.bootstrapRepoDnaMemory();
     void this.agentOs.ensureDefaultDefinitions();
     void this.runtimeObserver.writeDefaultRunbooks();
@@ -975,6 +999,32 @@ export class LocalToolBackend implements ToolBackend {
         inputSchema: {
           type: "object",
           properties: {}
+        }
+      },
+      {
+        name: "workspace.symptom_bisect",
+        description: "Autonomous git bisect by symptom description. Validates a verification command across commit history and returns likely introducing commit.",
+        inputSchema: {
+          type: "object",
+          required: ["symptom"],
+          properties: {
+            symptom: { type: "string" },
+            verificationCommand: { type: "string" },
+            searchDepth: { type: "number", default: 50 }
+          }
+        }
+      },
+      {
+        name: "workspace.what_if",
+        description: "Counterfactual mode: evaluate a migration/refactor in an isolated timeline and return a What-If report without applying changes by default.",
+        inputSchema: {
+          type: "object",
+          required: ["hypothesis"],
+          properties: {
+            hypothesis: { type: "string" },
+            verificationCommand: { type: "string" },
+            promote: { type: "boolean", default: false }
+          }
         }
       },
       {
@@ -1595,6 +1645,14 @@ export class LocalToolBackend implements ToolBackend {
         return this.timelinePromoteWithBrain({ timelineId: String(args.timelineId ?? "") });
       case "workspace.timeline_list":
         return this.timelines.list();
+      case "workspace.symptom_bisect":
+        return this.symptomBisect.run({
+          symptom: String(args.symptom ?? ""),
+          verificationCommand: typeof args.verificationCommand === "string" ? args.verificationCommand : undefined,
+          searchDepth: typeof args.searchDepth === "number" ? args.searchDepth : undefined
+        });
+      case "workspace.what_if":
+        return this.whatIf(args, opts?.onProgress);
       case "workspace.finalize_task":
         return this.finalizeTask(args, opts?.onProgress);
       case "web.inspect_ui":
@@ -3701,6 +3759,64 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
         score: scoreSignal(signal)
       }))
     };
+  }
+
+  private async whatIf(args: Record<string, unknown>, onProgress?: (chunk: string) => void): Promise<unknown> {
+    const hypothesis = String(args.hypothesis ?? "").trim();
+    if (!hypothesis) throw new Error("workspace.what_if requires hypothesis");
+    if (!this.config) throw new Error("Agent configuration not available.");
+    const verificationCommand = String(args.verificationCommand ?? "npm run typecheck && npm test");
+    const promote = args.promote === true;
+
+    onProgress?.(`[What-If] Creating counterfactual timeline for: ${hypothesis}\n`);
+    const timeline = await this.timelines.create({ name: `what-if-${Date.now().toString(36)}` });
+    const llm = new BedrockLlmClient({
+      endpointBase: this.config.bedrock.endpointBase,
+      modelId: this.config.bedrock.modelId,
+      bearerToken: this.config.bedrock.bearerToken,
+      temperature: 0.1,
+      maxTokens: 4096
+    });
+    const response = await llm.converse(
+      [{ role: "user", content: [{ text: `Hypothesis: ${hypothesis}\nGenerate a git patch implementing this migration. Return only raw diff.` }] }],
+      [],
+      "Return only raw git patch."
+    );
+    if (response.kind !== "text") {
+      return { ok: false, hypothesis, message: "LLM did not return patch text." };
+    }
+    const patch = response.text.trim();
+    const apply = await this.timelines.applyPatch({ timelineId: timeline.timeline.id, patch });
+    if (!apply.ok) {
+      return { ok: false, hypothesis, timelineId: timeline.timeline.id, message: apply.message, stderr: apply.stderr };
+    }
+    const verify = await this.timelines.run({
+      timelineId: timeline.timeline.id,
+      command: verificationCommand,
+      timeoutMs: 240_000
+    });
+    const compare = await this.timelines.compare({ timelineIds: [timeline.timeline.id] });
+    const summary = compare.comparisons[0] as any;
+    const report = {
+      ok: true,
+      hypothesis,
+      timelineId: timeline.timeline.id,
+      verificationCommand,
+      verdict: verify.ok ? "pass" : "fail",
+      changedFiles: summary?.changedFiles ?? [],
+      changedLineCount: summary?.changedLineCount ?? 0,
+      testsBrokenEstimate: verify.ok ? 0 : estimateFailedTests(`${verify.stdout}\n${verify.stderr}`),
+      typeErrorsEstimate: countTypeErrors(`${verify.stdout}\n${verify.stderr}`),
+      bundleSizeDeltaKb: estimateBundleDelta(`${verify.stdout}\n${verify.stderr}`),
+      note: promote
+        ? "Use workspace.timeline_promote to materialize this counterfactual."
+        : "Counterfactual evaluated in isolated timeline; no main workspace changes applied."
+    };
+    if (promote && verify.ok) {
+      const promoted = await this.timelines.promote({ timelineId: timeline.timeline.id });
+      return { ...report, promoted: promoted.ok };
+    }
+    return report;
   }
 
   private async callDaemonSocket(request: DaemonRequest): Promise<DaemonResponse> {
