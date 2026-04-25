@@ -87,6 +87,8 @@ import { PersonaLoader } from "./agents/persona-loader.js";
 import { runCritic } from "./agents/critic.js";
 import { runRedTeam } from "./agents/redteam.js";
 import { TsCompilerRefactor } from "./refactor/ts-compiler.js";
+import { PropertyTestGenerator } from "./quality/property-tests.js";
+import { SmtEdgeCaseFinder } from "./quality/smt.js";
 
 const SKIP_DIRS = [".git", "node_modules", "dist", ".mesh"];
 const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
@@ -388,6 +390,8 @@ export class LocalToolBackend implements ToolBackend {
   private readonly symptomBisect: SymptomBisectEngine;
   private readonly personaLoader: PersonaLoader;
   private readonly tsRefactor: TsCompilerRefactor;
+  private readonly propertyTests: PropertyTestGenerator;
+  private readonly smtFinder: SmtEdgeCaseFinder;
 
   constructor(private readonly workspaceRoot: string, private readonly config?: AppConfig) {
     this.cache = new CacheManager(config ?? {
@@ -433,6 +437,8 @@ export class LocalToolBackend implements ToolBackend {
     this.symptomBisect = new SymptomBisectEngine(workspaceRoot, this.timelines);
     this.personaLoader = new PersonaLoader(workspaceRoot);
     this.tsRefactor = new TsCompilerRefactor(workspaceRoot);
+    this.propertyTests = new PropertyTestGenerator(workspaceRoot);
+    this.smtFinder = new SmtEdgeCaseFinder(workspaceRoot);
     void this.bootstrapRepoDnaMemory();
     void this.agentOs.ensureDefaultDefinitions();
     void this.runtimeObserver.writeDefaultRunbooks();
@@ -1126,6 +1132,32 @@ export class LocalToolBackend implements ToolBackend {
         }
       },
       {
+        name: "workspace.generate_properties",
+        description: "Generate property-based tests (fast-check) for modified functions or the full workspace.",
+        requiresApproval: true,
+        inputSchema: {
+          type: "object",
+          properties: {
+            path: { type: "string" },
+            functionName: { type: "string" },
+            all: { type: "boolean", default: false }
+          }
+        }
+      },
+      {
+        name: "workspace.find_edge_cases",
+        description: "SMT-inspired edge-case discovery for tagged functions; generates counterexample tests.",
+        requiresApproval: true,
+        inputSchema: {
+          type: "object",
+          required: ["path"],
+          properties: {
+            path: { type: "string" },
+            functionName: { type: "string" }
+          }
+        }
+      },
+      {
         name: "workspace.semantic_undo",
         description: "Non-Linear Chrono-Untangling: Revert a specific past concept or feature implementation without breaking more recent changes. Uses AST graph theory to safely de-merge old logic.",
         requiresApproval: true,
@@ -1678,6 +1710,17 @@ export class LocalToolBackend implements ToolBackend {
         return this.inlineSymbol(args);
       case "workspace.move_to_module":
         return this.moveToModule(args);
+      case "workspace.generate_properties":
+        return this.propertyTests.generate({
+          path: typeof args.path === "string" ? args.path : undefined,
+          functionName: typeof args.functionName === "string" ? args.functionName : undefined,
+          all: Boolean(args.all)
+        });
+      case "workspace.find_edge_cases":
+        return this.smtFinder.find({
+          path: String(args.path ?? ""),
+          functionName: typeof args.functionName === "string" ? args.functionName : undefined
+        });
       case "workspace.semantic_undo":
         return this.semanticUndo(args, opts?.onProgress);
       case "workspace.undo":

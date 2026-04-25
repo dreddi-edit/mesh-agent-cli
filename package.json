@@ -48,7 +48,8 @@
     "marked-terminal": "^6.2.0",
     "ora": "^7.0.1",
     "picocolors": "^1.0.0",
-    "ts-morph": "^24.0.0"
+    "ts-morph": "^24.0.0",
+    "z3-solver": "^4.13.0"
   },
   "devDependencies": {
     "@types/marked-terminal": "^6.1.0",
