@@ -86,6 +86,7 @@ import { SymptomBisectEngine } from "./timeline/symptom-bisect.js";
 import { PersonaLoader } from "./agents/persona-loader.js";
 import { runCritic } from "./agents/critic.js";
 import { runRedTeam } from "./agents/redteam.js";
+import { TsCompilerRefactor } from "./refactor/ts-compiler.js";
 
 const SKIP_DIRS = [".git", "node_modules", "dist", ".mesh"];
 const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
@@ -386,6 +387,7 @@ export class LocalToolBackend implements ToolBackend {
   private readonly replayEngine: ReplayEngine;
   private readonly symptomBisect: SymptomBisectEngine;
   private readonly personaLoader: PersonaLoader;
+  private readonly tsRefactor: TsCompilerRefactor;
 
   constructor(private readonly workspaceRoot: string, private readonly config?: AppConfig) {
     this.cache = new CacheManager(config ?? {
@@ -430,6 +432,7 @@ export class LocalToolBackend implements ToolBackend {
     this.replayEngine = new ReplayEngine(workspaceRoot, this.timelines);
     this.symptomBisect = new SymptomBisectEngine(workspaceRoot, this.timelines);
     this.personaLoader = new PersonaLoader(workspaceRoot);
+    this.tsRefactor = new TsCompilerRefactor(workspaceRoot);
     void this.bootstrapRepoDnaMemory();
     void this.agentOs.ensureDefaultDefinitions();
     void this.runtimeObserver.writeDefaultRunbooks();
@@ -1081,6 +1084,48 @@ export class LocalToolBackend implements ToolBackend {
         }
       },
       {
+        name: "workspace.extract_function",
+        description: "Compiler-backed refactor: extract a selected line range into a named function using ts-morph.",
+        requiresApproval: true,
+        inputSchema: {
+          type: "object",
+          required: ["path", "functionName", "startLine", "endLine"],
+          properties: {
+            path: { type: "string" },
+            functionName: { type: "string" },
+            startLine: { type: "number" },
+            endLine: { type: "number" }
+          }
+        }
+      },
+      {
+        name: "workspace.inline_symbol",
+        description: "Compiler-backed refactor: inline a variable symbol and remove its declaration where safe.",
+        requiresApproval: true,
+        inputSchema: {
+          type: "object",
+          required: ["path", "symbolName"],
+          properties: {
+            path: { type: "string" },
+            symbolName: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "workspace.move_to_module",
+        description: "Compiler-backed refactor: move an exported function/variable into another module.",
+        requiresApproval: true,
+        inputSchema: {
+          type: "object",
+          required: ["fromPath", "toPath", "symbolName"],
+          properties: {
+            fromPath: { type: "string" },
+            toPath: { type: "string" },
+            symbolName: { type: "string" }
+          }
+        }
+      },
+      {
         name: "workspace.semantic_undo",
         description: "Non-Linear Chrono-Untangling: Revert a specific past concept or feature implementation without breaking more recent changes. Uses AST graph theory to safely de-merge old logic.",
         requiresApproval: true,
@@ -1627,6 +1672,12 @@ export class LocalToolBackend implements ToolBackend {
         return this.expandExecutionPath(args);
       case "workspace.rename_symbol":
         return this.renameSymbol(args);
+      case "workspace.extract_function":
+        return this.extractFunction(args);
+      case "workspace.inline_symbol":
+        return this.inlineSymbol(args);
+      case "workspace.move_to_module":
+        return this.moveToModule(args);
       case "workspace.semantic_undo":
         return this.semanticUndo(args, opts?.onProgress);
       case "workspace.undo":
@@ -2463,29 +2514,17 @@ export class LocalToolBackend implements ToolBackend {
     await this.saveBackup(requestedPath);
     const content = await fs.readFile(absolutePath, "utf8");
     const originalContent = content;
-
-    // Robust RegExp replacement for symbol definition and usage
-    // Avoids replacing partial words like `myOldNameVar` if oldName is `OldName`
-    const regex = new RegExp(`\\b${oldName}\\b`, "g");
-    if (!regex.test(content)) {
-      throw new Error(`Symbol '${oldName}' not found in ${requestedPath}`);
-    }
-
-    const appliedContent = content.replace(regex, newName);
-    await fs.writeFile(absolutePath, appliedContent, "utf8");
-
-    // Auto-Validation (Self-Healing)
     try {
-      if (absolutePath.endsWith(".js") || absolutePath.endsWith(".cjs") || absolutePath.endsWith(".mjs")) {
-        await execAsync(`node --check ${absolutePath}`);
-      } else if (absolutePath.endsWith(".ts") || absolutePath.endsWith(".tsx")) {
-        await execAsync(`npx tsc --noEmit --skipLibCheck --target esnext --moduleResolution node ${absolutePath}`);
+      const result = await this.tsRefactor.renameSymbol(requestedPath, oldName, newName);
+      if (result.changed === 0) {
+        throw new Error(`Symbol '${oldName}' not found in ${requestedPath}`);
       }
+      await this.verifyTypecheckOrRollback(absolutePath, originalContent);
     } catch (err: any) {
       await fs.writeFile(absolutePath, originalContent, "utf8");
       return {
         ok: false,
-        error: "Rename introduced a syntax error and was automatically rolled back.",
+        error: "Compiler-backed rename failed and was automatically rolled back.",
         compilerOutput: err.stdout || err.stderr || err.message
       };
     }
@@ -2496,6 +2535,80 @@ export class LocalToolBackend implements ToolBackend {
     await this.cache.deleteCapsule(rel, "high");
 
     return { ok: true, path: rel, oldName, newName, patched: true };
+  }
+
+  private async extractFunction(args: Record<string, unknown>): Promise<unknown> {
+    const requestedPath = String(args.path ?? "").trim();
+    const functionName = String(args.functionName ?? "").trim();
+    const startLine = Number(args.startLine);
+    const endLine = Number(args.endLine);
+    if (!requestedPath || !functionName || !Number.isFinite(startLine) || !Number.isFinite(endLine)) {
+      throw new Error("extract_function requires path, functionName, startLine, and endLine");
+    }
+    const absolutePath = ensureInsideRoot(this.workspaceRoot, requestedPath);
+    const original = await fs.readFile(absolutePath, "utf8");
+    try {
+      await this.tsRefactor.extractFunction(requestedPath, functionName, startLine, endLine);
+      await this.verifyTypecheckOrRollback(absolutePath, original);
+      return { ok: true, path: requestedPath, functionName, startLine, endLine };
+    } catch (error) {
+      await fs.writeFile(absolutePath, original, "utf8");
+      return { ok: false, error: (error as Error).message };
+    }
+  }
+
+  private async inlineSymbol(args: Record<string, unknown>): Promise<unknown> {
+    const requestedPath = String(args.path ?? "").trim();
+    const symbolName = String(args.symbolName ?? "").trim();
+    if (!requestedPath || !symbolName) throw new Error("inline_symbol requires path and symbolName");
+    const absolutePath = ensureInsideRoot(this.workspaceRoot, requestedPath);
+    const original = await fs.readFile(absolutePath, "utf8");
+    try {
+      const result = await this.tsRefactor.inlineSymbol(requestedPath, symbolName);
+      await this.verifyTypecheckOrRollback(absolutePath, original);
+      return { ok: true, path: requestedPath, symbolName, inlined: result.inlined };
+    } catch (error) {
+      await fs.writeFile(absolutePath, original, "utf8");
+      return { ok: false, error: (error as Error).message };
+    }
+  }
+
+  private async moveToModule(args: Record<string, unknown>): Promise<unknown> {
+    const fromPath = String(args.fromPath ?? "").trim();
+    const toPath = String(args.toPath ?? "").trim();
+    const symbolName = String(args.symbolName ?? "").trim();
+    if (!fromPath || !toPath || !symbolName) throw new Error("move_to_module requires fromPath, toPath, symbolName");
+    const fromAbs = ensureInsideRoot(this.workspaceRoot, fromPath);
+    const toAbs = ensureInsideRoot(this.workspaceRoot, toPath);
+    const fromOriginal = await fs.readFile(fromAbs, "utf8");
+    const toOriginal = await fs.readFile(toAbs, "utf8").catch(() => "");
+    try {
+      const moved = await this.tsRefactor.moveToModule(fromPath, toPath, symbolName);
+      if (!moved.moved) throw new Error(`Unable to move symbol '${symbolName}'`);
+      await this.verifyTypecheckOrRollback(fromAbs, fromOriginal, toAbs, toOriginal);
+      return { ok: true, fromPath, toPath, symbolName };
+    } catch (error) {
+      await fs.writeFile(fromAbs, fromOriginal, "utf8");
+      await fs.writeFile(toAbs, toOriginal, "utf8");
+      return { ok: false, error: (error as Error).message };
+    }
+  }
+
+  private async verifyTypecheckOrRollback(
+    primaryPath: string,
+    primaryContent: string,
+    secondaryPath?: string,
+    secondaryContent?: string
+  ): Promise<void> {
+    try {
+      await execAsync("npm run typecheck", { cwd: this.workspaceRoot, timeout: 240_000 });
+    } catch (error) {
+      await fs.writeFile(primaryPath, primaryContent, "utf8");
+      if (secondaryPath && secondaryContent !== undefined) {
+        await fs.writeFile(secondaryPath, secondaryContent, "utf8");
+      }
+      throw error;
+    }
   }
 
   private async finalizeTask(args: Record<string, unknown>, onProgress?: (chunk: string) => void): Promise<unknown> {
