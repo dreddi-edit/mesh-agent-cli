@@ -75,6 +75,9 @@ import { AgentOs } from "./agent-os.js";
 import { captureFrontendPreview } from "./terminal-preview.js";
 import { openContextArtifact } from "./context-artifacts.js";
 import { MeshBrainClient, normalizeDiffPattern, normalizeErrorSignature, RepoDnaFingerprint } from "./mesh-brain.js";
+import { runDaemonCli } from "./daemon.js";
+import { DAEMON_SOCKET_PATH, DaemonRequest, DaemonResponse } from "./daemon-protocol.js";
+import net from "node:net";
 
 const SKIP_DIRS = [".git", "node_modules", "dist", ".mesh"];
 const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
@@ -1344,6 +1347,16 @@ export class LocalToolBackend implements ToolBackend {
         }
       },
       {
+        name: "workspace.daemon",
+        description: "Daemon mode controls: start/stop/status/digest for the background Mesh service.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["start", "status", "digest", "stop"], default: "status" }
+          }
+        }
+      },
+      {
         name: "workspace.intent_compile",
         description: "Intent Compiler: turn product intent into a repo-grounded implementation contract with likely files, risks, tests, rollout, and verification steps.",
         inputSchema: {
@@ -1577,6 +1590,8 @@ export class LocalToolBackend implements ToolBackend {
         return this.engineeringMemory(args);
       case "workspace.brain":
         return this.meshBrainTool(args);
+      case "workspace.daemon":
+        return this.daemonControl(args);
       case "workspace.intent_compile":
         return this.intentCompile(args);
       case "workspace.cockpit_snapshot":
@@ -3531,6 +3546,46 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
     }
     const stats = await this.meshBrain.status();
     return { ok: true, action: "stats", ...stats };
+  }
+
+  private async daemonControl(args: Record<string, unknown> = {}): Promise<unknown> {
+    const action = String(args.action ?? "status").trim().toLowerCase();
+    if (action === "start") {
+      const code = await runDaemonCli(["start"]);
+      return { ok: code === 0, action };
+    }
+    if (!["status", "digest", "stop"].includes(action)) {
+      throw new Error("workspace.daemon action must be start|status|digest|stop");
+    }
+    const response = await this.callDaemonSocket({ action: action as "status" | "digest" | "stop" });
+    return response;
+  }
+
+  private async callDaemonSocket(request: DaemonRequest): Promise<DaemonResponse> {
+    return new Promise((resolve) => {
+      const socket = net.createConnection(DAEMON_SOCKET_PATH, () => {
+        socket.write(JSON.stringify(request));
+        socket.end();
+      });
+      let body = "";
+      socket.on("data", (chunk: Buffer) => {
+        body += chunk.toString();
+      });
+      socket.on("error", (error) => {
+        resolve({ ok: false, action: request.action, message: `daemon unavailable: ${error.message}` });
+      });
+      socket.on("end", () => {
+        if (!body.trim()) {
+          resolve({ ok: false, action: request.action, message: "daemon returned empty response" });
+          return;
+        }
+        try {
+          resolve(JSON.parse(body) as DaemonResponse);
+        } catch {
+          resolve({ ok: false, action: request.action, message: "daemon response parse failed" });
+        }
+      });
+    });
   }
 
   private workspaceFingerprint(): string {

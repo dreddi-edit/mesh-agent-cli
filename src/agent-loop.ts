@@ -1740,7 +1740,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     const statusRows = [
       `mesh  ${this.config.agent.mode}  ${shortPathLabel(this.config.agent.workspaceRoot)}`,
       `branch: ${this.currentBranch}   model: ${shortModelName(this.currentModelId)}`,
-      "commands: /help /status /causal /lab /fork /ghost /brain /dashboard /exit",
+      "commands: /help /status /daemon /causal /lab /fork /ghost /brain /dashboard /exit",
       "tip: Type / and press TAB for command completion"
     ];
 
@@ -1770,7 +1770,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
       [
         `${this.themeColor(pc.bold("mesh"))}  ${pc.dim(this.config.agent.mode)}  ${pc.dim(shortPathLabel(this.config.agent.workspaceRoot))}`,
         `${pc.dim("branch:")} ${this.themeColor(this.currentBranch)}   ${pc.dim("model:")} ${this.themeColor(shortModelName(this.currentModelId))}`,
-        `${pc.dim("commands:")} ${pc.magenta("/help")} ${pc.magenta("/status")} ${pc.magenta("/causal")} ${pc.magenta("/lab")} ${pc.magenta("/fork")} ${pc.magenta("/ghost")} ${pc.magenta("/brain")} ${pc.magenta("/dashboard")} ${pc.magenta("/exit")}`,
+        `${pc.dim("commands:")} ${pc.magenta("/help")} ${pc.magenta("/status")} ${pc.magenta("/daemon")} ${pc.magenta("/causal")} ${pc.magenta("/lab")} ${pc.magenta("/fork")} ${pc.magenta("/ghost")} ${pc.magenta("/brain")} ${pc.magenta("/dashboard")} ${pc.magenta("/exit")}`,
         `${pc.dim("tip:")} ${pc.dim("Type / and press TAB for command completion")}`
       ].join("\n") + "\n"
     );
@@ -2469,6 +2469,25 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     }
   }
 
+  private async runDaemon(args: string[]): Promise<void> {
+    const action = (args[0] || "status").toLowerCase();
+    const spinner = ora({ text: `Daemon ${action}...`, color: "cyan" }).start();
+    try {
+      const result: any = await this.backend.callTool("workspace.daemon", { action });
+      spinner.succeed(pc.cyan(`Daemon ${action} complete.`));
+      output.write([
+        "",
+        `${pc.dim("ok:")} ${result.ok ? pc.green("yes") : pc.red("no")}`,
+        ...(result.message ? [`${pc.dim("message:")} ${result.message}`] : []),
+        ...(result.digest ? [`${pc.dim("digest:")} ${result.digest}`] : []),
+        ...(result.state ? [`${pc.dim("state:")} ${JSON.stringify(result.state, null, 2)}`] : []),
+        ""
+      ].join("\n"));
+    } catch (error) {
+      spinner.fail(pc.red(`Daemon command failed: ${(error as Error).message}`));
+    }
+  }
+
   private async runMeshBrain(args: string[]): Promise<void> {
     const action = (args[0] || "stats").replace("-", "_");
     const spinner = ora({ text: `Mesh Brain ${action}...`, color: "blue" }).start();
@@ -3029,6 +3048,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       { name: "/synthesize", usage: "/synthesize", description: "auto-generate structural changes based on background heuristics" },
       { name: "/twin", usage: "/twin [build|read|status]", description: "build or inspect the Codebase Digital Twin" },
       { name: "/repair", usage: "/repair [analyze|status|clear]", description: "inspect the Predictive Repair Daemon queue" },
+      { name: "/daemon", usage: "/daemon [start|status|digest|stop]", description: "control Mesh background daemon mode" },
       { name: "/brain", usage: "/brain [stats|query <error>|opt-out]", description: "query Mesh Brain global fix patterns and telemetry contribution status" },
       { name: "/learn", usage: "/learn [read|learn]", description: "read or refresh Engineering Memory" },
       { name: "/intent", usage: "/intent <product intent>", description: "compile intent into an implementation contract" },
@@ -3075,7 +3095,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     const commandList = [
       "/help", "/status", "/index", "/dashboard", "/sync", "/setup", "/clear",
       "/model", "/cost", "/compact", "/capsule", "/memory", "/approvals", "/steps", "/undo",
-      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/preview", "/fix"
+      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/daemon", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/preview", "/fix"
     ];
     // Priority 1: Exact match
     let command = inputCmd;
@@ -3136,6 +3156,9 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
         return { wasHandled: true, shouldExit: false };
       case "/repair":
         await this.runPredictiveRepair(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/daemon":
+        await this.runDaemon(args);
         return { wasHandled: true, shouldExit: false };
       case "/brain":
         await this.runMeshBrain(args);

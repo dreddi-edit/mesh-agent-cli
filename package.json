@@ -12,7 +12,8 @@
   "homepage": "https://github.com/dreddi-edit/mesh-agent-cli",
   "bin": {
     "mesh": "./dist/index.js",
-    "mesh-agent": "./dist/index.js"
+    "mesh-agent": "./dist/index.js",
+    "mesh-daemon": "./dist/daemon.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/minify.js",

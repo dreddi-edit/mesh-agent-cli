@@ -9,6 +9,7 @@ import { LocalToolBackend } from "./local-tools.js";
 import { McpClient } from "./mcp-client.js";
 import { ToolBackend } from "./tool-backend.js";
 import { CompositeToolBackend } from "./composite-backend.js";
+import { runDaemonCli } from "./daemon.js";
 
 async function main(): Promise<void> {
   const config = await loadConfig();
@@ -17,6 +18,12 @@ async function main(): Promise<void> {
   // Handle `mesh logout` shorthand
   if (process.argv[2] === "logout") {
     await auth.signOut();
+    return;
+  }
+
+  if (process.argv[2] === "daemon") {
+    const code = await runDaemonCli(process.argv.slice(3));
+    process.exitCode = code;
     return;
   }
 
