@@ -2509,6 +2509,33 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     }
   }
 
+  private async runChatops(args: string[]): Promise<void> {
+    const action = (args[0] || "investigate").toLowerCase();
+    const platform = (args[1] || "slack").toLowerCase();
+    const message = args.slice(2).join(" ").trim();
+    const spinner = ora({ text: `ChatOps ${action}...`, color: "magenta" }).start();
+    try {
+      const result: any = await this.backend.callTool("workspace.chatops", {
+        action,
+        platform,
+        channel: "general",
+        message
+      });
+      spinner.succeed(pc.magenta(`ChatOps ${action} complete.`));
+      output.write([
+        "",
+        `${pc.dim("ok:")} ${result.ok ? pc.green("yes") : pc.red("no")}`,
+        ...(result.threadId ? [`${pc.dim("thread:")} ${result.threadId}`] : []),
+        ...(result.status ? [`${pc.dim("status:")} ${result.status}`] : []),
+        ...((result.updates ?? []).slice(0, 4).map((line: string) => `${pc.magenta("•")} ${line}`)),
+        ...(result.prDraft ? [`${pc.dim("pr draft:")}\n${result.prDraft}`] : []),
+        ""
+      ].join("\n"));
+    } catch (error) {
+      spinner.fail(pc.red(`ChatOps failed: ${(error as Error).message}`));
+    }
+  }
+
   private async runMeshBrain(args: string[]): Promise<void> {
     const action = (args[0] || "stats").replace("-", "_");
     const spinner = ora({ text: `Mesh Brain ${action}...`, color: "blue" }).start();
@@ -3071,6 +3098,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       { name: "/repair", usage: "/repair [analyze|status|clear]", description: "inspect the Predictive Repair Daemon queue" },
       { name: "/daemon", usage: "/daemon [start|status|digest|stop]", description: "control Mesh background daemon mode" },
       { name: "/issues", usage: "/issues [scan|status] [provider]", description: "run issue-to-PR pipeline for GitHub/Linear/Jira tickets" },
+      { name: "/chatops", usage: "/chatops [investigate|approve|status] [platform] [message|threadId]", description: "run Slack/Discord co-engineer investigation and approval flow" },
       { name: "/brain", usage: "/brain [stats|query <error>|opt-out]", description: "query Mesh Brain global fix patterns and telemetry contribution status" },
       { name: "/learn", usage: "/learn [read|learn]", description: "read or refresh Engineering Memory" },
       { name: "/intent", usage: "/intent <product intent>", description: "compile intent into an implementation contract" },
@@ -3117,7 +3145,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     const commandList = [
       "/help", "/status", "/index", "/dashboard", "/sync", "/setup", "/clear",
       "/model", "/cost", "/compact", "/capsule", "/memory", "/approvals", "/steps", "/undo",
-      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/daemon", "/issues", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/preview", "/fix"
+      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/daemon", "/issues", "/chatops", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/preview", "/fix"
     ];
     // Priority 1: Exact match
     let command = inputCmd;
@@ -3184,6 +3212,9 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
         return { wasHandled: true, shouldExit: false };
       case "/issues":
         await this.runIssuePipeline(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/chatops":
+        await this.runChatops(args);
         return { wasHandled: true, shouldExit: false };
       case "/brain":
         await this.runMeshBrain(args);

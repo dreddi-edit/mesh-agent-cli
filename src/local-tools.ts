@@ -79,6 +79,7 @@ import { runDaemonCli } from "./daemon.js";
 import { DAEMON_SOCKET_PATH, DaemonRequest, DaemonResponse } from "./daemon-protocol.js";
 import net from "node:net";
 import { IssuePipelineManager } from "./integrations/issues/manager.js";
+import { ChatopsManager } from "./integrations/chatops/manager.js";
 
 const SKIP_DIRS = [".git", "node_modules", "dist", ".mesh"];
 const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
@@ -353,6 +354,7 @@ export class LocalToolBackend implements ToolBackend {
   private readonly agentOs: AgentOs;
   private readonly meshBrain: MeshBrainClient;
   private readonly issuePipeline: IssuePipelineManager;
+  private readonly chatops: ChatopsManager;
 
   constructor(private readonly workspaceRoot: string, private readonly config?: AppConfig) {
     this.cache = new CacheManager(config ?? {
@@ -388,6 +390,10 @@ export class LocalToolBackend implements ToolBackend {
     this.issuePipeline = new IssuePipelineManager(workspaceRoot, {
       intentCompile: async (intent: string) => this.intentCompile({ intent }),
       impactMap: async (query: string) => this.impactMap({ symbol: query })
+    });
+    this.chatops = new ChatopsManager(workspaceRoot, {
+      intentCompile: async (intent: string) => this.intentCompile({ intent }),
+      predictiveRepair: async () => this.predictiveRepair({ action: "analyze" })
     });
     void this.bootstrapRepoDnaMemory();
     void this.agentOs.ensureDefaultDefinitions();
@@ -1375,6 +1381,19 @@ export class LocalToolBackend implements ToolBackend {
         }
       },
       {
+        name: "workspace.chatops",
+        description: "Slack/Discord co-engineer integration for investigation threads, progress updates, and approval-driven draft PR handoff.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["investigate", "approve", "status"], default: "investigate" },
+            platform: { type: "string", enum: ["slack", "discord"], default: "slack" },
+            channel: { type: "string", default: "general" },
+            message: { type: "string" }
+          }
+        }
+      },
+      {
         name: "workspace.intent_compile",
         description: "Intent Compiler: turn product intent into a repo-grounded implementation contract with likely files, risks, tests, rollout, and verification steps.",
         inputSchema: {
@@ -1615,6 +1634,13 @@ export class LocalToolBackend implements ToolBackend {
           action: typeof args.action === "string" ? args.action : "scan",
           provider: typeof args.provider === "string" ? args.provider : undefined,
           issueId: typeof args.issueId === "string" ? args.issueId : undefined
+        });
+      case "workspace.chatops":
+        return this.chatops.run({
+          action: typeof args.action === "string" ? args.action : "investigate",
+          platform: typeof args.platform === "string" ? args.platform : "slack",
+          channel: typeof args.channel === "string" ? args.channel : "general",
+          message: typeof args.message === "string" ? args.message : undefined
         });
       case "workspace.intent_compile":
         return this.intentCompile(args);
