@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 test("local tools expose moonshot public interfaces", () => {
   const source = readFileSync(new URL("../src/local-tools.ts", import.meta.url), "utf8");
   const expectedTools = [
+    "workspace.open_artifact",
     "workspace.index_status",
     "workspace.explain_symbol",
     "workspace.impact_map",

@@ -1,13 +1,16 @@
 import fs from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { fileURLToPath } from "node:url";
 import pc from "picocolors";
 import ora from "ora";
 import boxen from "boxen";
 import pkg from "enquirer";
 import os from "node:os";
 import http from "node:http";
+import { spawn } from "node:child_process";
 import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
 
@@ -16,6 +19,8 @@ marked.use(markedTerminal() as any);
 
 type EnquirerCtor = new (options: Record<string, unknown>) => { run(): Promise<unknown> };
 const { Select, Confirm, Input } = pkg as unknown as { Select: EnquirerCtor; Confirm: EnquirerCtor; Input: EnquirerCtor };
+
+const DASHBOARD_SERVER_VERSION = "context-ledger-v5";
 
 import { AppConfig, loadUserSettings, saveUserSettings, shortPathLabel, UserSettings, VoiceSettings } from "./config.js";
 import {
@@ -26,7 +31,8 @@ import {
   LlmResponse,
   ConverseUsage
 } from "./llm-client.js";
-import { buildLlmSafeMeshContext } from "./mesh-gateway.js";
+import { ContextAssembler, ContextBudgetReport } from "./context-assembler.js";
+import { ContextArtifactStore } from "./context-artifacts.js";
 import { PersistedSessionCapsule, SessionCapsuleStore } from "./session-capsule-store.js";
 import { MeshPortal } from "./mesh-portal.js";
 import { ToolBackend, ToolDefinition } from "./tool-backend.js";
@@ -35,6 +41,13 @@ import { VoiceManager } from "./voice-manager.js";
 const SYSTEM_PROMPT = [
   "You are Mesh, a high-performance terminal AI coding agent designed by edgarelmo.",
   "Your purpose is to assist developers with complex engineering tasks directly within their workspace.",
+  "Response Contract:",
+  "- Be terse by default. Do not greet, pitch capabilities, or ask broad 'what do you want to do' questions.",
+  "- No emojis, decorative symbols, or hype language.",
+  "- For simple acknowledgements or greetings, answer in one short sentence.",
+  "- For coding work, lead with the result or the next concrete action. Only explain details when they affect the user's decision.",
+  "- Do not list menus of capabilities unless the user explicitly asks for help or options.",
+  "- Tool results arrive as mesh.tool_result.v2 envelopes. Treat summary/facts/refs as evidence. Use workspace.open_artifact only for the exact missing detail; never ask for broad artifact dumps.",
   "Core Principles:",
   "1. Efficiency: Follow the CAPSULE-FIRST hierarchy: Prefer 'workspace.ask_codebase' with the right mode, then 'workspace.read_file', 'workspace.read_dir_overview', and exact raw reads only when needed.",
   "2. Local Code Intelligence: 'workspace.ask_codebase' uses the persistent local index and returns citations. Use modes: architecture, bug, edit-impact, test-impact, ownership, recent-change, runtime-path.",
@@ -46,7 +59,7 @@ const SYSTEM_PROMPT = [
   "6. Symbolic Trace Routing: Use 'workspace.trace_symbol' to trace data flow deterministically.",
   "7. Multi-Agent OS: For broad work, create role-scoped workers with 'agent.spawn' using .mesh/agents definitions, review timelines with 'agent.review', and merge with 'agent.merge_verified'.",
   "8. Micro-Edits: For simple renames, use 'workspace.rename_symbol'.",
-  "9. Parallelism: ALWAYS batch your tool calls.",
+  "9. Parallelism: Batch only independent tool calls. Prefer one high-signal index query over multiple raw reads.",
   "10. Runtime Cognition: Use 'runtime.start', 'runtime.capture_failure', and 'runtime.explain_failure' for live command/test debugging. Use 'frontend.preview' for real terminal screenshots via Chrome CDP; use 'web.inspect_ui' only when Playwright-style inspection is needed.",
   "11. Moonshot OS: Use 'workspace.digital_twin' before major work, 'workspace.intent_compile' for product asks, 'workspace.predictive_repair' for failing diagnostics, 'workspace.engineering_memory' for repo-specific rules, and 'workspace.cockpit_snapshot' for operational status.",
   "12. Legendary Moonshots: Use 'workspace.causal_intelligence' for causal repo reasoning, 'workspace.discovery_lab' for autonomous improvement experiments, and 'workspace.reality_fork' to compare alternate implementation realities before risky work.",
@@ -57,6 +70,7 @@ const SYSTEM_PROMPT = [
   "16. Mesh-Alien-OS (MAX EFFICIENCY): To save 90% tokens, use 'workspace.session_index_symbols' first to get IDs for file symbols. Then use 'workspace.alien_patch' with Symbolic Opcodes:",
   "    Opcode Rosetta Stone: e: (export) | s: (async) | f: (function) | c: (const) | l: (let) | r: (return) | a: (await) | i: (if) | p: (Promise) | cn: (console.log) | th: (throw new Error)",
   "    Patch Format: !ID > { [ALIENT_CODE] }",
+  "Token Law: raw tool output is stored locally, not in context. Answer from compressed evidence unless a precise artifact slice is required.",
   "Operating Environment: You run as a CLI tool on the user's machine. Minimize I/O and token usage by leveraging the Mesh-Compression cache aggressively. If you feel you lack context, suggest the user run '/index' to pre-cache the entire workspace."
 ].join("\n");
 
@@ -244,6 +258,95 @@ function toToolSpecs(wireTools: WireTool[]): ToolSpec[] {
   }));
 }
 
+function selectWireToolsForTurn(wireTools: WireTool[], inputText: string): WireTool[] {
+  const lower = inputText.toLowerCase();
+  const selected = new Set<string>();
+  const add = (...names: string[]) => {
+    for (const name of names) selected.add(name);
+  };
+
+  add(
+    "workspace.open_artifact",
+    "workspace.ask_codebase",
+    "workspace.get_diagnostics",
+    "workspace.git_status",
+    "workspace.list_files",
+    "workspace.list_directory",
+    "workspace.search_files",
+    "workspace.grep_ripgrep",
+    "workspace.read_file",
+    "workspace.get_file_graph",
+    "workspace.read_dir_overview",
+    "agent.plan"
+  );
+
+  if (/(fix|edit|change|patch|implement|build|add|remove|refactor|commit|test|run|execute|fehler|beheb|änder|aender|bau|mach)/i.test(lower)) {
+    add(
+      "workspace.write_file",
+      "workspace.patch_file",
+      "workspace.patch_surgical",
+      "workspace.run_command",
+      "workspace.read_file_raw",
+      "workspace.read_multiple_files",
+      "workspace.validate_patch",
+      "workspace.git_diff",
+      "workspace.impact_map",
+      "workspace.explain_symbol",
+      "workspace.list_symbols",
+      "workspace.finalize_task"
+    );
+  }
+
+  if (/(dashboard|ui|frontend|browser|screenshot|inspect|visual|react|css|html)/i.test(lower)) {
+    add("web.inspect_ui", "frontend.preview", "workspace.trace_symbol", "workspace.expand_execution_path");
+  }
+
+  if (/(runtime|crash|exception|stack|trace|debug|hologram|server|request|autopsy)/i.test(lower)) {
+    add(
+      "workspace.run_with_telemetry",
+      "runtime.start",
+      "runtime.capture_failure",
+      "runtime.capture_deep_autopsy",
+      "runtime.trace_request",
+      "runtime.explain_failure",
+      "runtime.fix_failure"
+    );
+  }
+
+  if (/(offene probleme|problem|bug|issue|risk|risiko|audit|review|diagnos|causal|lab|repair|twin|ghost|fork|intent|memory|cockpit)/i.test(lower)) {
+    add(
+      "workspace.digital_twin",
+      "workspace.predictive_repair",
+      "workspace.engineering_memory",
+      "workspace.intent_compile",
+      "workspace.cockpit_snapshot",
+      "workspace.causal_intelligence",
+      "workspace.discovery_lab",
+      "workspace.reality_fork",
+      "workspace.ghost_engineer"
+    );
+  }
+
+  if (/(timeline|race|future|fork|parallel|promote|merge|swarm|agent)/i.test(lower)) {
+    add(
+      "workspace.timeline_create",
+      "workspace.timeline_apply_patch",
+      "workspace.timeline_run",
+      "workspace.timeline_compare",
+      "workspace.timeline_promote",
+      "workspace.timeline_list",
+      "agent.race_fixes",
+      "agent.spawn",
+      "agent.review",
+      "agent.merge_verified",
+      "agent.status"
+    );
+  }
+
+  const filtered = wireTools.filter(({ tool }) => selected.has(tool.name));
+  return filtered.length > 0 ? filtered : wireTools.slice(0, 16);
+}
+
 function formatArgsPreview(args: Record<string, unknown>): string {
   const raw = JSON.stringify(args);
   if (!raw) return "{}";
@@ -282,6 +385,16 @@ function previewText(value: string, maxLen = 140): string {
   const normalized = value.replace(/\s+/g, " ").trim();
   if (!normalized) return "";
   return normalized.length > maxLen ? `${normalized.slice(0, maxLen - 3)}...` : normalized;
+}
+
+function formatTokenCount(value: number): string {
+  if (value >= 1000) return `${(value / 1000).toFixed(value >= 10_000 ? 0 : 1)}k`;
+  return String(value);
+}
+
+function clampBlock(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, Math.max(0, maxChars - 60))}\n[trimmed ${value.length - maxChars} chars]`;
 }
 
 function parseCommandArgs(args: string[]): ParsedCommandArgs {
@@ -328,6 +441,8 @@ export class AgentLoop {
   private readonly llm: BedrockLlmClient;
   private readonly useAnsi = output.isTTY;
   private readonly sessionStore: SessionCapsuleStore;
+  private readonly artifactStore: ContextArtifactStore;
+  private readonly contextAssembler = new ContextAssembler();
   private currentModelId: string;
   private currentBranch = "nogit";
   private localInstructions = "";
@@ -346,7 +461,18 @@ export class AgentLoop {
   private voiceMode = false;
   private voiceLanguage = "en";
   private prefetchQueue: string[] = [];
-  private dashboardSocket: any = null;
+  private dashboardEventWrite: Promise<void> = Promise.resolve();
+  private dashboardActionTimer: NodeJS.Timeout | null = null;
+  private dashboardActionRunning = false;
+  private toolEventsExpanded = false;
+  private turnToolCalls = 0;
+  private turnToolErrors = 0;
+  private turnToolNames = new Map<string, number>();
+  private turnArtifactCharsStored = 0;
+  private turnArtifactEnvelopeChars = 0;
+  private turnContextReports: ContextBudgetReport[] = [];
+  private lastContextReport: ContextBudgetReport | null = null;
+  private currentTurnRouteContext: string | null = null;
   private entangledWorkspaces: string[] = [];
   private gitStatusContext = "";
   private consecutiveErrors = new Map<string, number>();
@@ -357,6 +483,7 @@ export class AgentLoop {
     private readonly backend: ToolBackend
   ) {
     this.sessionStore = new SessionCapsuleStore(config.agent.workspaceRoot);
+    this.artifactStore = new ContextArtifactStore(config.agent.workspaceRoot);
     this.dynamicMaxSteps = config.agent.maxSteps;
     this.portal = new MeshPortal(config.agent.workspaceRoot);
     this.currentModelId = config.bedrock.modelId;
@@ -376,6 +503,7 @@ export class AgentLoop {
 
     this.voiceManager = this.buildVoiceManager();
     this.syncVoiceLanguage();
+    this.startDashboardActionPump();
   }
 
   private buildVoiceManager(): VoiceManager {
@@ -773,6 +901,11 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     }
 
     if (initialPrompt?.trim()) {
+      const localAnswer = await this.tryLocalIntentAnswer(initialPrompt);
+      if (localAnswer) {
+        await this.renderLocalQuickAnswer(localAnswer);
+        return;
+      }
       const result = await this.runSingleTurn(initialPrompt);
       output.write(`${result}\n`);
       return;
@@ -873,12 +1006,20 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
         }
       }
 
+      const localAnswer = await this.tryLocalIntentAnswer(userInput);
+      if (localAnswer) {
+        rl.close();
+        await this.renderLocalQuickAnswer(localAnswer);
+        continue;
+      }
+
       await this.refreshGitStatus();
 
       try {
         const spinner = this.useAnsi ? ora({ text: "Thinking...", color: "cyan", stream: output }).start() : undefined;
         let answer: string | undefined;
         const tokensBefore = { ...this.sessionTokens };
+        this.resetToolSummary();
         try {
           const sharedHooks: RunHooks = {
             onToolStart: (wireName, args, step, maxSteps) => {
@@ -945,6 +1086,8 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
             });
             if (hasStartedStreaming) {
               output.write("\n");
+            } else if (answer) {
+              this.renderAssistantTurn(answer, { plainText: true });
             }
           }
         } finally {
@@ -961,9 +1104,10 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
             const model = MODEL_OPTIONS.find(o => this.currentModelId.includes(o.value) || o.value.includes(this.currentModelId));
             const { inputPer1k, outputPer1k } = model?.pricing ?? { inputPer1k: 0.003, outputPer1k: 0.015 };
             const cost = (dIn * inputPer1k / 1000) + (dOut * outputPer1k / 1000);
-            output.write(pc.dim(`\n↑${dIn.toLocaleString()} ↓${dOut.toLocaleString()} tokens · $${cost.toFixed(4)}\n`));
+            output.write(pc.dim(`\napi turn: ↑${dIn.toLocaleString()} ↓${dOut.toLocaleString()} · $${cost.toFixed(4)}${dIn > 50_000 ? " · high" : ""}\n`));
           }
         }
+        this.printToolSummary();
 
         const compactionMessage = await this.autoCompactIfNeeded();
         if (compactionMessage) {
@@ -985,30 +1129,37 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     }
 
     const tools = await this.backend.listTools();
-    const wireTools = toWireTools(tools);
+    const wireTools = selectWireToolsForTurn(toWireTools(tools), userInput);
     const toolSpecs = toToolSpecs(wireTools);
     const wireToolMap = new Map(wireTools.map((item) => [item.wireName, item]));
 
     const preTurnLength = this.transcript.length;
+    this.currentTurnRouteContext = await this.buildTurnRouteContext(userInput).catch(() => null);
     this.transcript.push({ role: "user", content: [{ text: userInput }] });
 
     let lastAssistantText = "";
     this.abortController = new AbortController();
+    const maxSteps = this.maxStepsForInput(userInput);
+    const toolBudget = this.toolBudgetForInput(userInput);
+    let scheduledToolCalls = 0;
+    const seenToolSignatures = new Set<string>();
+    const toolFamilyCounts = new Map<string, number>();
 
-    const spinner = (this.useAnsi && !silent) ? ora({ text: "Thinking...", color: "cyan", stream: output }).start() : undefined;
+    const spinner = (this.useAnsi && !silent && !hooks) ? ora({ text: "Thinking...", color: "cyan", stream: output }).start() : undefined;
 
     try {
-      for (let step = 0; step < this.dynamicMaxSteps; step += 1) {
+      for (let step = 0; step < maxSteps; step += 1) {
         let response: LlmResponse;
 
         if (hooks?.onDelta) {
           let accumulatedText = "";
           const streamedToolUses: any[] = [];
           try {
+            const prepared = this.prepareModelInput(preTurnLength, toolSpecs);
             const stream = this.llm.converseStream(
-              this.transcript,
-              toolSpecs,
-              this.buildRuntimeSystemPrompt(),
+              prepared.messages,
+              prepared.tools,
+              prepared.systemPrompt,
               this.currentModelId,
               this.abortController.signal
             );
@@ -1051,10 +1202,11 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
               throw error;
             }
 
+            const prepared = this.prepareModelInput(preTurnLength, toolSpecs);
             response = await this.llm.converse(
-              this.transcript,
-              toolSpecs,
-              this.buildRuntimeSystemPrompt(),
+              prepared.messages,
+              prepared.tools,
+              prepared.systemPrompt,
               this.currentModelId,
               this.abortController.signal
             );
@@ -1069,10 +1221,11 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
             }
           }
         } else {
+          const prepared = this.prepareModelInput(preTurnLength, toolSpecs);
           response = await this.llm.converse(
-            this.transcript,
-            toolSpecs,
-            this.buildRuntimeSystemPrompt(),
+            prepared.messages,
+            prepared.tools,
+            prepared.systemPrompt,
             this.currentModelId,
             this.abortController.signal
           );
@@ -1116,10 +1269,42 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
         }
 
         // Parallel execution of all tool calls in this step.
-        const toolResults = await Promise.all(response.toolUses.map(async (tu) => {
+        const scheduledToolUses = response.toolUses.map((tu) => {
+          const allowed = scheduledToolCalls < toolBudget;
+          scheduledToolCalls += 1;
+          return { tu, allowed };
+        });
+
+        const toolResults = await Promise.all(scheduledToolUses.map(async ({ tu, allowed }) => {
           const sel = wireToolMap.get(tu.name);
           const toolSignature = `${tu.name}:${JSON.stringify(tu.input)}`;
+          const family = this.toolFamilyFor(tu.name);
 
+          if (!allowed) {
+            return {
+              toolUseId: tu.toolUseId,
+              status: "error" as const,
+              text: "Tool budget reached for this turn. Stop using tools and answer with the evidence already gathered."
+            };
+          }
+          if (seenToolSignatures.has(toolSignature)) {
+            return {
+              toolUseId: tu.toolUseId,
+              status: "error" as const,
+              text: "Duplicate tool call blocked by Mesh Stop-Law. Use existing evidence or ask for a narrower artifact slice."
+            };
+          }
+          seenToolSignatures.add(toolSignature);
+          const familyCount = toolFamilyCounts.get(family) ?? 0;
+          const familyLimit = family === "read" ? 4 : family === "search" ? 3 : 2;
+          if (familyCount >= familyLimit && tu.name !== "workspace_open_artifact") {
+            return {
+              toolUseId: tu.toolUseId,
+              status: "error" as const,
+              text: `Repeated ${family} tools blocked by Mesh Stop-Law. Stop tool use and answer from gathered evidence.`
+            };
+          }
+          toolFamilyCounts.set(family, familyCount + 1);
           if (!sel) {
             return { toolUseId: tu.toolUseId, status: "error" as const, text: `Tool '${tu.name}' is not available.` };
           }
@@ -1134,10 +1319,10 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
           this.emitPulse("tool_start", tu.input.path as string, tu.name);
           if (!silent) {
             if (spinner) {
-              const stepLabel = `[${step + 1}/${this.dynamicMaxSteps}]`;
+              const stepLabel = `[${step + 1}/${maxSteps}]`;
               spinner.text = `${pc.dim(stepLabel)} ${pc.cyan(tu.name)} ${pc.dim(formatArgsPreview(tu.input))}`;
             }
-            hooks?.onToolStart?.(tu.name, tu.input, step, this.dynamicMaxSteps);
+            hooks?.onToolStart?.(tu.name, tu.input, step, maxSteps);
           }
 
           try {
@@ -1159,7 +1344,13 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
               }
             }
 
-            const resultText = await buildLlmSafeMeshContext(sel.tool.name, tu.input, raw);
+            const resultText = sel.tool.name === "workspace.open_artifact"
+              ? this.clampToolResultText(sel.tool.name, [
+                  `Tool called: ${sel.tool.name}`,
+                  `Arguments: ${JSON.stringify(tu.input)}`,
+                  `Result: ${JSON.stringify(raw)}`
+                ].join("\n"))
+              : await this.buildToolEnvelopeText(sel.tool.name, tu.input, raw);
             if (!silent) hooks?.onToolEnd?.(tu.name, true, this.normalizeCapsuleLine(resultText, 120));
             // Success: clear errors for this signature
             this.consecutiveErrors.delete(toolSignature);
@@ -1176,7 +1367,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
             }
             
             if (!silent) hooks?.onToolEnd?.(tu.name, false, this.normalizeCapsuleLine(resultText, 120));
-            return { toolUseId: tu.toolUseId, status: "error" as const, text: resultText };
+            return { toolUseId: tu.toolUseId, status: "error" as const, text: this.clampToolResultText(sel.tool.name, resultText) };
           }
         }));
 
@@ -1195,13 +1386,117 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
       }
       throw err;
     } finally {
+      if (spinner) {
+        spinner.stop();
+        spinner.clear();
+      }
       this.abortController = null;
+      this.currentTurnRouteContext = null;
     }
 
-    return (
-      lastAssistantText ||
-      `Stopped after ${this.dynamicMaxSteps} tool steps without final answer.`
+    return await this.forceFinalAnswer(lastAssistantText, preTurnLength);
+  }
+
+  private prepareModelInput(currentTurnStart: number, toolSpecs: ToolSpec[]): {
+    messages: ConverseMessage[];
+    tools: ToolSpec[];
+    systemPrompt: string;
+    report: ContextBudgetReport;
+  } {
+    const systemPrompt = this.buildRuntimeSystemPrompt();
+    const assembled = this.contextAssembler.assemble({
+      transcript: this.transcript,
+      currentTurnStart,
+      tools: toolSpecs,
+      systemPrompt,
+      sessionSummary: this.sessionCapsule?.summary ?? null,
+      runtimeContext: this.currentTurnRouteContext
+    });
+    this.lastContextReport = assembled.report;
+    this.turnContextReports.push(assembled.report);
+    if (assembled.report.totalTokens > assembled.report.maxInputTokens) {
+      throw new Error(
+        `Context firewall blocked oversized request (${assembled.report.totalTokens}/${assembled.report.maxInputTokens} estimated tokens). Narrow the request or run /clear.`
+      );
+    }
+    return { ...assembled, systemPrompt };
+  }
+
+  private async forceFinalAnswer(lastAssistantText: string, currentTurnStart: number): Promise<string> {
+    const prompt = [
+      "Stop using tools now.",
+      "Answer the user with the evidence already gathered.",
+      "Be concise. If evidence is incomplete, say what is missing in one sentence."
+    ].join(" ");
+    this.transcript.push({ role: "user", content: [{ text: prompt }] });
+    const prepared = this.prepareModelInput(currentTurnStart, []);
+    const response = await this.llm.converse(
+      prepared.messages,
+      prepared.tools,
+      prepared.systemPrompt,
+      this.currentModelId,
+      this.abortController?.signal
     );
+    if (response.usage) {
+      this.sessionTokens.inputTokens += response.usage.inputTokens ?? 0;
+      this.sessionTokens.outputTokens += response.usage.outputTokens ?? 0;
+    }
+    const text = response.text || lastAssistantText || "Kein belastbarer Befund.";
+    this.transcript.push({ role: "assistant", content: [{ text }] });
+    return text;
+  }
+
+  private maxStepsForInput(inputText: string): number {
+    const lower = inputText.toLowerCase();
+    if (this.isSimpleLocalCandidate(inputText)) return 1;
+    if (/(fix|edit|change|patch|implement|build|add|remove|refactor|commit|test|run|execute|beheb|änder|aender|bau|mach)/i.test(lower)) {
+      return Math.min(this.dynamicMaxSteps, 4);
+    }
+    if (/(runtime|crash|exception|stack|trace|debug|server|request|diagnos)/i.test(lower)) {
+      return Math.min(this.dynamicMaxSteps, 3);
+    }
+    if (/(offene probleme|problem.*code|bug|bugs|issue|issues|diagnos|risiko|risk|audit|review|siehst du|findest du)/i.test(lower)) {
+      return Math.min(this.dynamicMaxSteps, 2);
+    }
+    return Math.min(this.dynamicMaxSteps, 2);
+  }
+
+  private toolBudgetForInput(inputText: string): number {
+    const lower = inputText.toLowerCase();
+    if (this.isSimpleLocalCandidate(inputText)) return 0;
+    if (/(fix|edit|change|patch|implement|build|add|remove|refactor|commit|test|run|execute|beheb|änder|aender|bau|mach)/i.test(lower)) {
+      return 10;
+    }
+    if (/(runtime|crash|exception|stack|trace|debug|server|request|diagnos)/i.test(lower)) {
+      return 6;
+    }
+    if (/(offene probleme|problem.*code|bug|bugs|issue|issues|diagnos|risiko|risk|audit|review|siehst du|findest du)/i.test(lower)) {
+      return 5;
+    }
+    return 3;
+  }
+
+  private toolFamilyFor(wireName: string): string {
+    const name = wireName.replace(/_/g, ".");
+    if (/read|open.artifact|expand/.test(name)) return "read";
+    if (/search|grep|ask.codebase|list/.test(name)) return "search";
+    if (/diagnostic|repair|causal|lab|twin|ghost|cockpit/.test(name)) return "analysis";
+    if (/write|patch|move|delete|run|timeline|agent/.test(name)) return "action";
+    return "other";
+  }
+
+  private clampToolResultText(toolName: string, text: string): string {
+    const limit = /read_file_raw|read_multiple_files|grep|ask_codebase|causal|discovery/i.test(toolName) ? 5000 : 3500;
+    if (text.length <= limit) return text;
+    return `${text.slice(0, limit)}\n\n[truncated ${text.length - limit} chars; answer from available evidence or request a narrower read]`;
+  }
+
+  private async buildToolEnvelopeText(toolName: string, input: Record<string, unknown>, raw: unknown): Promise<string> {
+    const record = await this.artifactStore.saveToolResult(toolName, input, raw);
+    const envelopeText = this.artifactStore.buildEnvelopeText(record, raw);
+    this.turnArtifactCharsStored += record.originalChars;
+    this.turnArtifactEnvelopeChars += envelopeText.length;
+    return this.clampToolResultText(toolName, envelopeText);
   }
 
   private buildApprovalPreview(toolName: string, input: Record<string, unknown>): string {
@@ -1232,6 +1527,124 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
       return `move_file  ${String(input.sourcePath ?? "?")} → ${String(input.destinationPath ?? "?")}`;
     }
     return `Allow ${toolName} to run?`;
+  }
+
+  private isSimpleLocalCandidate(inputText: string): boolean {
+    const normalized = inputText.trim().toLowerCase().replace(/[!?.\s]+$/g, "");
+    return /^(hi|hello|hey|hallo|servus|moin|guten morgen|guten tag|guten abend|wie gehts|wie geht es dir|alles gut|na wie gehts|how are you|how is it going|bist du da|da|online|ready|bereit|danke|thx|thanks|merci|dankeschoen|dankeschön|ok|okay|alles klar|passt|verstanden|got it|was kannst du|help|hilfe)$/.test(normalized);
+  }
+
+  private async tryLocalIntentAnswer(inputText: string): Promise<string | null> {
+    const quick = this.getLocalQuickAnswer(inputText);
+    if (quick) return quick;
+
+    const normalized = inputText.trim().toLowerCase().replace(/[!?.\s]+$/g, "");
+    if (/^(status|repo status|git status|wie ist der status|was ist der status)$/.test(normalized)) {
+      const [git, index] = await Promise.allSettled([
+        this.backend.callTool("workspace.git_status", {}),
+        this.backend.callTool("workspace.get_index_status", {})
+      ]);
+      const gitValue = git.status === "fulfilled" ? git.value as any : null;
+      const indexValue = index.status === "fulfilled" ? index.value as any : null;
+      const branch = gitValue?.branch ? `branch ${gitValue.branch}` : "branch unbekannt";
+      const dirty = gitValue?.status ? String(gitValue.status).split(/\r?\n/g).filter(Boolean).length : 0;
+      const cache = indexValue?.cachedFiles != null && indexValue?.totalFiles != null
+        ? `index ${indexValue.cachedFiles}/${indexValue.totalFiles}`
+        : "index unbekannt";
+      return `${branch}. ${dirty ? `${dirty} offene Dateiänderungen` : "Working tree sauber"}. ${cache}.`;
+    }
+
+    if (/^(welcher branch|branch|git branch)$/.test(normalized)) {
+      const git = await this.backend.callTool("workspace.git_status", {}).catch(() => null) as any;
+      return git?.branch ? `Branch: ${git.branch}.` : "Branch unbekannt.";
+    }
+
+    if (/^(token status|tokens|kosten|cost|context status|context)$/.test(normalized)) {
+      const report = this.peakContextReport();
+      if (!report) return "Noch kein Modell-Call in diesem Turn.";
+      return `Letzter Kontext: ca. ${formatTokenCount(report.totalTokens)}/${formatTokenCount(report.maxInputTokens)} Tokens, Tools ${report.toolsOut}/${report.toolsIn}, Messages ${report.messagesOut}/${report.messagesIn}.`;
+    }
+
+    return null;
+  }
+
+  private async buildTurnRouteContext(inputText: string): Promise<string | null> {
+    if (!this.shouldAttachRepoRouteContext(inputText)) return null;
+    const mode = this.inferIndexMode(inputText);
+    const [indexResult, gitResult] = await Promise.allSettled([
+      this.backend.callTool("workspace.ask_codebase", { query: inputText, mode, limit: 5 }),
+      this.backend.callTool("workspace.git_status", {})
+    ]);
+    const lines: string[] = [
+      "Purpose: pre-routed local index context. Prefer these refs before more search tools.",
+      `Query mode: ${mode}`
+    ];
+    if (indexResult.status === "fulfilled") {
+      const value = indexResult.value as any;
+      const matches = Array.isArray(value?.topMatches) ? value.topMatches : [];
+      if (matches.length > 0) {
+        lines.push("Likely relevant files:");
+        for (const match of matches.slice(0, 5)) {
+          lines.push(`- ${match.path} :: ${previewText(String(match.snippet ?? ""), 160)}`);
+        }
+      }
+      if (value?.indexStatus) {
+        lines.push(`Index: ${value.indexStatus.cachedFiles}/${value.indexStatus.totalFiles} fresh (${value.indexStatus.percent}%)`);
+      }
+    }
+    if (gitResult.status === "fulfilled") {
+      const git = gitResult.value as any;
+      if (git?.branch) lines.push(`Git branch: ${git.branch}`);
+      if (git?.status) lines.push(`Dirty files: ${String(git.status).split(/\r?\n/g).filter(Boolean).slice(0, 8).join("; ")}`);
+    }
+    return lines.length > 2 ? lines.join("\n") : null;
+  }
+
+  private shouldAttachRepoRouteContext(inputText: string): boolean {
+    if (this.isSimpleLocalCandidate(inputText)) return false;
+    return /(code|file|datei|src\/|test|bug|fix|edit|patch|implement|build|dashboard|graph|crash|fehler|problem|repo|commit|push|package|json|ts|js|css|html|api|tool|token|context|performance|diagnos|review|audit)/i.test(inputText);
+  }
+
+  private inferIndexMode(inputText: string): string {
+    if (/(bug|fehler|crash|exception|diagnos|risk|risiko|problem)/i.test(inputText)) return "bug";
+    if (/(test|spec|coverage|verify|prüf|pruef)/i.test(inputText)) return "test-impact";
+    if (/(edit|patch|change|änder|aender|refactor|implement|mach|fix)/i.test(inputText)) return "edit-impact";
+    if (/(route|request|server|runtime|api)/i.test(inputText)) return "runtime-path";
+    if (/(commit|history|changed|dirty|recent)/i.test(inputText)) return "recent-change";
+    return "architecture";
+  }
+
+  private getLocalQuickAnswer(inputText: string): string | null {
+    const normalized = inputText.trim().toLowerCase().replace(/[!?.\s]+$/g, "");
+    if (/^(hi|hello|hey|hallo|servus|moin|guten morgen|guten tag|guten abend)$/.test(normalized)) {
+      return "Bin da.";
+    }
+    if (/^(wie gehts|wie geht es dir|alles gut|na wie gehts|how are you|how is it going)$/.test(normalized)) {
+      return "Läuft.";
+    }
+    if (/^(bist du da|da|online|ready|bereit)$/.test(normalized)) {
+      return "Ja.";
+    }
+    if (/^(danke|thx|thanks|merci|dankeschoen|dankeschön)$/.test(normalized)) {
+      return "Gerne.";
+    }
+    if (/^(ok|okay|alles klar|passt|verstanden|got it)$/.test(normalized)) {
+      return "Ok.";
+    }
+    if (/^(was kannst du|help|hilfe)$/.test(normalized)) {
+      return "Kurz: Code lesen, ändern, testen, Git/Dashboard/Diagnose lokal steuern. Frag direkt nach der Aufgabe.";
+    }
+    return null;
+  }
+
+  private async renderLocalQuickAnswer(answer: string): Promise<void> {
+    const spinner = this.useAnsi ? ora({ text: "Thinking...", color: "cyan", stream: output }).start() : null;
+    await new Promise((resolve) => setTimeout(resolve, 260 + Math.floor(Math.random() * 180)));
+    if (spinner) {
+      spinner.stop();
+      spinner.clear();
+    }
+    this.renderAssistantTurn(answer, { plainText: true });
   }
 
   private printBanner(): void {
@@ -1351,19 +1764,114 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
   }
 
   private emitPulse(type: string, path?: string, msg?: string) {
-    if (this.dashboardSocket) {
+    const event = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      type,
+      path,
+      msg,
+      at: new Date().toISOString()
+    };
+    this.dashboardEventWrite = this.dashboardEventWrite
+      .then(() => this.appendDashboardEvent(event))
+      .catch(() => undefined);
+  }
+
+  private startDashboardActionPump(): void {
+    if (this.dashboardActionTimer) return;
+    this.dashboardActionTimer = setInterval(() => {
+      void this.processDashboardActions();
+    }, 900);
+    this.dashboardActionTimer.unref();
+  }
+
+  private getDashboardActionsPath(): string {
+    return path.join(this.getDashboardDir(), "actions.json");
+  }
+
+  private async processDashboardActions(): Promise<void> {
+    if (this.dashboardActionRunning) return;
+    this.dashboardActionRunning = true;
+    try {
+      const actions = await this.readDashboardActions();
+      const pendingIndex = actions.map((action) => action.status).lastIndexOf("pending");
+      if (pendingIndex < 0) return;
+
+      const action = { ...actions[pendingIndex], status: "running", startedAt: new Date().toISOString() };
+      actions[pendingIndex] = action;
+      await this.writeDashboardActions(actions);
+      await this.appendDashboardEvent({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        type: "dashboard_action",
+        msg: `running ${action.action}`,
+        at: new Date().toISOString()
+      });
+
       try {
-        const payload = JSON.stringify({ type, path, msg });
-        const buf = Buffer.from(payload);
-        const frame = Buffer.alloc(2 + buf.length);
-        frame[0] = 0x81;
-        frame[1] = buf.length;
-        buf.copy(frame, 2);
-        this.dashboardSocket.write(frame);
-      } catch {
-        this.dashboardSocket = null;
+        const result = await this.executeDashboardAction(String(action.action));
+        actions[pendingIndex] = {
+          ...action,
+          status: "done",
+          finishedAt: new Date().toISOString(),
+          result
+        };
+        await this.appendDashboardEvent({
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          type: "dashboard_action",
+          msg: `done ${action.action}`,
+          at: new Date().toISOString()
+        });
+      } catch (error) {
+        actions[pendingIndex] = {
+          ...action,
+          status: "error",
+          finishedAt: new Date().toISOString(),
+          error: (error as Error).message
+        };
+        await this.appendDashboardEvent({
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          type: "dashboard_action",
+          msg: `failed ${action.action}`,
+          at: new Date().toISOString()
+        });
       }
+      await this.writeDashboardActions(actions.slice(0, 100));
+    } finally {
+      this.dashboardActionRunning = false;
     }
+  }
+
+  private async executeDashboardAction(action: string): Promise<Record<string, unknown>> {
+    switch (action) {
+      case "repair":
+        return await this.backend.callTool("workspace.predictive_repair", { action: "analyze" }) as Record<string, unknown>;
+      case "causal":
+        return await this.backend.callTool("workspace.causal_intelligence", { action: "build" }) as Record<string, unknown>;
+      case "lab":
+        return await this.backend.callTool("workspace.discovery_lab", { action: "run" }) as Record<string, unknown>;
+      case "twin":
+        return await this.backend.callTool("workspace.digital_twin", { action: "build" }) as Record<string, unknown>;
+      case "ghost_learn":
+        return await this.backend.callTool("workspace.ghost_engineer", { action: "learn" }) as Record<string, unknown>;
+      default:
+        throw new Error(`Unsupported dashboard action: ${action}`);
+    }
+  }
+
+  private async readDashboardActions(): Promise<any[]> {
+    const raw = await fs.readFile(this.getDashboardActionsPath(), "utf8").catch(() => "");
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private async writeDashboardActions(actions: any[]): Promise<void> {
+    const actionsPath = this.getDashboardActionsPath();
+    await fs.mkdir(path.dirname(actionsPath), { recursive: true });
+    await fs.writeFile(actionsPath, JSON.stringify(actions, null, 2), "utf8");
   }
 
   private async runSetup(rl: readline.Interface): Promise<void> {
@@ -2096,267 +2604,129 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
   }
 
   private async launchDashboard(): Promise<void> {
-    const spinner = ora({ text: "Initializing Mesh Pulse Neural Interface...", color: "cyan" }).start();
+    const spinner = ora({ text: "Starting dashboard...", color: "cyan" }).start();
     try {
-      // 1. Gather rich structural data
-      const filesRes: any = await this.backend.callTool("workspace.list_files", { limit: 500 });
-      const cockpit: any = await this.backend.callTool("workspace.cockpit_snapshot", {}).catch(() => null);
-      const nodes: any[] = [];
-      const links: any[] = [];
-      const seenFiles = new Set(filesRes.files);
+      const dashboardDir = this.getDashboardDir();
+      await fs.mkdir(dashboardDir, { recursive: true });
+      await this.appendDashboardEvent({
+        id: `${Date.now()}-dashboard-open`,
+        type: "dashboard",
+        msg: "Dashboard opened",
+        at: new Date().toISOString()
+      });
 
-      // Build basic nodes
-      for (const f of filesRes.files) {
-        if (f.match(/\.(ts|js|tsx|jsx|css|md|json)$/)) {
-          const depth = f.split("/").length;
-          nodes.push({ 
-            id: f, 
-            name: path.basename(f),
-            group: f.includes("node_modules") ? 0 : (f.includes("src") ? 1 : 2),
-            val: Math.max(2, 10 - depth) 
-          });
-        }
+      const existing = await this.readDashboardServerInfo();
+      let port = existing?.port;
+      if (!port || existing?.version !== DASHBOARD_SERVER_VERSION || !await this.isDashboardReachable(port)) {
+        port = await this.startDashboardServer(dashboardDir);
       }
 
-      // Proactively fetch some links for the initial "WOW" effect
-      const sampleFiles = filesRes.files.filter((f: string) => f.endsWith(".ts") || f.endsWith(".js")).slice(0, 20);
-      for (const f of sampleFiles) {
-        const graph: any = await this.backend.callTool("workspace.get_file_graph", { path: f }).catch(() => null);
-        if (graph?.dependencies) {
-          for (const dep of graph.dependencies) {
-            if (seenFiles.has(dep)) {
-              links.push({ source: f, target: dep });
-            }
-          }
-        }
-      }
-
-      const html = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>MESH // NEURAL PULSE</title>
-  <script src="https://d3js.org/d3.v7.min.js"></script>
-  <style>
-    :root {
-      --bg: #050505;
-      --accent: #00f2ff;
-      --node-src: #00f2ff;
-      --node-other: #ff00ea;
-      --text: #e0e0e0;
-      --panel: rgba(10, 10, 10, 0.9);
-      --border: #1a1a1a;
-    }
-    body { margin: 0; background: var(--bg); overflow: hidden; color: var(--text); font-family: 'JetBrains Mono', 'Fira Code', monospace; }
-    
-    #header { position: absolute; top: 0; left: 0; right: 0; height: 50px; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 20px; z-index: 100; letter-spacing: 2px; }
-    #header .brand { color: var(--accent); font-weight: bold; font-size: 18px; text-shadow: 0 0 10px var(--accent); }
-    #header .status { margin-left: auto; font-size: 10px; color: #555; }
-
-    #info-panel { position: absolute; top: 70px; left: 20px; width: 300px; background: var(--panel); border: 1px solid var(--border); padding: 15px; z-index: 90; backdrop-filter: blur(10px); }
-    #info-panel h2 { margin: 0 0 10px 0; font-size: 14px; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 5px; }
-    #info-panel .content { font-size: 11px; line-height: 1.4; color: #aaa; }
-    #cockpit-panel { position: absolute; top: 70px; right: 20px; width: 360px; background: var(--panel); border: 1px solid var(--border); padding: 12px; z-index: 90; backdrop-filter: blur(10px); }
-    #cockpit-panel h2 { margin: 0 0 10px 0; font-size: 12px; color: var(--accent); text-transform: uppercase; }
-    .metric-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-    .metric { border: 1px solid #181818; padding: 8px; min-height: 44px; background: rgba(255,255,255,0.03); }
-    .metric .label { font-size: 9px; color: #666; text-transform: uppercase; }
-    .metric .value { margin-top: 4px; font-size: 16px; color: #fff; }
-
-    #log-panel { position: absolute; bottom: 20px; right: 20px; width: 400px; height: 250px; background: var(--panel); border: 1px solid var(--border); padding: 10px; z-index: 90; display: flex; flex-direction: column; overflow: hidden; }
-    #log-panel h3 { margin: 0 0 5px 0; font-size: 10px; color: #666; text-transform: uppercase; }
-    #log-stream { flex: 1; overflow-y: auto; font-size: 10px; color: #888; }
-    .log-entry { margin-bottom: 4px; border-left: 2px solid var(--accent); padding-left: 8px; animation: fadeIn 0.3s ease; }
-    .log-entry .time { color: #444; margin-right: 5px; }
-    .log-entry .tag { color: var(--accent); font-weight: bold; margin-right: 5px; }
-
-    .node { cursor: pointer; }
-    .node circle { stroke: #000; stroke-width: 1px; transition: r 0.3s, fill 0.3s, filter 0.3s; }
-    .node text { font-size: 8px; fill: #555; pointer-events: none; transition: fill 0.3s, font-size 0.3s; }
-    .node:hover circle { filter: brightness(1.5) drop-shadow(0 0 8px var(--accent)); }
-    .node:hover text { fill: #fff; font-size: 12px; }
-    .link { stroke: #222; stroke-opacity: 0.4; stroke-width: 1px; }
-
-    .pulse { animation: nodePulse 1.5s infinite; }
-    @keyframes nodePulse {
-      0% { filter: drop-shadow(0 0 2px #fff); }
-      50% { filter: drop-shadow(0 0 15px var(--accent)); }
-      100% { filter: drop-shadow(0 0 2px #fff); }
-    }
-    @keyframes fadeIn { from { opacity: 0; transform: translateX(10px); } to { opacity: 1; transform: translateX(0); } }
-
-    svg { cursor: move; }
-  </style>
-</head>
-<body>
-  <div id="header">
-    <div class="brand">MESH // NEURAL PULSE v2.0</div>
-    <div class="status">SYSTEM.CONNECTED // WORKSPACE: ${path.basename(this.config.agent.workspaceRoot).toUpperCase()}</div>
-  </div>
-
-  <div id="info-panel">
-    <h2 id="file-name">Select a node</h2>
-    <div class="content" id="file-meta">Click a file node to inspect its neural capsule state and dependencies.</div>
-  </div>
-
-  <div id="cockpit-panel">
-    <h2>Architecture Cockpit</h2>
-    <div class="metric-grid" id="cockpit-metrics"></div>
-  </div>
-
-  <div id="log-panel">
-    <h3>Neural Activity Stream</h3>
-    <div id="log-stream"></div>
-  </div>
-
-  <svg id="canvas"></svg>
-
-  <script>
-    const width = window.innerWidth, height = window.innerHeight;
-    const data = { nodes: ${JSON.stringify(nodes)}, links: ${JSON.stringify(links)} };
-    const cockpit = ${JSON.stringify(cockpit ?? {})};
-    const metrics = [
-      ["health", cockpit.health && cockpit.health.status ? cockpit.health.status + " / " + cockpit.health.score : "unknown"],
-      ["files", cockpit.digitalTwin && cockpit.digitalTwin.files ? cockpit.digitalTwin.files : "n/a"],
-      ["repairs", cockpit.predictiveRepair && cockpit.predictiveRepair.queue ? cockpit.predictiveRepair.queue.length : 0],
-      ["timelines", cockpit.timelines && cockpit.timelines.timelines ? cockpit.timelines.timelines.length : 0],
-      ["runtime", cockpit.runtimeRuns ? cockpit.runtimeRuns.length : 0],
-      ["rules", cockpit.engineeringMemory && cockpit.engineeringMemory.memory ? cockpit.engineeringMemory.memory.rules.length : 0],
-      ["causal", cockpit.causalIntelligence && cockpit.causalIntelligence.insights ? cockpit.causalIntelligence.insights : 0],
-      ["lab", cockpit.discoveryLab && cockpit.discoveryLab.discoveries ? cockpit.discoveryLab.discoveries.length : 0],
-      ["forks", cockpit.realityFork && cockpit.realityFork.proposals ? cockpit.realityFork.proposals : 0],
-      ["ghost", cockpit.ghostEngineer && cockpit.ghostEngineer.confidence ? Math.round(cockpit.ghostEngineer.confidence * 100) + "%" : "n/a"]
-    ];
-    document.getElementById("cockpit-metrics").innerHTML = metrics.map(([label, value]) => \`<div class="metric"><div class="label">\${label}</div><div class="value">\${value}</div></div>\`).join("");
-
-    const svg = d3.select("#canvas")
-      .attr("width", width)
-      .attr("height", height)
-      .call(d3.zoom().on("zoom", (event) => {
-        container.attr("transform", event.transform);
-      }));
-
-    const container = svg.append("g");
-
-    const simulation = d3.forceSimulation(data.nodes)
-      .force("link", d3.forceLink(data.links).id(d => d.id).distance(50))
-      .force("charge", d3.forceManyBody().strength(-150))
-      .force("center", d3.forceCenter(width / 2, height / 2))
-      .force("collision", d3.forceCollide().radius(30));
-
-    const link = container.append("g")
-      .selectAll("line")
-      .data(data.links)
-      .enter().append("line")
-      .attr("class", "link");
-
-    const node = container.append("g")
-      .selectAll(".node")
-      .data(data.nodes)
-      .enter().append("g")
-      .attr("class", "node")
-      .call(d3.drag()
-        .on("start", dragstarted)
-        .on("drag", dragged)
-        .on("end", dragended))
-      .on("click", (e, d) => {
-        document.getElementById("file-name").innerText = d.name;
-        document.getElementById("file-meta").innerText = "PATH: " + d.id + "\\n\\nInitializing deep inspection...";
-      });
-
-    node.append("circle")
-      .attr("r", d => d.val)
-      .attr("fill", d => d.group === 1 ? "var(--node-src)" : "var(--node-other)");
-
-    node.append("text")
-      .attr("dx", 12)
-      .attr("dy", ".35em")
-      .text(d => d.name);
-
-    simulation.on("tick", () => {
-      link.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
-          .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
-      node.attr("transform", d => \`translate(\${d.x},\${d.y})\`);
-    });
-
-    function dragstarted(event, d) {
-      if (!event.active) simulation.alphaTarget(0.3).restart();
-      d.fx = d.x; d.fy = d.y;
-    }
-    function dragged(event, d) {
-      d.fx = event.x; d.fy = event.y;
-    }
-    function dragended(event, d) {
-      if (!event.active) simulation.alphaTarget(0);
-      d.fx = null; d.fy = null;
-    }
-
-    // WebSocket Neural Feed
-    const ws = new WebSocket("ws://" + location.host);
-    const logStream = document.getElementById("log-stream");
-
-    ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
-      
-      // Update Log
-      const entry = document.createElement("div");
-      entry.className = "log-entry";
-      const time = new Date().toLocaleTimeString();
-      entry.innerHTML = \`<span class="time">\${time}</span><span class="tag">\${msg.type.toUpperCase()}</span> \${msg.path || msg.msg}\`;
-      logStream.prepend(entry);
-      if (logStream.childNodes.length > 50) logStream.lastChild.remove();
-
-      // Pulse the node
-      if (msg.path) {
-        const targetNode = node.filter(d => d.id === msg.path || d.id.endsWith(msg.path));
-        targetNode.select("circle")
-          .attr("fill", "#fff")
-          .attr("r", 20)
-          .transition().duration(2000)
-          .attr("fill", d => d.group === 1 ? "var(--node-src)" : "var(--node-other)")
-          .attr("r", d => d.val);
-        
-        targetNode.classed("pulse", true);
-        setTimeout(() => targetNode.classed("pulse", false), 3000);
-      }
-    };
-  <\/script>
-</body>
-</html>`;
-
-      const server = http.createServer((req, res) => {
-        res.writeHead(200, { "Content-Type": "text/html" });
-        res.end(html);
-      });
-
-      const crypto = await import("node:crypto");
-      server.on('upgrade', (req, socket) => {
-        const key = req.headers['sec-websocket-key'];
-        const digest = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
-        socket.write('HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: ' + digest + '\\r\\n\\r\\n');
-        this.dashboardSocket = socket;
-      });
-
-      // Listen on random port
-      server.listen(0, "127.0.0.1", () => {
-        const port = (server.address() as any).port;
-        spinner.succeed(pc.green(`Mesh Pulse active at http://127.0.0.1:${port}`));
-        
-        const { exec } = require("node:child_process");
-        const openCmd = process.platform === "darwin" ? `open http://127.0.0.1:${port}` :
-                        process.platform === "win32" ? `start http://127.0.0.1:${port}` :
-                        `xdg-open http://127.0.0.1:${port}`;
-        exec(openCmd);
-        
-        // CRITICAL: Unref the server so it doesn't block the Node event loop's exit
-        // and allow the AgentLoop to continue immediately.
-        server.unref();
-      });
-
+      const url = `http://127.0.0.1:${port}`;
+      this.openDashboardUrl(url);
+      spinner.succeed(pc.green(`Dashboard live at ${url}`));
     } catch (e) {
       spinner.fail(pc.red(`Interface initialization failed: ${(e as Error).message}`));
     }
+  }
+
+  private getDashboardDir(): string {
+    return path.join(this.config.agent.workspaceRoot, ".mesh", "dashboard");
+  }
+
+  private getDashboardEventsPath(): string {
+    return path.join(this.getDashboardDir(), "events.json");
+  }
+
+  private getDashboardContextMetricsPath(): string {
+    return path.join(this.getDashboardDir(), "context-metrics.json");
+  }
+
+  private getDashboardServerInfoPath(): string {
+    return path.join(this.getDashboardDir(), "server.json");
+  }
+
+  private async writeContextMetrics(report: ContextBudgetReport, rawCharsSaved: number): Promise<void> {
+    const metricsPath = this.getDashboardContextMetricsPath();
+    const payload = {
+      updatedAt: new Date().toISOString(),
+      report,
+      rawCharsStored: this.turnArtifactCharsStored,
+      envelopeCharsSent: this.turnArtifactEnvelopeChars,
+      rawCharsSaved,
+      rawTokensSavedEstimate: Math.ceil(Math.max(0, rawCharsSaved) / 4),
+      toolCalls: this.turnToolCalls,
+      toolErrors: this.turnToolErrors
+    };
+    await fs.mkdir(path.dirname(metricsPath), { recursive: true });
+    await fs.writeFile(metricsPath, JSON.stringify(payload, null, 2), "utf8");
+  }
+
+  private async appendDashboardEvent(event: Record<string, unknown>): Promise<void> {
+    const eventsPath = this.getDashboardEventsPath();
+    await fs.mkdir(path.dirname(eventsPath), { recursive: true });
+    const existing = await fs.readFile(eventsPath, "utf8").catch(() => "[]");
+    let events: any[] = [];
+    try {
+      events = JSON.parse(existing);
+    } catch {
+      events = [];
+    }
+    events.unshift(event);
+    await fs.writeFile(eventsPath, JSON.stringify(events.slice(0, 200), null, 2), "utf8");
+  }
+
+  private async readDashboardServerInfo(): Promise<{ port: number; pid?: number; version?: string } | null> {
+    const raw = await fs.readFile(this.getDashboardServerInfoPath(), "utf8").catch(() => "");
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw) as { port?: number; pid?: number; version?: string };
+      return Number.isFinite(parsed.port) ? { port: Number(parsed.port), pid: parsed.pid, version: parsed.version } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async isDashboardReachable(port: number): Promise<boolean> {
+    return await new Promise((resolve) => {
+      const req = http.get({ host: "127.0.0.1", port, path: "/health", timeout: 700 }, (res) => {
+        res.resume();
+        resolve(res.statusCode === 200);
+      });
+      req.on("error", () => resolve(false));
+      req.on("timeout", () => {
+        req.destroy();
+        resolve(false);
+      });
+    });
+  }
+
+  private async startDashboardServer(dashboardDir: string): Promise<number> {
+    const child = spawn(
+      process.execPath,
+      [path.join(path.dirname(fileURLToPath(import.meta.url)), "dashboard-server.js"), this.config.agent.workspaceRoot],
+      { detached: true, stdio: "ignore" }
+    );
+    child.unref();
+
+    const infoPath = this.getDashboardServerInfoPath();
+    for (let attempt = 0; attempt < 40; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const info = await this.readDashboardServerInfo();
+      if (info?.port && await this.isDashboardReachable(info.port)) {
+        return info.port;
+      }
+    }
+    throw new Error(`Dashboard server did not start. Expected info at ${path.join(dashboardDir, "server.json")}`);
+  }
+
+  private openDashboardUrl(url: string): void {
+    const command = process.platform === "darwin"
+      ? { bin: "open", args: [url] }
+      : process.platform === "win32"
+        ? { bin: "cmd", args: ["/c", "start", "", url] }
+        : { bin: "xdg-open", args: [url] };
+    const opener = spawn(command.bin, command.args, { detached: true, stdio: "ignore" });
+    opener.unref();
   }
 
   private printCost(): void {
@@ -2388,6 +2758,11 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     let lastGhostText = "";
     this.ghostTextListener = (_: any, key: any) => {
       if (!this.useAnsi || !key) return;
+      if (key.ctrl && key.name === "o") {
+        this.toolEventsExpanded = !this.toolEventsExpanded;
+        output.write(pc.dim(`\ntool output: ${this.toolEventsExpanded ? "expanded" : "collapsed"}\n`));
+        return;
+      }
       if (key.name === "return" || key.name === "enter") return;
 
       // Handle Tab or Right arrow to complete the ghost text
@@ -2462,6 +2837,15 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
 
   private renderToolEvent(kind: "start" | "success" | "error", wireName: string, detail: string): void {
     this.lastToolEventAt = new Date().toISOString();
+    if (kind === "start") {
+      this.turnToolCalls += 1;
+      this.turnToolNames.set(wireName, (this.turnToolNames.get(wireName) ?? 0) + 1);
+    } else if (kind === "error") {
+      this.turnToolErrors += 1;
+    }
+    if (!this.toolEventsExpanded && kind !== "error") {
+      return;
+    }
     const label =
       kind === "start"
         ? pc.dim("tool>")
@@ -2469,6 +2853,41 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
           ? pc.green("tool<")
           : pc.red("tool<");
     output.write(`\n${label} ${pc.cyan(wireName)}${detail ? ` ${pc.dim(detail)}` : ""}\n`);
+  }
+
+  private resetToolSummary(): void {
+    this.turnToolCalls = 0;
+    this.turnToolErrors = 0;
+    this.turnToolNames.clear();
+    this.turnArtifactCharsStored = 0;
+    this.turnArtifactEnvelopeChars = 0;
+    this.turnContextReports = [];
+    this.lastContextReport = null;
+  }
+
+  private printToolSummary(): void {
+    if (this.turnToolCalls > 0) {
+      const names = Array.from(this.turnToolNames.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 4)
+        .map(([name, count]) => `${name}${count > 1 ? ` x${count}` : ""}`)
+        .join(", ");
+      const suffix = this.toolEventsExpanded ? "expanded" : "collapsed";
+      const errors = this.turnToolErrors > 0 ? ` · ${this.turnToolErrors} errors` : "";
+      output.write(pc.dim(`\ntools: ${this.turnToolCalls} calls · ${names}${errors} · ${suffix} (Ctrl+O)`));
+    }
+    const report = this.peakContextReport();
+    if (report) {
+      const saved = Math.max(0, this.turnArtifactCharsStored - this.turnArtifactEnvelopeChars);
+      output.write(pc.dim(`\ncontext est: ${formatTokenCount(report.totalTokens)}/${formatTokenCount(report.maxInputTokens)} · tools ${report.toolsOut}/${report.toolsIn} · messages ${report.messagesOut}/${report.messagesIn}${saved > 0 ? ` · raw saved ~${formatTokenCount(Math.ceil(saved / 4))} tok` : ""}`));
+      void this.writeContextMetrics(report, saved);
+    }
+    if (this.turnToolCalls > 0 || report) output.write("\n");
+  }
+
+  private peakContextReport(): ContextBudgetReport | null {
+    if (this.turnContextReports.length === 0) return this.lastContextReport;
+    return [...this.turnContextReports].sort((left, right) => right.totalTokens - left.totalTokens)[0] ?? null;
   }
 
   private printHelp(): void {
@@ -3298,22 +3717,22 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     const sections = [SYSTEM_PROMPT];
 
     if (this.gitStatusContext) {
-      sections.push(`\n[GIT REPOSITORY STATUS]\nCurrent branch: ${this.gitStatusContext}`);
+      sections.push(`\n[GIT REPOSITORY STATUS]\nCurrent branch: ${clampBlock(this.gitStatusContext, 1_200)}`);
     }
 
     // Inject Prefetched Capsules (predicted next files)
     if (this.prefetchQueue.length > 0) {
       sections.push("\n[PREDICTIVE CONTEXT PREFETCH]\nThe following file capsules were pre-loaded because they are highly likely to be relevant to your current task:");
       // Limit to 3 capsules to save tokens
-      sections.push(...this.prefetchQueue.slice(0, 3));
+      sections.push(...this.prefetchQueue.slice(0, 2).map((entry) => clampBlock(entry, 1_200)));
       this.prefetchQueue = []; // Clear after injection
     }
 
     try {
       const brainPath = path.join(this.config.agent.workspaceRoot, ".mesh", "project-brain.md");
-      const brain = require("node:fs").readFileSync(brainPath, "utf8");
+      const brain = readFileSync(brainPath, "utf8");
       if (brain) {
-        sections.push(`\n[FRACTAL PROJECT CONTEXT (Project Brain)]\nAdhere to these distilled architectural rules and conventions specific to this project:\n${brain}`);
+        sections.push(`\n[FRACTAL PROJECT CONTEXT (Project Brain)]\nAdhere to these distilled architectural rules and conventions specific to this project:\n${clampBlock(brain, 2_400)}`);
       }
     } catch {
       // No project brain exists yet
@@ -3324,26 +3743,17 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       sections.push(`Voice Language:\n${this.buildVoiceLanguageInstruction()}`);
     }
     if (this.localInstructions) {
-      sections.push(`\nLocal Project Instructions:\n${this.localInstructions}`);
+      sections.push(`\nLocal Project Instructions:\n${clampBlock(this.localInstructions, 2_400)}`);
     }
     if (this.workspaceContext) {
-      sections.push(this.workspaceContext);
-    }
-    if (this.sessionCapsule) {
-      sections.push(
-        [
-          "Session capsule:",
-          this.sessionCapsule.summary,
-          `Capsule metadata: generated_at=${this.sessionCapsule.generatedAt} source_messages=${this.sessionCapsule.sourceMessages} retained_messages=${this.sessionCapsule.retainedMessages}`
-        ].join("\n")
-      );
+      sections.push(clampBlock(this.workspaceContext, 1_200));
     }
     return sections.join("\n\n");
   }
 
   private async autoCompactIfNeeded(): Promise<string | null> {
-    const tokenThreshold = 60_000;
-    if (this.transcript.length < 15 && this.sessionTokens.inputTokens < tokenThreshold) {
+    const transcriptCharThreshold = 220_000;
+    if (this.transcript.length < 30 && this.estimateTranscriptChars() < transcriptCharThreshold) {
       return null;
     }
     return this.compactTranscript({ reason: "auto" });

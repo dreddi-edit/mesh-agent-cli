@@ -1,0 +1,6 @@
+# Die hooks werden hier korrekt als leere Sequence (Liste) definiert, 
+# damit der Parser nicht mehr abstürzt.
+hooks = []
+
+# Falls du später echte Befehle brauchst, sieht das so aus:
+# hooks = ["echo 'hello world'", "npm run build"]

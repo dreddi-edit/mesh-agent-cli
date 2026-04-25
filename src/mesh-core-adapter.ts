@@ -1,6 +1,6 @@
-import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 
 interface MeshCoreModule {
   estimateTextTokens?: (value: string) => number;
@@ -55,8 +55,8 @@ export class MeshCoreAdapter {
   private usedParserWorkerPool = false;
 
   constructor() {
-    const require = createRequire(import.meta.url);
     const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+    const nodeRequire = createRequire(import.meta.url);
     const candidates = [
       path.resolve(moduleDir, "./mesh-core/compression-core.cjs"), // When running from dist
       path.resolve(moduleDir, "../mesh-core/lib/compression-core.cjs"), // When running from source
@@ -69,7 +69,7 @@ export class MeshCoreAdapter {
 
       for (const candidate of candidates) {
         try {
-          loaded = require(candidate) as MeshCoreModule;
+          loaded = nodeRequire(candidate) as MeshCoreModule;
           break;
         } catch (error) {
           lastError = (error as Error).message;

@@ -1,4 +1,4 @@
-import { promises as fs, existsSync } from "node:fs";
+import { promises as fs, existsSync, watch, writeFileSync } from "node:fs";
 import path from "node:path";
 import { exec, spawn, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
@@ -67,6 +67,7 @@ import { TimelineManager } from "./timeline-manager.js";
 import { RuntimeObserver } from "./runtime-observer.js";
 import { AgentOs } from "./agent-os.js";
 import { captureFrontendPreview } from "./terminal-preview.js";
+import { openContextArtifact } from "./context-artifacts.js";
 
 const SKIP_DIRS = [".git", "node_modules", "dist", ".mesh"];
 
@@ -335,7 +336,7 @@ export class LocalToolBackend implements ToolBackend {
       // Non-recursive watch on key directories to avoid EMFILE limits, or just the src directory.
       // For a robust minimalist approach, we watch the root and immediate children.
       const srcPath = path.join(this.workspaceRoot, "src");
-      this.watcher = require("node:fs").watch(this.workspaceRoot, { recursive: true }, async (eventType: string, filename: string | null) => {
+      const watcher = watch(this.workspaceRoot, { recursive: true }, async (eventType: string, filename: string | null) => {
         if (!filename) return;
         if (filename.includes("node_modules") || filename.includes(".git") || filename.includes("dist")) return;
         if (!filename.match(/\.(ts|js|tsx|jsx|py|go|rs|cpp|c|h|java)$/)) return;
@@ -381,9 +382,8 @@ export class LocalToolBackend implements ToolBackend {
               }
 
               if (intentDetected) {
-                const fs = require("node:fs");
                 const intentPath = path.join(this.workspaceRoot, ".mesh", "latest_intent.json");
-                fs.writeFileSync(intentPath, JSON.stringify({ file: rel, message: intentMessage, diff: diffText }));
+                writeFileSync(intentPath, JSON.stringify({ file: rel, message: intentMessage, diff: diffText }));
                 process.stdout.write(`\\n\\x1b[36m[💡 Mesh Synthesis] Detected: ${intentMessage}. Type '/synthesize' to auto-generate full stack updates in a ghost branch.\\x1b[0m\\n❯ `);
               }
             }
@@ -429,8 +429,19 @@ export class LocalToolBackend implements ToolBackend {
           // File likely deleted, cache will naturally miss
         }
       });
+      watcher.on("error", () => {
+        try {
+          watcher.close();
+        } catch {
+          // Ignore shutdown errors
+        }
+        if (this.watcher === watcher) {
+          this.watcher = null;
+        }
+      });
+      this.watcher = watcher;
     } catch (e) {
-      // Fallback if recursive watch is not supported by the OS
+      this.watcher = null;
     }
   }
 
@@ -456,6 +467,19 @@ export class LocalToolBackend implements ToolBackend {
           properties: {
             path: { type: "string" },
             tier: { type: "string", enum: ["low", "medium", "high"], default: "medium" }
+          }
+        }
+      },
+      {
+        name: "workspace.open_artifact",
+        description: "Open a specific locally stored tool-result artifact by id. Use this only when an Artifact card lacks enough detail.",
+        inputSchema: {
+          type: "object",
+          required: ["id"],
+          properties: {
+            id: { type: "string" },
+            query: { type: "string", description: "Optional search terms to extract matching lines from the artifact." },
+            maxChars: { type: "number", description: "Maximum characters to return, default 4000." }
           }
         }
       },
@@ -1328,6 +1352,8 @@ export class LocalToolBackend implements ToolBackend {
         return this.listFiles(args);
       case "workspace.read_file":
         return this.readFile(args);
+      case "workspace.open_artifact":
+        return openContextArtifact(this.workspaceRoot, args);
       case "workspace.search_files":
         return this.searchFiles(args);
       case "workspace.check_sync":
