@@ -80,6 +80,7 @@ import { DAEMON_SOCKET_PATH, DaemonRequest, DaemonResponse } from "./daemon-prot
 import net from "node:net";
 import { IssuePipelineManager } from "./integrations/issues/manager.js";
 import { ChatopsManager } from "./integrations/chatops/manager.js";
+import { scoreSignal, TelemetryManager } from "./integrations/telemetry/manager.js";
 
 const SKIP_DIRS = [".git", "node_modules", "dist", ".mesh"];
 const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
@@ -355,6 +356,7 @@ export class LocalToolBackend implements ToolBackend {
   private readonly meshBrain: MeshBrainClient;
   private readonly issuePipeline: IssuePipelineManager;
   private readonly chatops: ChatopsManager;
+  private readonly telemetry: TelemetryManager;
 
   constructor(private readonly workspaceRoot: string, private readonly config?: AppConfig) {
     this.cache = new CacheManager(config ?? {
@@ -395,6 +397,7 @@ export class LocalToolBackend implements ToolBackend {
       intentCompile: async (intent: string) => this.intentCompile({ intent }),
       predictiveRepair: async () => this.predictiveRepair({ action: "analyze" })
     });
+    this.telemetry = new TelemetryManager(workspaceRoot);
     void this.bootstrapRepoDnaMemory();
     void this.agentOs.ensureDefaultDefinitions();
     void this.runtimeObserver.writeDefaultRunbooks();
@@ -1394,6 +1397,16 @@ export class LocalToolBackend implements ToolBackend {
         }
       },
       {
+        name: "workspace.production_status",
+        description: "Production awareness status fed by telemetry connectors (Sentry, Datadog, PostHog, OTel).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["refresh", "status"], default: "status" }
+          }
+        }
+      },
+      {
         name: "workspace.intent_compile",
         description: "Intent Compiler: turn product intent into a repo-grounded implementation contract with likely files, risks, tests, rollout, and verification steps.",
         inputSchema: {
@@ -1642,6 +1655,8 @@ export class LocalToolBackend implements ToolBackend {
           channel: typeof args.channel === "string" ? args.channel : "general",
           message: typeof args.message === "string" ? args.message : undefined
         });
+      case "workspace.production_status":
+        return this.productionStatus(args);
       case "workspace.intent_compile":
         return this.intentCompile(args);
       case "workspace.cockpit_snapshot":
@@ -2983,7 +2998,22 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
       : "architecture";
     const limit = Math.max(1, Math.min(Number(args.limit) || 8, 25));
     onProgress?.(`[Index] Querying persistent code index (${mode}) for "${query}"...\n`);
-    return this.workspaceIndex.search(query, mode, limit);
+    const result: any = await this.workspaceIndex.search(query, mode, limit);
+    const production = await this.telemetry.topSignals(50).catch(() => []);
+    const boosted = (result.results ?? []).map((entry: any) => {
+      const signal = production.find((item) => item.file === entry.file);
+      return {
+        ...entry,
+        productionBoost: signal
+          ? scoreSignal(signal)
+          : 0
+      };
+    }).sort((left: any, right: any) => (right.productionBoost ?? 0) - (left.productionBoost ?? 0));
+    return {
+      ...result,
+      results: boosted,
+      productionSignals: production.slice(0, 10)
+    };
   }
 
   private async explainSymbol(args: Record<string, unknown>): Promise<unknown> {
@@ -2993,11 +3023,27 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
   }
 
   private async impactMap(args: Record<string, unknown>): Promise<unknown> {
-    return this.workspaceIndex.impactMap({
+    const result: any = await this.workspaceIndex.impactMap({
       path: typeof args.path === "string" ? args.path : undefined,
       symbol: typeof args.symbol === "string" ? args.symbol : undefined,
       diff: typeof args.diff === "string" ? args.diff : undefined
     });
+    const production = await this.telemetry.topSignals(100).catch(() => []);
+    const byFile = new Map(production.map((signal) => [signal.file, signal]));
+    const ranked = (result.ranked ?? result.impact ?? []).map((entry: any) => {
+      const file = entry.path ?? entry.file;
+      const signal = byFile.get(file);
+      return {
+        ...entry,
+        revenueImpactDaily: signal?.revenueImpactDaily ?? 0,
+        requestVolume: signal?.requestVolume ?? 0,
+        errorRate: signal?.errorRate ?? 0
+      };
+    });
+    return {
+      ...result,
+      ranked
+    };
   }
 
   private async getGitDiff(args: Record<string, unknown>): Promise<unknown> {
@@ -3611,6 +3657,31 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
     return response;
   }
 
+  private async productionStatus(args: Record<string, unknown> = {}): Promise<unknown> {
+    const action = String(args.action ?? "status");
+    const state = action === "refresh"
+      ? await this.telemetry.refresh()
+      : await this.telemetry.status();
+    const top = [...state.signals]
+      .sort((left, right) => scoreSignal(right) - scoreSignal(left))
+      .slice(0, 10);
+    return {
+      ok: true,
+      action,
+      updatedAt: state.updatedAt,
+      totalSignals: state.signals.length,
+      topErrors: top.map((signal) => ({
+        file: signal.file,
+        route: signal.route,
+        errorRate: signal.errorRate,
+        requestVolume: signal.requestVolume,
+        p99Ms: signal.p99Ms,
+        revenueImpactDaily: signal.revenueImpactDaily,
+        score: scoreSignal(signal)
+      }))
+    };
+  }
+
   private async callDaemonSocket(request: DaemonRequest): Promise<DaemonResponse> {
     return new Promise((resolve) => {
       const socket = net.createConnection(DAEMON_SOCKET_PATH, () => {
@@ -3743,7 +3814,12 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
       errorSignature,
       limit: Math.max(1, Math.min(Number(args.limit) || 5, 5))
     }).catch(() => ({ ok: false, patterns: [], source: "local-fallback" as const }));
-    const referencedFiles = uniqueStrings(Array.from(outputText.matchAll(/([A-Za-z0-9_./-]+\.(?:ts|tsx|js|jsx|mjs|cjs))(?::(\d+))?/g)).map((match) => match[1]), 25);
+    const telemetryTop = await this.telemetry.topSignals(50).catch(() => []);
+    const telemetryScore = new Map<string, number>(
+      telemetryTop.map((signal) => [signal.file, scoreSignal(signal)])
+    );
+    const referencedFiles = uniqueStrings(Array.from(outputText.matchAll(/([A-Za-z0-9_./-]+\.(?:ts|tsx|js|jsx|mjs|cjs))(?::(\d+))?/g)).map((match) => match[1]), 25)
+      .sort((left, right) => (telemetryScore.get(right) ?? 0) - (telemetryScore.get(left) ?? 0));
     const dirtyFiles = await this.readDirtyFilesForMemory();
     const riskFiles = new Set((twinResult?.twin?.riskHotspots ?? []).map((entry: any) => entry.file));
     const queue = referencedFiles.length > 0 || !diagnostics.ok
@@ -3757,6 +3833,7 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
             ? "Diagnostics are currently clean; no repair candidate required."
             : "Diagnostics failed; prepare a timeline-first repair.",
           files: referencedFiles.length > 0 ? referencedFiles : dirtyFiles.slice(0, 10),
+          prioritizedByImpact: referencedFiles.filter((file) => telemetryScore.has(file)).slice(0, 10),
           riskFiles: referencedFiles.filter((file) => riskFiles.has(file)),
           diagnostics: outputText.slice(0, 8000),
           errorSignature,

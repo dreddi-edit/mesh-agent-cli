@@ -2536,6 +2536,26 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     }
   }
 
+  private async runProductionStatus(args: string[]): Promise<void> {
+    const action = (args[0] || "status").toLowerCase();
+    const spinner = ora({ text: `Production ${action}...`, color: "red" }).start();
+    try {
+      const result: any = await this.backend.callTool("workspace.production_status", { action });
+      spinner.succeed(pc.red(`Production ${action} complete.`));
+      output.write([
+        "",
+        `${pc.dim("updated:")} ${result.updatedAt ?? "never"}`,
+        `${pc.dim("signals:")} ${result.totalSignals ?? 0}`,
+        ...((result.topErrors ?? []).slice(0, 8).map((entry: any) =>
+          `${pc.red("•")} ${entry.file} req=${entry.requestVolume} err=${entry.errorRate} p99=${entry.p99Ms}ms impact=$${entry.revenueImpactDaily}/day`
+        )),
+        ""
+      ].join("\n"));
+    } catch (error) {
+      spinner.fail(pc.red(`Production telemetry failed: ${(error as Error).message}`));
+    }
+  }
+
   private async runMeshBrain(args: string[]): Promise<void> {
     const action = (args[0] || "stats").replace("-", "_");
     const spinner = ora({ text: `Mesh Brain ${action}...`, color: "blue" }).start();
@@ -3099,6 +3119,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       { name: "/daemon", usage: "/daemon [start|status|digest|stop]", description: "control Mesh background daemon mode" },
       { name: "/issues", usage: "/issues [scan|status] [provider]", description: "run issue-to-PR pipeline for GitHub/Linear/Jira tickets" },
       { name: "/chatops", usage: "/chatops [investigate|approve|status] [platform] [message|threadId]", description: "run Slack/Discord co-engineer investigation and approval flow" },
+      { name: "/production", usage: "/production [refresh|status]", description: "show production telemetry impact signals and top regressions" },
       { name: "/brain", usage: "/brain [stats|query <error>|opt-out]", description: "query Mesh Brain global fix patterns and telemetry contribution status" },
       { name: "/learn", usage: "/learn [read|learn]", description: "read or refresh Engineering Memory" },
       { name: "/intent", usage: "/intent <product intent>", description: "compile intent into an implementation contract" },
@@ -3145,7 +3166,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     const commandList = [
       "/help", "/status", "/index", "/dashboard", "/sync", "/setup", "/clear",
       "/model", "/cost", "/compact", "/capsule", "/memory", "/approvals", "/steps", "/undo",
-      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/daemon", "/issues", "/chatops", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/preview", "/fix"
+      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/daemon", "/issues", "/chatops", "/production", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/preview", "/fix"
     ];
     // Priority 1: Exact match
     let command = inputCmd;
@@ -3215,6 +3236,9 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
         return { wasHandled: true, shouldExit: false };
       case "/chatops":
         await this.runChatops(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/production":
+        await this.runProductionStatus(args);
         return { wasHandled: true, shouldExit: false };
       case "/brain":
         await this.runMeshBrain(args);
