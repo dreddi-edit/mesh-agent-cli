@@ -78,6 +78,7 @@ import { MeshBrainClient, normalizeDiffPattern, normalizeErrorSignature, RepoDna
 import { runDaemonCli } from "./daemon.js";
 import { DAEMON_SOCKET_PATH, DaemonRequest, DaemonResponse } from "./daemon-protocol.js";
 import net from "node:net";
+import { IssuePipelineManager } from "./integrations/issues/manager.js";
 
 const SKIP_DIRS = [".git", "node_modules", "dist", ".mesh"];
 const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
@@ -351,6 +352,7 @@ export class LocalToolBackend implements ToolBackend {
   private readonly runtimeObserver: RuntimeObserver;
   private readonly agentOs: AgentOs;
   private readonly meshBrain: MeshBrainClient;
+  private readonly issuePipeline: IssuePipelineManager;
 
   constructor(private readonly workspaceRoot: string, private readonly config?: AppConfig) {
     this.cache = new CacheManager(config ?? {
@@ -382,6 +384,10 @@ export class LocalToolBackend implements ToolBackend {
       workspaceRoot,
       telemetryContribute: Boolean(config?.telemetry?.contribute),
       endpoint: config?.telemetry?.meshBrainEndpoint
+    });
+    this.issuePipeline = new IssuePipelineManager(workspaceRoot, {
+      intentCompile: async (intent: string) => this.intentCompile({ intent }),
+      impactMap: async (query: string) => this.impactMap({ symbol: query })
     });
     void this.bootstrapRepoDnaMemory();
     void this.agentOs.ensureDefaultDefinitions();
@@ -1357,6 +1363,18 @@ export class LocalToolBackend implements ToolBackend {
         }
       },
       {
+        name: "workspace.issue_pipeline",
+        description: "Issue-to-PR pipeline for GitHub, Linear, and Jira. Scans tagged issues and drafts PR payloads with repo-grounded intent and impact.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["scan", "status"], default: "scan" },
+            provider: { type: "string", enum: ["github", "linear", "jira"] },
+            issueId: { type: "string" }
+          }
+        }
+      },
+      {
         name: "workspace.intent_compile",
         description: "Intent Compiler: turn product intent into a repo-grounded implementation contract with likely files, risks, tests, rollout, and verification steps.",
         inputSchema: {
@@ -1592,6 +1610,12 @@ export class LocalToolBackend implements ToolBackend {
         return this.meshBrainTool(args);
       case "workspace.daemon":
         return this.daemonControl(args);
+      case "workspace.issue_pipeline":
+        return this.issuePipeline.run({
+          action: typeof args.action === "string" ? args.action : "scan",
+          provider: typeof args.provider === "string" ? args.provider : undefined,
+          issueId: typeof args.issueId === "string" ? args.issueId : undefined
+        });
       case "workspace.intent_compile":
         return this.intentCompile(args);
       case "workspace.cockpit_snapshot":

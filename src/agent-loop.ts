@@ -2488,6 +2488,27 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     }
   }
 
+  private async runIssuePipeline(args: string[]): Promise<void> {
+    const action = (args[0] || "scan").toLowerCase();
+    const provider = args[1]?.toLowerCase();
+    const spinner = ora({ text: `Issue pipeline ${action}...`, color: "yellow" }).start();
+    try {
+      const result: any = await this.backend.callTool("workspace.issue_pipeline", { action, provider });
+      spinner.succeed(pc.yellow(`Issue pipeline ${action} complete.`));
+      output.write([
+        "",
+        `${pc.dim("queued:")} ${result.queued ?? 0}`,
+        `${pc.dim("processed:")} ${(result.processed ?? []).length}`,
+        ...((result.processed ?? []).slice(0, 5).map((item: any) =>
+          `${pc.yellow("•")} ${item.provider}:${item.issueId} -> ${item.prTitle}`
+        )),
+        ""
+      ].join("\n"));
+    } catch (error) {
+      spinner.fail(pc.red(`Issue pipeline failed: ${(error as Error).message}`));
+    }
+  }
+
   private async runMeshBrain(args: string[]): Promise<void> {
     const action = (args[0] || "stats").replace("-", "_");
     const spinner = ora({ text: `Mesh Brain ${action}...`, color: "blue" }).start();
@@ -3049,6 +3070,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       { name: "/twin", usage: "/twin [build|read|status]", description: "build or inspect the Codebase Digital Twin" },
       { name: "/repair", usage: "/repair [analyze|status|clear]", description: "inspect the Predictive Repair Daemon queue" },
       { name: "/daemon", usage: "/daemon [start|status|digest|stop]", description: "control Mesh background daemon mode" },
+      { name: "/issues", usage: "/issues [scan|status] [provider]", description: "run issue-to-PR pipeline for GitHub/Linear/Jira tickets" },
       { name: "/brain", usage: "/brain [stats|query <error>|opt-out]", description: "query Mesh Brain global fix patterns and telemetry contribution status" },
       { name: "/learn", usage: "/learn [read|learn]", description: "read or refresh Engineering Memory" },
       { name: "/intent", usage: "/intent <product intent>", description: "compile intent into an implementation contract" },
@@ -3095,7 +3117,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     const commandList = [
       "/help", "/status", "/index", "/dashboard", "/sync", "/setup", "/clear",
       "/model", "/cost", "/compact", "/capsule", "/memory", "/approvals", "/steps", "/undo",
-      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/daemon", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/preview", "/fix"
+      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/daemon", "/issues", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/preview", "/fix"
     ];
     // Priority 1: Exact match
     let command = inputCmd;
@@ -3159,6 +3181,9 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
         return { wasHandled: true, shouldExit: false };
       case "/daemon":
         await this.runDaemon(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/issues":
+        await this.runIssuePipeline(args);
         return { wasHandled: true, shouldExit: false };
       case "/brain":
         await this.runMeshBrain(args);
