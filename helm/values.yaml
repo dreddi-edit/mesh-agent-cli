@@ -1,0 +1,27 @@
+mesh:
+  image: node:20
+  command:
+    - npm
+    - run
+    - dev
+    - --
+    - daemon
+    - start
+
+brain:
+  image: node:20
+  command:
+    - npm
+    - run
+    - dev
+
+postgres:
+  image: postgres:16
+  storage: 20Gi
+
+minio:
+  image: minio/minio:latest
+  storage: 50Gi
+
+license:
+  key: ""

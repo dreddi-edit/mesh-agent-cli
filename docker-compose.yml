@@ -1,0 +1,54 @@
+version: "3.9"
+
+services:
+  mesh-cli:
+    image: node:20
+    working_dir: /app
+    volumes:
+      - ./:/app
+    command: ["npm", "run", "dev", "--", "daemon", "start"]
+    environment:
+      - WORKSPACE_ROOT=/app
+      - MESH_LICENSE_KEY=${MESH_LICENSE_KEY:-}
+      - BEDROCK_ENDPOINT=${BEDROCK_ENDPOINT:-}
+    depends_on:
+      - postgres
+      - minio
+
+  brain:
+    image: node:20
+    working_dir: /app
+    volumes:
+      - ./:/app
+    command: ["npm", "run", "dev"]
+    environment:
+      - WORKSPACE_ROOT=/app
+      - BRAIN_FEDERATION_MODE=private
+      - MESH_LICENSE_KEY=${MESH_LICENSE_KEY:-}
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: mesh
+      POSTGRES_USER: mesh
+      POSTGRES_PASSWORD: mesh
+    volumes:
+      - mesh-postgres:/var/lib/postgresql/data
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: mesh
+      MINIO_ROOT_PASSWORD: meshmesh
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - mesh-minio:/data
+
+volumes:
+  mesh-postgres:
+  mesh-minio:

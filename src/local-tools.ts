@@ -89,6 +89,7 @@ import { runRedTeam } from "./agents/redteam.js";
 import { TsCompilerRefactor } from "./refactor/ts-compiler.js";
 import { PropertyTestGenerator } from "./quality/property-tests.js";
 import { SmtEdgeCaseFinder } from "./quality/smt.js";
+import { AuditLogger } from "./audit/logger.js";
 
 const SKIP_DIRS = [".git", "node_modules", "dist", ".mesh"];
 const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
@@ -392,6 +393,7 @@ export class LocalToolBackend implements ToolBackend {
   private readonly tsRefactor: TsCompilerRefactor;
   private readonly propertyTests: PropertyTestGenerator;
   private readonly smtFinder: SmtEdgeCaseFinder;
+  private readonly audit: AuditLogger;
 
   constructor(private readonly workspaceRoot: string, private readonly config?: AppConfig) {
     this.cache = new CacheManager(config ?? {
@@ -439,6 +441,7 @@ export class LocalToolBackend implements ToolBackend {
     this.tsRefactor = new TsCompilerRefactor(workspaceRoot);
     this.propertyTests = new PropertyTestGenerator(workspaceRoot);
     this.smtFinder = new SmtEdgeCaseFinder(workspaceRoot);
+    this.audit = new AuditLogger(workspaceRoot);
     void this.bootstrapRepoDnaMemory();
     void this.agentOs.ensureDefaultDefinitions();
     void this.runtimeObserver.writeDefaultRunbooks();
@@ -1158,6 +1161,17 @@ export class LocalToolBackend implements ToolBackend {
         }
       },
       {
+        name: "workspace.audit",
+        description: "Enterprise audit trail utilities: replay and verify cryptographic hash-chain integrity.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["replay", "verify"], default: "verify" },
+            limit: { type: "number", default: 200 }
+          }
+        }
+      },
+      {
         name: "workspace.semantic_undo",
         description: "Non-Linear Chrono-Untangling: Revert a specific past concept or feature implementation without breaking more recent changes. Uses AST graph theory to safely de-merge old logic.",
         requiresApproval: true,
@@ -1635,6 +1649,7 @@ export class LocalToolBackend implements ToolBackend {
   }
 
   async callTool(name: string, args: Record<string, unknown>, opts?: ToolCallOpts): Promise<unknown> {
+    void this.audit.append(name, args, { pending: true }).catch(() => undefined);
     switch (name) {
       case "workspace.list_files":
         return this.listFiles(args);
@@ -1721,6 +1736,8 @@ export class LocalToolBackend implements ToolBackend {
           path: String(args.path ?? ""),
           functionName: typeof args.functionName === "string" ? args.functionName : undefined
         });
+      case "workspace.audit":
+        return this.auditTool(args);
       case "workspace.semantic_undo":
         return this.semanticUndo(args, opts?.onProgress);
       case "workspace.undo":
@@ -2635,6 +2652,17 @@ export class LocalToolBackend implements ToolBackend {
       await fs.writeFile(toAbs, toOriginal, "utf8");
       return { ok: false, error: (error as Error).message };
     }
+  }
+
+  private async auditTool(args: Record<string, unknown>): Promise<unknown> {
+    const action = String(args.action ?? "verify");
+    if (action === "replay") {
+      const limit = Math.max(1, Math.min(Number(args.limit) || 200, 2000));
+      const entries = await this.audit.replay(limit);
+      return { ok: true, action, entries };
+    }
+    const verification = await this.audit.verify();
+    return { action: "verify", ...verification };
   }
 
   private async verifyTypecheckOrRollback(

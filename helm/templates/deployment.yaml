@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mesh-cli
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mesh-cli
+  template:
+    metadata:
+      labels:
+        app: mesh-cli
+    spec:
+      containers:
+        - name: mesh-cli
+          image: {{ .Values.mesh.image }}
+          command: {{ toJson .Values.mesh.command }}
+          env:
+            - name: MESH_LICENSE_KEY
+              value: {{ .Values.license.key | quote }}

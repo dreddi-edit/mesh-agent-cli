@@ -2639,6 +2639,33 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     }
   }
 
+  private async runAudit(args: string[]): Promise<void> {
+    const action = (args[0] || "verify").toLowerCase();
+    const spinner = ora({ text: `Audit ${action}...`, color: "yellow" }).start();
+    try {
+      const result: any = await this.backend.callTool("workspace.audit", { action });
+      spinner.succeed(pc.yellow(`Audit ${action} complete.`));
+      if (action === "replay") {
+        output.write([
+          "",
+          `${pc.dim("entries:")} ${(result.entries ?? []).length}`,
+          ...((result.entries ?? []).slice(0, 5).map((entry: any) => `${pc.yellow("•")} ${entry.ts} ${entry.tool}`)),
+          ""
+        ].join("\n"));
+        return;
+      }
+      output.write([
+        "",
+        `${pc.dim("ok:")} ${result.ok ? pc.green("yes") : pc.red("no")}`,
+        `${pc.dim("total:")} ${result.total ?? 0}`,
+        `${pc.dim("invalid:")} ${result.invalid ?? 0}`,
+        ""
+      ].join("\n"));
+    } catch (error) {
+      spinner.fail(pc.red(`Audit command failed: ${(error as Error).message}`));
+    }
+  }
+
   private async runMeshBrain(args: string[]): Promise<void> {
     const action = (args[0] || "stats").replace("-", "_");
     const spinner = ora({ text: `Mesh Brain ${action}...`, color: "blue" }).start();
@@ -3206,6 +3233,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       { name: "/replay", usage: "/replay <traceId|sentryEventId> [commitRange]", description: "replay a production trace and detect divergence/introducing commit" },
       { name: "/bisect", usage: "/bisect <symptom> [verificationCommand]", description: "autonomous symptom bisect over commit history" },
       { name: "/whatif", usage: "/whatif <hypothesis>", description: "run a counterfactual migration analysis in isolated timeline" },
+      { name: "/audit", usage: "/audit [verify|replay]", description: "verify or replay enterprise audit trail entries" },
       { name: "/brain", usage: "/brain [stats|query <error>|opt-out]", description: "query Mesh Brain global fix patterns and telemetry contribution status" },
       { name: "/learn", usage: "/learn [read|learn]", description: "read or refresh Engineering Memory" },
       { name: "/intent", usage: "/intent <product intent>", description: "compile intent into an implementation contract" },
@@ -3252,7 +3280,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     const commandList = [
       "/help", "/status", "/index", "/dashboard", "/sync", "/setup", "/clear",
       "/model", "/cost", "/compact", "/capsule", "/memory", "/approvals", "/steps", "/undo",
-      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/daemon", "/issues", "/chatops", "/production", "/replay", "/bisect", "/whatif", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/preview", "/fix"
+      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/daemon", "/issues", "/chatops", "/production", "/replay", "/bisect", "/whatif", "/audit", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/preview", "/fix"
     ];
     // Priority 1: Exact match
     let command = inputCmd;
@@ -3334,6 +3362,9 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
         return { wasHandled: true, shouldExit: false };
       case "/whatif":
         await this.runWhatIf(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/audit":
+        await this.runAudit(args);
         return { wasHandled: true, shouldExit: false };
       case "/brain":
         await this.runMeshBrain(args);
