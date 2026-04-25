@@ -31,6 +31,18 @@ export interface BrainContribution {
   };
 }
 
+export interface RepoDnaFingerprint {
+  framework: string;
+  frameworkVersion: string;
+  orm: string;
+  testRunner: string;
+  deployTarget: string;
+  monorepoTool: string;
+  cssStrategy: string;
+  language: string;
+  packageManager: string;
+}
+
 interface BrainConfig {
   telemetryContribute: boolean;
   endpoint?: string;
@@ -123,6 +135,37 @@ export class MeshBrainClient {
     return { ok: true, patterns: local, source: "local-fallback" };
   }
 
+  async queryDnaCohort(args: { dna: RepoDnaFingerprint; threshold?: number }): Promise<{
+    ok: boolean;
+    source: "remote" | "local-fallback";
+    cohort: Array<{ similarity: number; rules: string[] }>;
+  }> {
+    if (this.endpoint) {
+      try {
+        const response = await fetch(`${this.endpoint.replace(/\/$/, "")}/brain/dna/query`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            dna: args.dna,
+            threshold: args.threshold ?? 0.85
+          })
+        });
+        if (response.ok) {
+          const payload = await response.json() as { cohort?: Array<{ similarity: number; rules: string[] }> };
+          return { ok: true, source: "remote", cohort: payload.cohort ?? [] };
+        }
+      } catch {
+        // fallback
+      }
+    }
+    const localRules = inferLocalCohortRules(args.dna);
+    return {
+      ok: true,
+      source: "local-fallback",
+      cohort: localRules.length > 0 ? [{ similarity: 0.9, rules: localRules }] : []
+    };
+  }
+
   async contribute(payload: BrainContribution): Promise<{ ok: boolean; contributed: boolean; reason?: string }> {
     const state = await this.readState();
     if (!state.telemetryContribute || !this.telemetryContribute) {
@@ -198,4 +241,22 @@ function similarity(left: string, right: string): number {
     if (b.has(token)) intersect += 1;
   }
   return intersect / Math.sqrt(a.size * b.size);
+}
+
+function inferLocalCohortRules(dna: RepoDnaFingerprint): string[] {
+  const rules: string[] = [];
+  if (dna.framework === "next" || dna.framework === "react") {
+    rules.push("Use zod for boundary validation and schema-based parsing.");
+    rules.push("Keep tests next to source files for component-heavy modules.");
+  }
+  if (dna.language === "typescript") {
+    rules.push("Prefer strict type guards instead of widening with any.");
+  }
+  if (dna.testRunner === "vitest" || dna.testRunner === "jest") {
+    rules.push("Mock external HTTP/DB boundaries in unit tests; reserve integration tests for behavior contracts.");
+  }
+  if (dna.cssStrategy === "tailwindcss") {
+    rules.push("Favor utility composition and avoid bespoke CSS unless shared design tokens are required.");
+  }
+  return rules;
 }

@@ -74,7 +74,7 @@ import { RuntimeObserver } from "./runtime-observer.js";
 import { AgentOs } from "./agent-os.js";
 import { captureFrontendPreview } from "./terminal-preview.js";
 import { openContextArtifact } from "./context-artifacts.js";
-import { MeshBrainClient, normalizeDiffPattern, normalizeErrorSignature } from "./mesh-brain.js";
+import { MeshBrainClient, normalizeDiffPattern, normalizeErrorSignature, RepoDnaFingerprint } from "./mesh-brain.js";
 
 const SKIP_DIRS = [".git", "node_modules", "dist", ".mesh"];
 const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
@@ -165,6 +165,32 @@ async function writeJsonFile(filePath: string, value: unknown): Promise<void> {
 
 function uniqueStrings(values: Array<string | undefined | null>, limit = 100): string[] {
   return Array.from(new Set(values.filter((value): value is string => Boolean(value && value.trim())))).slice(0, limit);
+}
+
+function pickFirstMatch(source: Record<string, unknown>, keys: string[], fallback: string): string {
+  const found = keys.find((key) => Object.keys(source).some((sourceKey) => sourceKey.toLowerCase().includes(key)));
+  return found ?? fallback;
+}
+
+function aggregateCohortRules(
+  cohort: Array<{ similarity: number; rules: string[] }>,
+  threshold: number
+): string[] {
+  if (!Array.isArray(cohort) || cohort.length === 0) return [];
+  const counts = new Map<string, number>();
+  for (const entry of cohort) {
+    for (const rule of entry.rules ?? []) {
+      const normalized = String(rule).trim();
+      if (!normalized) continue;
+      counts.set(normalized, (counts.get(normalized) ?? 0) + 1);
+    }
+  }
+  const minCount = Math.max(1, Math.ceil(cohort.length * threshold));
+  return Array.from(counts.entries())
+    .filter(([, count]) => count >= minCount)
+    .sort((left, right) => right[1] - left[1])
+    .map(([rule]) => rule)
+    .slice(0, 25);
 }
 
 function extractRouteHints(raw: string): Array<{ method: string; route: string; line: number }> {
@@ -354,6 +380,7 @@ export class LocalToolBackend implements ToolBackend {
       telemetryContribute: Boolean(config?.telemetry?.contribute),
       endpoint: config?.telemetry?.meshBrainEndpoint
     });
+    void this.bootstrapRepoDnaMemory();
     void this.agentOs.ensureDefaultDefinitions();
     void this.runtimeObserver.writeDefaultRunbooks();
     this.startWatcher();
@@ -3511,6 +3538,75 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
       .update(path.resolve(this.workspaceRoot))
       .digest("hex")
       .slice(0, 24);
+  }
+
+  private async bootstrapRepoDnaMemory(): Promise<void> {
+    try {
+      const memoryResult: any = await this.engineeringMemory({ action: "read" });
+      const existingRules = Array.isArray(memoryResult?.memory?.rules) ? memoryResult.memory.rules : [];
+      if (existingRules.some((rule: string) => rule.includes("[dna-cohort]"))) {
+        return;
+      }
+
+      const twinResult: any = await this.digitalTwin({ action: "build" });
+      const dna = this.computeRepoDna(twinResult?.twin ?? {});
+      const cohort = await this.meshBrain.queryDnaCohort({ dna, threshold: 0.85 });
+      const candidateRules = aggregateCohortRules(cohort.cohort ?? [], 0.3);
+      if (candidateRules.length === 0) {
+        return;
+      }
+
+      const taggedRules = candidateRules.map((rule) => `[dna-cohort] ${rule}`);
+      const merged = uniqueStrings([...taggedRules, ...existingRules], 200);
+      const memoryPath = this.meshArtifactPath("engineering-memory.json");
+      const memory = (memoryResult?.memory ?? {}) as Record<string, any>;
+      memory.rules = merged;
+      memory.updatedAt = new Date().toISOString();
+      memory.events = Array.isArray(memory.events) ? memory.events : [];
+      memory.events.unshift({
+        id: `dna-${Date.now().toString(36)}`,
+        at: memory.updatedAt,
+        outcome: "neutral",
+        note: "Preloaded rules from Mesh Brain DNA cohort.",
+        source: "dna-cohort",
+        dna,
+        files: []
+      });
+      memory.events = memory.events.slice(0, 100);
+      await writeJsonFile(memoryPath, {
+        schemaVersion: 1,
+        reviewerPreferences: [],
+        acceptedPatterns: [],
+        rejectedPatterns: [],
+        riskModules: [],
+        ...memory
+      });
+    } catch {
+      // Best-effort cold-start improvement. Never fail backend construction.
+    }
+  }
+
+  private computeRepoDna(twin: Record<string, any>): RepoDnaFingerprint {
+    const pkg = twin?.package ?? {};
+    const deps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) } as Record<string, string>;
+    const scripts = pkg.scripts ?? {};
+    const deployConfigs = Array.isArray(twin?.deploy?.configs) ? twin.deploy.configs.join(" ").toLowerCase() : "";
+    const packageManager = existsSync(path.join(this.workspaceRoot, "pnpm-lock.yaml"))
+      ? "pnpm"
+      : existsSync(path.join(this.workspaceRoot, "yarn.lock"))
+        ? "yarn"
+        : "npm";
+    return {
+      framework: pickFirstMatch(deps, ["next", "react", "vue", "svelte", "express", "fastify", "nestjs"], "unknown"),
+      frameworkVersion: deps.next || deps.react || deps.vue || deps.svelte || deps.express || "unknown",
+      orm: pickFirstMatch(deps, ["prisma", "typeorm", "sequelize", "drizzle-orm", "mongoose"], "none"),
+      testRunner: pickFirstMatch({ ...deps, ...scripts }, ["vitest", "jest", "mocha", "playwright", "cypress"], "node:test"),
+      deployTarget: /vercel/.test(deployConfigs) ? "vercel" : /render/.test(deployConfigs) ? "render" : /docker/.test(deployConfigs) ? "docker" : "unknown",
+      monorepoTool: pickFirstMatch(deps, ["turbo", "nx", "lerna", "pnpm-workspace"], "none"),
+      cssStrategy: pickFirstMatch(deps, ["tailwindcss", "styled-components", "sass", "emotion"], "plain-css"),
+      language: Array.isArray(twin?.files?.topExtensions) && twin.files.topExtensions.some((ext: string) => ext === ".ts" || ext === ".tsx") ? "typescript" : "javascript",
+      packageManager
+    };
   }
 
   private async predictiveRepair(args: Record<string, unknown> = {}, onProgress?: (chunk: string) => void): Promise<unknown> {

@@ -7,6 +7,7 @@ type BrainPattern = {
 };
 
 const memory = new Map<string, BrainPattern[]>();
+const dnaMemory: Array<{ dna: Record<string, string>; rules: string[] }> = [];
 
 export async function handleBrainRequest(request: Request): Promise<Response | null> {
   const url = new URL(request.url);
@@ -54,6 +55,24 @@ export async function handleBrainRequest(request: Request): Promise<Response | n
     });
   }
 
+  if (request.method === "POST" && url.pathname === "/brain/dna/query") {
+    const payload = await request.json() as {
+      dna?: Record<string, string>;
+      threshold?: number;
+    };
+    const dna = payload.dna ?? {};
+    const threshold = Number(payload.threshold) || 0.85;
+    const cohort = dnaMemory
+      .map((entry) => ({
+        similarity: dnaSimilarity(entry.dna, dna),
+        rules: entry.rules
+      }))
+      .filter((entry) => entry.similarity >= threshold)
+      .sort((left, right) => right.similarity - left.similarity)
+      .slice(0, 25);
+    return json({ ok: true, cohort });
+  }
+
   return null;
 }
 
@@ -65,4 +84,16 @@ function json(body: unknown, status = 200): Response {
       "access-control-allow-origin": "*"
     }
   });
+}
+
+function dnaSimilarity(left: Record<string, string>, right: Record<string, string>): number {
+  const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
+  if (keys.size === 0) return 0;
+  let matches = 0;
+  for (const key of keys) {
+    if ((left[key] ?? "") === (right[key] ?? "")) {
+      matches += 1;
+    }
+  }
+  return matches / keys.size;
 }
