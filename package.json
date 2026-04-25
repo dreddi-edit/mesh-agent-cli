@@ -1,6 +1,6 @@
 {
   "name": "@edgarelmo/mesh-agent-cli",
-  "version": "0.2.88",
+  "version": "0.2.89",
   "private": false,
   "type": "module",
   "description": "Mesh terminal agent CLI. Zero-config: ships with a shared Mesh LLM proxy so no AWS credentials are needed.",
@@ -23,8 +23,10 @@
     "postinstall": "node scripts/postinstall.cjs"
   },
   "files": [
+    "assets",
     "dist",
     "scripts",
+    "LICENSE",
     "README.md"
   ],
   "publishConfig": {

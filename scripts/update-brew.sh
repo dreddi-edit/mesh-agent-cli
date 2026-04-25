@@ -30,7 +30,9 @@ class MeshAgentCli < Formula
   homepage "https://github.com/dreddi-edit/mesh-agent-cli"
   url "$TARBALL_URL"
   sha256 "$SHA256"
-  license "MIT"
+  # The npm package is UNLICENSED/all rights reserved. Homebrew uses
+  # :cannot_represent when no supported SPDX license applies.
+  license :cannot_represent
 
   depends_on "node"
 
