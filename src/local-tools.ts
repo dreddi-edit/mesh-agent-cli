@@ -23,7 +23,7 @@ class VectorManager {
     this.isDownloading = true;
     try {
       // Use dynamic require to bypass build-time check of missing peer dependency
-      const { pipeline: transformersPipeline } = await (eval('import("@xenova/transformers")') as any).catch(() => ({ pipeline: null }));
+      const { pipeline: transformersPipeline } = await (new Function('return import("@xenova/transformers")')() as any).catch(() => ({ pipeline: null }));
       if (!transformersPipeline) {
         throw new Error("transformers_not_installed");
       }

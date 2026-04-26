@@ -1,7 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import readline from "node:readline/promises";
+import pkg from "enquirer";
+const { prompt } = pkg;
 import { createClient, SupabaseClient, Session } from "@supabase/supabase-js";
 import pc from "picocolors";
 import keytar from "keytar";
@@ -63,8 +64,6 @@ export class AuthManager {
   }
 
   private async promptLogin(): Promise<MeshUser> {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    
     process.stdout.write(
       [
         "",
@@ -76,10 +75,12 @@ export class AuthManager {
     let user: MeshUser | null = null;
 
     while (!user) {
-      const email = (await rl.question(pc.dim("email: "))).trim();
-      const password = (await rl.question(pc.dim("password: "))).trim();
+      const { email, password } = await prompt<{email: string, password: string}>([
+        { type: "input", name: "email", message: pc.dim("email: ") },
+        { type: "password", name: "password", message: pc.dim("password: ") }
+      ]);
 
-      const { data, error } = await this.supabase.auth.signInWithPassword({ email, password });
+      const { data, error } = await this.supabase.auth.signInWithPassword({ email: email.trim(), password: password.trim() });
 
       if (error || !data.session || !data.user) {
         process.stdout.write(pc.red(`\n  ✗ ${error?.message ?? "Login failed. Please try again."}\n\n`));
@@ -91,7 +92,6 @@ export class AuthManager {
       user = { email: data.user.email!, id: data.user.id };
     }
 
-    rl.close();
     process.stdout.write(pc.green(`\n  ✓ Signed in as ${user.email}\n\n`));
     return user;
   }

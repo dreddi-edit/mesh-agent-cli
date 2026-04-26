@@ -53,8 +53,12 @@ const DESTRUCTIVE_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
 
 export function analyzeCommandSafety(command: string): CommandSafetyResult {
   const normalized = command.trim();
+  
+  // Strip quotes and backslashes to catch string splitting obfuscation (e.g. c"a"t)
+  const deobfuscated = normalized.replace(/['"\\]/g, "");
+
   for (const entry of DESTRUCTIVE_PATTERNS) {
-    if (entry.pattern.test(normalized)) {
+    if (entry.pattern.test(normalized) || entry.pattern.test(deobfuscated)) {
       return {
         ok: false,
         reason: entry.reason,
@@ -62,6 +66,18 @@ export function analyzeCommandSafety(command: string): CommandSafetyResult {
       };
     }
   }
+
+  // Block common shell obfuscation / dynamic execution techniques
+  if (/(?:^|\|\s*|\&\&\s*|;\s*)(?:eval|exec)\s+/i.test(normalized)) {
+    return { ok: false, reason: "dynamic evaluation (eval/exec) blocked" };
+  }
+  if (/\|\s*base64\s+(?:-d|--decode)\s*\|\s*(?:sh|bash|zsh)/i.test(normalized)) {
+    return { ok: false, reason: "base64 payload execution blocked" };
+  }
+  if (/\b(?:sh|bash|zsh)\s+-c\s+["']?\$/i.test(normalized)) {
+    return { ok: false, reason: "dynamic shell execution blocked" };
+  }
+
   return { ok: true };
 }
 
