@@ -68,8 +68,7 @@ export class LivingSoftwareEngine {
 
     if (verifyRes.ok) {
       await this.callTool("workspace.timeline_promote", {
-        timelineId,
-        mergeStrategy: "squash"
+        timelineId
       });
       return {
         ok: true,

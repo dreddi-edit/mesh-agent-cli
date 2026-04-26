@@ -105,6 +105,10 @@ import { FluidMeshEngine } from "./moonshots/fluid-mesh.js";
 import { LivingSoftwareEngine } from "./moonshots/living-software.js";
 import { ProofCarryingChangeEngine } from "./moonshots/proof-carrying-change.js";
 import { CausalAutopsyEngine } from "./moonshots/causal-autopsy.js";
+import { TodoResolverEngine } from "./moonshots/todo-resolver.js";
+import { LiveWireEngine } from "./moonshots/live-wire.js";
+import { SchrodingersAstEngine } from "./moonshots/schrodingers-ast.js";
+import { HiveMindEngine } from "./moonshots/hive-mind.js";
 
 const SKIP_DIRS = [".git", "node_modules", "dist", ".mesh"];
 const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
@@ -424,6 +428,9 @@ export class LocalToolBackend implements ToolBackend {
   private readonly proofCarryingChange: ProofCarryingChangeEngine;
   private readonly causalAutopsy: CausalAutopsyEngine;
   private readonly todoResolver: TodoResolverEngine;
+  private readonly liveWire: LiveWireEngine;
+  private readonly schrodingersAst: SchrodingersAstEngine;
+  private readonly hiveMind: HiveMindEngine;
 
   constructor(private readonly workspaceRoot: string, private readonly config?: AppConfig) {
     this.cache = new CacheManager(config ?? {
@@ -485,6 +492,10 @@ export class LocalToolBackend implements ToolBackend {
     this.livingSoftware = new LivingSoftwareEngine(workspaceRoot, (name, args) => this.callTool(name, args));
     this.proofCarryingChange = new ProofCarryingChangeEngine(workspaceRoot);
     this.causalAutopsy = new CausalAutopsyEngine(workspaceRoot);
+    this.todoResolver = new TodoResolverEngine(workspaceRoot, (name, args) => this.callTool(name, args));
+    this.liveWire = new LiveWireEngine(workspaceRoot);
+    this.schrodingersAst = new SchrodingersAstEngine(workspaceRoot);
+    this.hiveMind = new HiveMindEngine(workspaceRoot);
     this.startupTasks.push(
       this.bootstrapRepoDnaMemory(),
       this.agentOs.ensureDefaultDefinitions(),
@@ -1138,6 +1149,42 @@ export class LocalToolBackend implements ToolBackend {
             file: { type: "string", description: "Required for resolve action. Target file." },
             text: { type: "string", description: "Required for resolve action. TODO text." },
             maxFiles: { type: "number" }
+          }
+        }
+      },
+      {
+        name: "workspace.live_wire",
+        description: "Endgame: Mesh Live-Wire. Hot-swap AST in a running Node V8 process without downtime.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["attach", "status"], default: "attach" },
+            target: { type: "string", description: "Port (e.g. 9229) or PID of the target process." },
+            scriptName: { type: "string", description: "Name of the script/file to patch in V8 memory." },
+            newFunctionBody: { type: "string", description: "The new code payload to inject." }
+          }
+        }
+      },
+      {
+        name: "workspace.schrodingers_ast",
+        description: "Endgame: Schrödinger's AST. Generates a QuantumRouter to run multiple AST variants in superposition and measure their performance.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["superpose", "status"], default: "superpose" },
+            file: { type: "string", description: "Target file path." },
+            functionName: { type: "string", description: "Target function to wrap in superposition." },
+            variants: { type: "array", items: { type: "string" }, description: "Array of function body strings." }
+          }
+        }
+      },
+      {
+        name: "workspace.hive_mind",
+        description: "Endgame: The Hive Mind. Broadcast uncommitted AST intents via P2P (simulated) to prevent merge conflicts before they happen.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["share_thoughts", "status"], default: "share_thoughts" }
           }
         }
       },
@@ -2030,6 +2077,12 @@ export class LocalToolBackend implements ToolBackend {
         return this.causalAutopsy.run(args);
       case "workspace.todo_resolver":
         return this.todoResolver.run(args);
+      case "workspace.live_wire":
+        return this.liveWire.run(args);
+      case "workspace.schrodingers_ast":
+        return this.schrodingersAst.run(args);
+      case "workspace.hive_mind":
+        return this.hiveMind.run(args);
       case "agent.assemble_team":
         return this.personaLoader.assembleTeam(String(args.task ?? ""));
       case "workspace.finalize_task":

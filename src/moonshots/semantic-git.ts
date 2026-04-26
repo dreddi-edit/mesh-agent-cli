@@ -56,7 +56,7 @@ export class SemanticGitEngine {
       }
 
       const timeline = await this.timelines.create({ name: `semantic-merge-${Date.now().toString(36)}` });
-      const ghostRoot = path.join(this.workspaceRoot, timeline.timeline.dir);
+      const ghostRoot = timeline.timeline.root;
 
       for (const [file, hunks] of grouped.entries()) {
         const raw = fileRawMap.get(file)!;
@@ -82,7 +82,7 @@ export class SemanticGitEngine {
       });
 
       if (run.ok) {
-        await this.timelines.promote({ timelineId: timeline.timeline.id, mergeStrategy: "squash" });
+        await this.timelines.promote({ timelineId: timeline.timeline.id });
       }
 
       return {

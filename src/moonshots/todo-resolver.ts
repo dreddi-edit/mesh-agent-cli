@@ -85,8 +85,7 @@ export class TodoResolverEngine {
       if (verifyRes.ok) {
         // Step 4: Promote
         await this.callTool("workspace.timeline_promote", {
-          timelineId,
-          mergeStrategy: "squash"
+          timelineId
         });
         
         return {
