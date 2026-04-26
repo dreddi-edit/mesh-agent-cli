@@ -109,6 +109,7 @@ import { TodoResolverEngine } from "./moonshots/todo-resolver.js";
 import { LiveWireEngine } from "./moonshots/live-wire.js";
 import { SchrodingersAstEngine } from "./moonshots/schrodingers-ast.js";
 import { HiveMindEngine } from "./moonshots/hive-mind.js";
+import { EphemeralExecutionEngine } from "./moonshots/ephemeral-execution.js";
 
 const SKIP_DIRS = [".git", "node_modules", "dist", ".mesh"];
 const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
@@ -431,6 +432,7 @@ export class LocalToolBackend implements ToolBackend {
   private readonly liveWire: LiveWireEngine;
   private readonly schrodingersAst: SchrodingersAstEngine;
   private readonly hiveMind: HiveMindEngine;
+  private readonly ephemeralExecution: EphemeralExecutionEngine;
 
   constructor(private readonly workspaceRoot: string, private readonly config?: AppConfig) {
     this.cache = new CacheManager(config ?? {
@@ -496,6 +498,7 @@ export class LocalToolBackend implements ToolBackend {
     this.liveWire = new LiveWireEngine(workspaceRoot);
     this.schrodingersAst = new SchrodingersAstEngine(workspaceRoot);
     this.hiveMind = new HiveMindEngine(workspaceRoot);
+    this.ephemeralExecution = new EphemeralExecutionEngine(workspaceRoot, (name, args) => this.callTool(name, args));
     this.startupTasks.push(
       this.bootstrapRepoDnaMemory(),
       this.agentOs.ensureDefaultDefinitions(),
@@ -1185,6 +1188,18 @@ export class LocalToolBackend implements ToolBackend {
           type: "object",
           properties: {
             action: { type: "string", enum: ["share_thoughts", "status"], default: "share_thoughts" }
+          }
+        }
+      },
+      {
+        name: "workspace.ephemeral_execution",
+        description: "Endgame: Ephemeral Execution (Zero-Source). Starts a JIT server that hallucinates routing logic per request without storing source code.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["start", "status"], default: "start" },
+            port: { type: "number", description: "Port for the ephemeral server." },
+            specPath: { type: "string", description: "Path to OpenAPI/GraphQL spec." }
           }
         }
       },
