@@ -26,6 +26,20 @@ export interface MeshUser {
   id: string;
 }
 
+// Discriminator types for better error handling without thrown errors where possible
+export type AuthResult = 
+  | { ok: true; user: MeshUser }
+  | { ok: false; reason: string };
+
+function isSessionShape(obj: unknown): obj is Omit<Session, "refresh_token"> & { refresh_token?: string } {
+  return (
+    typeof obj === "object" && 
+    obj !== null && 
+    "access_token" in obj && 
+    typeof (obj as any).access_token === "string"
+  );
+}
+
 export class AuthManager {
   private readonly supabase: SupabaseClient;
   private session: Session | null = null;
@@ -39,21 +53,29 @@ export class AuthManager {
     // 1. Try to restore a saved session
     try {
       const raw = await fs.readFile(SESSION_FILE, "utf-8");
-      const stored = JSON.parse(raw) as Session;
+      const stored: unknown = JSON.parse(raw);
+      
+      if (!isSessionShape(stored)) {
+        throw new Error("Invalid session shape");
+      }
       
       // Try to get refresh token from keychain
-      const refreshToken = await keytar.getPassword(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+      const keychainToken = await keytar.getPassword(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+      const fallbackToken = stored.refresh_token ?? undefined;
+      const refreshToken = keychainToken || fallbackToken;
       
-      const { data, error } = await this.supabase.auth.setSession({
-        access_token: stored.access_token,
-        refresh_token: refreshToken || (stored as any).refresh_token
-      });
-      
-      if (!error && data.session && data.user) {
-        this.session = data.session;
-        // Persist refreshed tokens
-        await this.saveSession(data.session);
-        return { email: data.user.email!, id: data.user.id };
+      if (stored.access_token) {
+        const { data, error } = await this.supabase.auth.setSession({
+          access_token: stored.access_token,
+          refresh_token: refreshToken || ""
+        });
+        
+        if (!error && data.session && data.user && data.user.email) {
+          this.session = data.session;
+          // Persist refreshed tokens
+          await this.saveSession(data.session);
+          return { email: data.user.email, id: data.user.id };
+        }
       }
     } catch {
       // No session file or invalid — fall through to login
@@ -80,16 +102,27 @@ export class AuthManager {
         { type: "password", name: "password", message: pc.dim("password: ") }
       ]);
 
-      const { data, error } = await this.supabase.auth.signInWithPassword({ email: email.trim(), password: password.trim() });
+      const emailTrimmed = email?.trim() || "";
+      const passwordTrimmed = password?.trim() || "";
+      
+      if (!emailTrimmed || !passwordTrimmed) {
+        process.stdout.write(pc.red(`\n  ✗ Email and password are required.\n\n`));
+        continue;
+      }
 
-      if (error || !data.session || !data.user) {
+      const { data, error } = await this.supabase.auth.signInWithPassword({ 
+        email: emailTrimmed, 
+        password: passwordTrimmed 
+      });
+
+      if (error || !data.session || !data.user || !data.user.email) {
         process.stdout.write(pc.red(`\n  ✗ ${error?.message ?? "Login failed. Please try again."}\n\n`));
         continue;
       }
 
       this.session = data.session;
       await this.saveSession(data.session);
-      user = { email: data.user.email!, id: data.user.id };
+      user = { email: data.user.email, id: data.user.id };
     }
 
     process.stdout.write(pc.green(`\n  ✓ Signed in as ${user.email}\n\n`));
@@ -108,16 +141,16 @@ export class AuthManager {
   }
 
   private async saveSession(session: Session): Promise<void> {
-    await fs.mkdir(SESSION_DIR, { recursive: true });
+    // 0o700 is strict: rwx for owner, nothing for group/others
+    await fs.mkdir(SESSION_DIR, { recursive: true, mode: 0o700 });
     
     // Store refresh token in keychain
     if (session.refresh_token) {
       await keytar.setPassword(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, session.refresh_token);
     }
 
-    // Store only access_token and other non-sensitive info in the file
-    const safeSession = { ...session };
-    delete (safeSession as any).refresh_token;
+    // Explicitly destructure to omit refresh_token instead of using `any`
+    const { refresh_token: _ignored, ...safeSession } = session;
     
     await fs.writeFile(SESSION_FILE, JSON.stringify(safeSession), { mode: 0o600 });
   }

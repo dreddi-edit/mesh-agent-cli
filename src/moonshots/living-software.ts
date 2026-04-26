@@ -2,12 +2,16 @@ import path from "node:path";
 import { readJson, writeJson } from "./common.js";
 
 export class LivingSoftwareEngine {
-  constructor(private readonly workspaceRoot: string) {}
+  constructor(
+    private readonly workspaceRoot: string,
+    private readonly callTool?: (name: string, args: any) => Promise<any>
+  ) {}
 
   async run(args: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
     const action = String(args.action ?? "pulse").trim().toLowerCase();
     if (action === "status") return this.status();
-    if (action !== "pulse") throw new Error("workspace.living_software action must be pulse|status");
+    if (action === "drive_coverage") return this.driveCoverage();
+    if (action !== "pulse") throw new Error("workspace.living_software action must be pulse|status|drive_coverage");
     const inputs = await this.readSubsystems();
     const scores = score(inputs);
     const pulse = {
@@ -30,6 +34,61 @@ export class LivingSoftwareEngine {
       action: "status",
       message: "No living-software pulse exists yet. Run action=pulse."
     });
+  }
+
+  private async driveCoverage(): Promise<Record<string, unknown>> {
+    if (!this.callTool) throw new Error("callTool is required for drive_coverage");
+
+    const fluidMesh = await readJson<{ capabilities?: Array<{ kind: string; name: string; file: string }> }>(path.join(this.workspaceRoot, ".mesh", "fluid-mesh", "capabilities.json"), {});
+    if (!fluidMesh || !fluidMesh.capabilities) {
+      return { ok: false, reason: "No capabilities found. Run workspace.fluid_mesh first." };
+    }
+
+    const functions = fluidMesh.capabilities.filter((c) => c.kind === "exported-function" && !/node_modules/.test(c.file) && !/\.test\./.test(c.file));
+    if (functions.length === 0) {
+      return { ok: false, reason: "No exported functions found in capabilities." };
+    }
+
+    const target = functions[0];
+
+    const timelineRes = await this.callTool("workspace.timeline_create", { name: `test-coverage-${Date.now().toString(36)}` }) as any;
+    const timelineId = timelineRes.timeline.id;
+
+    const fixRes = await this.callTool("agent.spawn", {
+      role: "developer",
+      instruction: `Generate comprehensive boundary condition tests for the exported function '${target.name}' from file '${target.file}'. Focus on edge cases, nulls, empty strings, max integers. Create a new test file if needed or add to an existing one.`,
+      timelineId
+    }) as any;
+
+    const verifyRes = await this.callTool("workspace.timeline_run", {
+      timelineId,
+      command: "npm run test",
+      timeoutMs: 90000
+    }) as any;
+
+    if (verifyRes.ok) {
+      await this.callTool("workspace.timeline_promote", {
+        timelineId,
+        mergeStrategy: "squash"
+      });
+      return {
+        ok: true,
+        action: "drive_coverage",
+        status: "promoted",
+        verification: "pass",
+        details: `Successfully generated and merged tests for ${target.name} in ${target.file}`
+      };
+    } else {
+      return {
+        ok: false,
+        action: "drive_coverage",
+        status: "failed",
+        verification: "fail",
+        details: `Test generation failed for ${target.name} in ${target.file}`,
+        stdout: verifyRes.stdout,
+        stderr: verifyRes.stderr
+      };
+    }
   }
 
   private async readSubsystems(): Promise<Record<string, any>> {

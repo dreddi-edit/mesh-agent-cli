@@ -423,6 +423,7 @@ export class LocalToolBackend implements ToolBackend {
   private readonly livingSoftware: LivingSoftwareEngine;
   private readonly proofCarryingChange: ProofCarryingChangeEngine;
   private readonly causalAutopsy: CausalAutopsyEngine;
+  private readonly todoResolver: TodoResolverEngine;
 
   constructor(private readonly workspaceRoot: string, private readonly config?: AppConfig) {
     this.cache = new CacheManager(config ?? {
@@ -481,7 +482,7 @@ export class LocalToolBackend implements ToolBackend {
     this.conversationalCodebase = new ConversationalCodebaseEngine(workspaceRoot);
     this.naturalLanguageSource = new NaturalLanguageSourceEngine(workspaceRoot);
     this.fluidMesh = new FluidMeshEngine(workspaceRoot);
-    this.livingSoftware = new LivingSoftwareEngine(workspaceRoot);
+    this.livingSoftware = new LivingSoftwareEngine(workspaceRoot, (name, args) => this.callTool(name, args));
     this.proofCarryingChange = new ProofCarryingChangeEngine(workspaceRoot);
     this.causalAutopsy = new CausalAutopsyEngine(workspaceRoot);
     this.startupTasks.push(
@@ -1128,12 +1129,25 @@ export class LocalToolBackend implements ToolBackend {
         }
       },
       {
+        name: "workspace.todo_resolver",
+        description: "Moonshot: Autonomous Technical Debt Resolver. Scans for TODO/FIXME markers and resolves them via timeline and fix racing.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["scan", "resolve"], default: "scan" },
+            file: { type: "string", description: "Required for resolve action. Target file." },
+            text: { type: "string", description: "Required for resolve action. TODO text." },
+            maxFiles: { type: "number" }
+          }
+        }
+      },
+      {
         name: "workspace.semantic_git",
         description: "Moonshot 02: semantic merge analysis for conflict hunks. Classifies auto-resolvable vs review-required conflicts by symbol overlap.",
         inputSchema: {
           type: "object",
           properties: {
-            action: { type: "string", enum: ["analyze"], default: "analyze" },
+            action: { type: "string", enum: ["analyze", "resolve"], default: "analyze" },
             path: { type: "string" }
           }
         }
@@ -1196,11 +1210,11 @@ export class LocalToolBackend implements ToolBackend {
       },
       {
         name: "workspace.living_software",
-        description: "Moonshot 10: synthesize all moonshot ledgers into a living-software pulse with health scores and next interventions.",
+        description: "Moonshot 10: synthesize all moonshot ledgers into a living-software pulse with health scores and next interventions. Includes 'drive_coverage' action for autonomous test generation.",
         inputSchema: {
           type: "object",
           properties: {
-            action: { type: "string", enum: ["pulse", "status"], default: "pulse" }
+            action: { type: "string", enum: ["pulse", "status", "drive_coverage"], default: "pulse" }
           }
         }
       },
@@ -2014,6 +2028,8 @@ export class LocalToolBackend implements ToolBackend {
         return this.proofCarryingChange.run(args);
       case "workspace.causal_autopsy":
         return this.causalAutopsy.run(args);
+      case "workspace.todo_resolver":
+        return this.todoResolver.run(args);
       case "agent.assemble_team":
         return this.personaLoader.assembleTeam(String(args.task ?? ""));
       case "workspace.finalize_task":

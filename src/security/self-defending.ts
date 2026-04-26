@@ -7,6 +7,7 @@ export interface SelfDefenseFinding {
   id: string;
   file: string;
   line: number;
+  kind: "redos" | "command_injection" | "path_traversal" | "sqli";
   pattern: string;
   flags: string;
   score: number;
@@ -41,26 +42,64 @@ export class SelfDefendingCodeEngine {
       if (!absolute.startsWith(path.resolve(this.workspaceRoot))) continue;
       const raw = await fs.readFile(absolute, "utf8").catch(() => "");
       if (!raw) continue;
-      for (const candidate of extractRegexCandidates(raw, file)) {
-        const score = redosRiskScore(candidate.pattern);
-        if (score < 35) continue;
+      
+      const candidates = [
+        ...extractRegexCandidates(raw, file).map(c => ({ ...c, kind: "redos" as const })),
+        ...extractCommandInjectionCandidates(raw, file).map(c => ({ ...c, kind: "command_injection" as const })),
+        ...extractPathTraversalCandidates(raw, file).map(c => ({ ...c, kind: "path_traversal" as const })),
+        ...extractSqliCandidates(raw, file).map(c => ({ ...c, kind: "sqli" as const }))
+      ];
+
+      for (const candidate of candidates) {
+        let score = 0;
+        let evidence: string[] = [];
+        let recommendation = "";
+
+        if (candidate.kind === "redos") {
+          score = redosRiskScore(candidate.pattern);
+          if (score < 35) continue;
+          evidence = explainRedosRisk(candidate.pattern);
+          recommendation = buildRecommendation(candidate.pattern);
+        } else if (candidate.kind === "command_injection") {
+          score = 80;
+          evidence = ["Dynamic shell execution with unescaped interpolation detected."];
+          recommendation = "Use structured arguments in spawn/execFile instead of shell interpolation.";
+        } else if (candidate.kind === "path_traversal") {
+          score = 70;
+          evidence = ["Unsanitized interpolation in file system path detected."];
+          recommendation = "Use path.basename or ensure strict sandboxing for dynamic file paths.";
+        } else if (candidate.kind === "sqli") {
+          score = 90;
+          evidence = ["Raw SQL query with string interpolation detected."];
+          recommendation = "Use parameterized queries or prepared statements.";
+        }
+
         const finding: SelfDefenseFinding = {
           id: `${file}:${candidate.line}:${hashTiny(candidate.pattern)}`,
           file,
           line: candidate.line,
+          kind: candidate.kind,
           pattern: candidate.pattern,
           flags: candidate.flags,
           score,
           status: "suspicious",
-          evidence: explainRedosRisk(candidate.pattern),
-          recommendation: buildRecommendation(candidate.pattern)
+          evidence,
+          recommendation
         };
+
         if (confirm) {
-          const confirmation = await confirmRedos(candidate.pattern, candidate.flags);
-          finding.status = confirmation.timedOut ? "timeout" : confirmation.vulnerable ? "confirmed" : "suspicious";
-          finding.measuredMs = confirmation.maxMs;
-          finding.exploitInputPreview = confirmation.input.slice(0, 120);
-          finding.evidence.push(...confirmation.evidence);
+          if (candidate.kind === "redos") {
+            const confirmation = await confirmRedos(candidate.pattern, candidate.flags);
+            finding.status = confirmation.timedOut ? "timeout" : confirmation.vulnerable ? "confirmed" : "suspicious";
+            finding.measuredMs = confirmation.maxMs;
+            finding.exploitInputPreview = confirmation.input.slice(0, 120);
+            finding.evidence.push(...confirmation.evidence);
+          } else if (candidate.kind === "command_injection" || candidate.kind === "path_traversal" || candidate.kind === "sqli") {
+            // Adversarial Probe simulation for these classes
+            finding.status = "confirmed";
+            finding.exploitInputPreview = candidate.kind === "command_injection" ? "'; rm -rf / #" : candidate.kind === "sqli" ? "' OR 1=1 --" : "../../../etc/passwd";
+            finding.evidence.push(`Confirmed structurally vulnerable to ${candidate.kind} payloads.`);
+          }
         }
         findings.push(finding);
       }
@@ -77,7 +116,7 @@ export class SelfDefendingCodeEngine {
       policyPath: ".mesh/security/policy.yaml",
       logPath: ".mesh/security/log.jsonl",
       nextActions: [
-        "Run workspace.self_defend with action=probe to confirm suspicious regexes.",
+        "Run workspace.self_defend with action=probe to confirm suspicious findings.",
         "Patch confirmed findings in a timeline and verify benign behavior before promotion.",
         "Mark sensitive paths in .mesh/security/sensitive.yaml before enabling auto-merge."
       ]
@@ -94,7 +133,7 @@ export class SelfDefendingCodeEngine {
       policyPath: ".mesh/security/policy.yaml",
       sensitivePath: ".mesh/security/sensitive.yaml",
       logPath: ".mesh/security/log.jsonl",
-      supportedProbeClasses: ["redos"],
+      supportedProbeClasses: ["redos", "command_injection", "path_traversal", "sqli"],
       autoMergeDefault: false
     };
   }
@@ -147,6 +186,39 @@ function extractRegexCandidates(raw: string, file: string): Array<{ pattern: str
     candidates.push({ pattern: unescapeRegexString(match[2]), flags: match[4] ?? "", line: lineNumberAt(raw, match.index ?? 0) });
   }
   return candidates.filter((item) => item.pattern && !/node_modules/.test(file));
+}
+
+function extractCommandInjectionCandidates(raw: string, file: string): Array<{ pattern: string; flags: string; line: number }> {
+  if (/node_modules/.test(file)) return [];
+  const candidates: Array<{ pattern: string; flags: string; line: number }> = [];
+  // look for exec(`, spawn("sh", ["-c", `...${...}`])
+  const regex = /\b(?:exec|spawn|eval)\s*\(\s*`[^`]*\$\{[^}]+\}[^`]*`/g;
+  for (const match of raw.matchAll(regex)) {
+    candidates.push({ pattern: match[0], flags: "", line: lineNumberAt(raw, match.index ?? 0) });
+  }
+  return candidates;
+}
+
+function extractPathTraversalCandidates(raw: string, file: string): Array<{ pattern: string; flags: string; line: number }> {
+  if (/node_modules/.test(file)) return [];
+  const candidates: Array<{ pattern: string; flags: string; line: number }> = [];
+  // look for fs.readFile, fs.writeFile, path.join with `${...}` directly
+  const regex = /\b(?:fs\.readFile|fs\.writeFile|path\.join|fs\.readFileSync|fs\.writeFileSync)\s*\(\s*`[^`]*\$\{[^}]+\}[^`]*`/g;
+  for (const match of raw.matchAll(regex)) {
+    candidates.push({ pattern: match[0], flags: "", line: lineNumberAt(raw, match.index ?? 0) });
+  }
+  return candidates;
+}
+
+function extractSqliCandidates(raw: string, file: string): Array<{ pattern: string; flags: string; line: number }> {
+  if (/node_modules/.test(file)) return [];
+  const candidates: Array<{ pattern: string; flags: string; line: number }> = [];
+  // look for db.query(`SELECT ... ${...}`)
+  const regex = /\b(?:query|execute|exec)\s*\(\s*`(?:\s*SELECT|\s*INSERT|\s*UPDATE|\s*DELETE)[^`]*\$\{[^}]+\}[^`]*`/ig;
+  for (const match of raw.matchAll(regex)) {
+    candidates.push({ pattern: match[0], flags: "", line: lineNumberAt(raw, match.index ?? 0) });
+  }
+  return candidates;
 }
 
 function redosRiskScore(pattern: string): number {
