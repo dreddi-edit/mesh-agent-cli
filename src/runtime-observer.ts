@@ -142,6 +142,15 @@ export class RuntimeObserver {
     };
   }
 
+  async close(): Promise<void> {
+    for (const child of this.processes.values()) {
+      if (!child.killed) {
+        child.kill("SIGTERM");
+      }
+    }
+    this.processes.clear();
+  }
+
   async captureDeepAutopsy(args: Record<string, unknown>): Promise<{
     ok: true;
     runId: string;
@@ -409,9 +418,60 @@ interface RuntimeAutopsyReport {
   frames: RuntimeAutopsyFrame[];
 }
 
-function mergeNodeOptions(existing: string | undefined, additions: string[]): string {
-  const parts = [existing?.trim() ?? "", ...additions.map((entry) => entry.trim())].filter(Boolean);
+export function mergeNodeOptions(existing: string | undefined, additions: string[]): string {
+  const existingParts = tokenizeNodeOptions(existing ?? "");
+  const unsafe = existingParts.filter((entry) => !isAllowedInheritedNodeOption(entry));
+  if (unsafe.length > 0) {
+    throw new Error(`Unsafe NODE_OPTIONS rejected: ${unsafe.join(" ")}`);
+  }
+  const parts = [...existingParts, ...additions.map((entry) => entry.trim())].filter(Boolean);
   return Array.from(new Set(parts)).join(" ");
+}
+
+function tokenizeNodeOptions(raw: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: string | null = null;
+  for (const char of raw.trim()) {
+    if ((char === "\"" || char === "'") && quote === null) {
+      quote = char;
+      continue;
+    }
+    if (char === quote) {
+      quote = null;
+      continue;
+    }
+    if (/\s/.test(char) && quote === null) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += char;
+  }
+  if (current) {
+    tokens.push(current);
+  }
+  return tokens;
+}
+
+function isAllowedInheritedNodeOption(option: string): boolean {
+  const allowedExact = new Set([
+    "--enable-source-maps",
+    "--no-warnings",
+    "--trace-warnings",
+    "--trace-deprecation",
+    "--trace-uncaught"
+  ]);
+  if (allowedExact.has(option)) return true;
+
+  return [
+    /^--max-old-space-size=\d+$/,
+    /^--stack-trace-limit=\d+$/,
+    /^--unhandled-rejections=(strict|throw|warn|none)$/,
+    /^--dns-result-order=(ipv4first|verbatim)$/
+  ].some((pattern) => pattern.test(option));
 }
 
 function buildCausalChain(errorSummary: string, frames: Array<{ file: string; line: number; column?: number; raw: string }>): string[] {

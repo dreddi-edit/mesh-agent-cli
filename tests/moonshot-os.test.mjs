@@ -26,6 +26,7 @@ function testConfig(workspaceRoot) {
     bedrock: {
       endpointBase: "",
       modelId: "",
+      fallbackModelIds: [],
       temperature: 0,
       maxTokens: 0
     },

@@ -18,7 +18,10 @@ const DEFAULT_ENDPOINT_BASE = "https://mesh-llm.edgar-baumann.workers.dev";
 /**
  * Default model id on Bedrock. Elmo can override via BEDROCK_MODEL_ID.
  */
-const DEFAULT_MODEL_ID = "us.anthropic.claude-sonnet-4-6";
+export const DEFAULT_MODEL_ID = "us.anthropic.claude-sonnet-4-6";
+export const DEFAULT_FALLBACK_MODEL_IDS = [
+  "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+];
 const LEGACY_DEFAULT_MODEL_IDS = new Set([
   "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 ]);
@@ -59,6 +62,21 @@ function parseJsonArray(raw: string, name: string): string[] {
   } catch (error) {
     throw new Error(`Invalid ${name}: ${(error as Error).message}`);
   }
+}
+
+function parseCsv(name: string): string[] {
+  return (process.env[name] ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function normalizeModelId(modelId: string | undefined): string {
+  const trimmed = modelId?.trim();
+  if (!trimmed || LEGACY_DEFAULT_MODEL_IDS.has(trimmed)) {
+    return DEFAULT_MODEL_ID;
+  }
+  return trimmed;
 }
 
 function parseMode(raw: string | undefined): "local" | "mcp" {
@@ -108,6 +126,7 @@ export interface AppConfig {
     endpointBase: string;
     bearerToken?: string;
     modelId: string;
+    fallbackModelIds: string[];
     temperature: number;
     maxTokens: number;
   };
@@ -160,10 +179,7 @@ export async function loadUserSettings(): Promise<UserSettings> {
   try {
     const raw = await fs.readFile(SETTINGS_PATH, "utf-8");
     const parsed = JSON.parse(raw) as UserSettings;
-    const modelId =
-      !parsed.modelId || LEGACY_DEFAULT_MODEL_IDS.has(parsed.modelId)
-        ? DEFAULT_MODEL_ID
-        : parsed.modelId;
+    const modelId = normalizeModelId(parsed.modelId);
     return {
       modelId,
       themeColor: parsed.themeColor || "cyan",
@@ -205,6 +221,14 @@ export async function loadConfig(): Promise<AppConfig> {
   const mode = parseMode(process.env.AGENT_MODE);
   const mcpArgsRaw = process.env.MESH_MCP_ARGS ?? "[]";
   const mcpCommand = process.env.MESH_MCP_COMMAND?.trim();
+  const configuredModelId = normalizeModelId(
+    process.env.BEDROCK_MODEL_ID ||
+      localSettings.modelId ||
+      userSettings.modelId
+  );
+  const envFallbackModelIds = parseCsv("BEDROCK_FALLBACK_MODEL_IDS")
+    .map(normalizeModelId)
+    .filter((modelId) => modelId !== configuredModelId);
 
   if (mode === "mcp" && !mcpCommand) {
     throw new Error("Missing required env var in mcp mode: MESH_MCP_COMMAND");
@@ -214,7 +238,10 @@ export async function loadConfig(): Promise<AppConfig> {
     bedrock: {
       endpointBase: localSettings.customEndpoint || userSettings.customEndpoint || optionalString("BEDROCK_ENDPOINT", DEFAULT_ENDPOINT_BASE),
       bearerToken: localSettings.customApiKey || userSettings.customApiKey || resolveBearerToken(),
-      modelId: localSettings.modelId || userSettings.modelId,
+      modelId: configuredModelId,
+      fallbackModelIds: envFallbackModelIds.length > 0
+        ? envFallbackModelIds
+        : DEFAULT_FALLBACK_MODEL_IDS.filter((modelId) => modelId !== configuredModelId),
       temperature: optionalNumber("BEDROCK_TEMPERATURE", 0),
       maxTokens: optionalNumber("BEDROCK_MAX_TOKENS", 3000)
     },

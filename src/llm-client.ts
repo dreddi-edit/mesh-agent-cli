@@ -68,6 +68,7 @@ export interface ConverseUsage {
 interface LlmClientOptions {
   endpointBase: string;
   modelId: string;
+  fallbackModelIds?: string[];
   bearerToken?: string;
   temperature: number;
   maxTokens: number;
@@ -98,8 +99,6 @@ export class BedrockLlmClient {
     abortSignal?: AbortSignal,
     maxTokensOverride?: number
   ): Promise<LlmResponse> {
-    const activeModelId = modelIdOverride || this.options.modelId;
-    const url = this.buildUrl(activeModelId);
     const body = this.buildBody(messages, tools, systemPrompt, maxTokensOverride);
 
     const headers: Record<string, string> = {
@@ -109,23 +108,29 @@ export class BedrockLlmClient {
       headers.authorization = `Bearer ${this.options.bearerToken}`;
     }
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      signal: abortSignal
-    });
+    const attempts: string[] = [];
+    for (const activeModelId of this.candidateModelIds(modelIdOverride)) {
+      const response = await fetch(this.buildUrl(activeModelId), {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: abortSignal
+      });
 
-    if (!response.ok) {
+      if (response.ok) {
+        const data = (await response.json()) as ConverseResponseShape;
+        return this.parseResponse(data);
+      }
+
       const errBody = await response.text();
       const hint = this.buildErrorHint(response.status, errBody, activeModelId);
-      throw new Error(
-        `LLM request failed (${response.status}): ${errBody.slice(0, 500)}${hint}`
-      );
+      attempts.push(`${activeModelId} -> ${response.status}: ${errBody.slice(0, 220)}${hint}`);
+      if (!this.shouldTryFallback(response.status) || modelIdOverride) {
+        break;
+      }
     }
 
-    const data = (await response.json()) as ConverseResponseShape;
-    return this.parseResponse(data);
+    throw new Error(`LLM request failed after ${attempts.length} attempt(s): ${attempts.join(" | ")}`);
   }
 
   async *converseStream(
@@ -136,8 +141,6 @@ export class BedrockLlmClient {
     abortSignal?: AbortSignal,
     maxTokensOverride?: number
   ): AsyncGenerator<{ kind: "text" | "tool_use" | "stop"; text?: string; toolUse?: any; usage?: ConverseUsage }> {
-    const activeModelId = modelIdOverride || this.options.modelId;
-    const url = this.buildUrl(activeModelId).replace("/converse", "/converse-stream");
     const body = this.buildBody(messages, tools, systemPrompt, maxTokensOverride);
 
     const headers: Record<string, string> = {
@@ -147,15 +150,28 @@ export class BedrockLlmClient {
       headers.authorization = `Bearer ${this.options.bearerToken}`;
     }
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      signal: abortSignal
-    });
+    let response: Response | null = null;
+    const attempts: string[] = [];
+    for (const activeModelId of this.candidateModelIds(modelIdOverride)) {
+      response = await fetch(this.buildUrl(activeModelId).replace("/converse", "/converse-stream"), {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: abortSignal
+      });
 
-    if (!response.ok) {
-      throw new Error(`LLM streaming failed (${response.status})`);
+      if (response.ok) {
+        break;
+      }
+
+      attempts.push(`${activeModelId} -> ${response.status}`);
+      if (!this.shouldTryFallback(response.status) || modelIdOverride) {
+        throw new Error(`LLM streaming failed after ${attempts.length} attempt(s): ${attempts.join(" | ")}`);
+      }
+    }
+
+    if (!response?.ok) {
+      throw new Error(`LLM streaming failed after ${attempts.length} attempt(s): ${attempts.join(" | ")}`);
     }
 
     if (!response.body) return;
@@ -203,6 +219,20 @@ export class BedrockLlmClient {
   private buildUrl(modelId: string): string {
     const base = this.options.endpointBase.replace(/\/+$/, "");
     return `${base}/model/${encodeURIComponent(modelId)}/converse`;
+  }
+
+  private candidateModelIds(modelIdOverride?: string): string[] {
+    if (modelIdOverride) {
+      return [modelIdOverride];
+    }
+    return Array.from(new Set([
+      this.options.modelId,
+      ...(this.options.fallbackModelIds ?? [])
+    ].filter(Boolean)));
+  }
+
+  private shouldTryFallback(status: number): boolean {
+    return status === 429 || status >= 500;
   }
 
   private buildErrorHint(status: number, body: string, modelId: string): string {

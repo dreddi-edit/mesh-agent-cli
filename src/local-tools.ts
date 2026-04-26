@@ -90,6 +90,9 @@ import { TsCompilerRefactor } from "./refactor/ts-compiler.js";
 import { PropertyTestGenerator } from "./quality/property-tests.js";
 import { SmtEdgeCaseFinder } from "./quality/smt.js";
 import { AuditLogger } from "./audit/logger.js";
+import { assertCommandAllowed } from "./command-safety.js";
+import { StructuredLogger } from "./structured-logger.js";
+import { ToolInputValidationError, validateToolInput } from "./tool-schema.js";
 
 const SKIP_DIRS = [".git", "node_modules", "dist", ".mesh"];
 const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
@@ -394,6 +397,8 @@ export class LocalToolBackend implements ToolBackend {
   private readonly propertyTests: PropertyTestGenerator;
   private readonly smtFinder: SmtEdgeCaseFinder;
   private readonly audit: AuditLogger;
+  private readonly logger: StructuredLogger;
+  private readonly startupTasks: Promise<unknown>[] = [];
 
   constructor(private readonly workspaceRoot: string, private readonly config?: AppConfig) {
     this.cache = new CacheManager(config ?? {
@@ -412,7 +417,7 @@ export class LocalToolBackend implements ToolBackend {
           transcriptionModel: "small"
         }
       },
-      bedrock: { endpointBase: "", modelId: "", temperature: 0, maxTokens: 0 },
+      bedrock: { endpointBase: "", modelId: "", fallbackModelIds: [], temperature: 0, maxTokens: 0 },
       mcp: { args: [] },
       supabase: {},
       telemetry: { contribute: false }
@@ -442,9 +447,13 @@ export class LocalToolBackend implements ToolBackend {
     this.propertyTests = new PropertyTestGenerator(workspaceRoot);
     this.smtFinder = new SmtEdgeCaseFinder(workspaceRoot);
     this.audit = new AuditLogger(workspaceRoot);
-    void this.bootstrapRepoDnaMemory();
-    void this.agentOs.ensureDefaultDefinitions();
-    void this.runtimeObserver.writeDefaultRunbooks();
+    this.logger = new StructuredLogger(workspaceRoot);
+    this.startupTasks.push(
+      this.bootstrapRepoDnaMemory(),
+      this.agentOs.ensureDefaultDefinitions(),
+      this.runtimeObserver.writeDefaultRunbooks()
+    );
+    void Promise.allSettled(this.startupTasks);
     this.startWatcher();
   }
 
@@ -1649,6 +1658,28 @@ export class LocalToolBackend implements ToolBackend {
   }
 
   async callTool(name: string, args: Record<string, unknown>, opts?: ToolCallOpts): Promise<unknown> {
+    const tool = (await this.listTools()).find((entry) => entry.name === name);
+    try {
+      const validation = validateToolInput(name, args, tool?.inputSchema);
+      args = validation.args;
+      if (validation.warnings.length > 0) {
+        void this.logger.write("warn", "tool.input_schema_warnings", {
+          tool: name,
+          warnings: validation.warnings
+        }).catch(() => undefined);
+      }
+    } catch (error) {
+      void this.logger.write("error", "tool.input_schema_rejected", {
+        tool: name,
+        issues: error instanceof ToolInputValidationError ? error.issues : [(error as Error).message]
+      }).catch(() => undefined);
+      throw error;
+    }
+
+    void this.logger.write("info", "tool.call", {
+      tool: name,
+      requiresApproval: tool?.requiresApproval === true
+    }).catch(() => undefined);
     void this.audit.append(name, args, { pending: true }).catch(() => undefined);
     switch (name) {
       case "workspace.list_files":
@@ -1886,6 +1917,8 @@ export class LocalToolBackend implements ToolBackend {
     if (this.watcher && typeof this.watcher.close === "function") {
       this.watcher.close();
     }
+    await Promise.allSettled(this.startupTasks);
+    await this.runtimeObserver.close();
     await this.meshCore.close();
     return Promise.resolve();
   }
@@ -3103,6 +3136,7 @@ session.on('Debugger.paused', async (message) => {
     const llm = new BedrockLlmClient({
       endpointBase: this.config.bedrock.endpointBase,
       modelId: this.config.bedrock.modelId,
+      fallbackModelIds: this.config.bedrock.fallbackModelIds,
       bearerToken: this.config.bedrock.bearerToken,
       temperature: 0.7,
       maxTokens: 4096
@@ -3666,6 +3700,7 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
   private async runCommand(args: Record<string, unknown>, onProgress?: (chunk: string) => void): Promise<unknown> {
     const command = String(args.command ?? "").trim();
     if (!command) throw new Error("workspace.run_command requires 'command'");
+    assertCommandAllowed(command);
 
     const TIMEOUT_MS = 30_000;
     const TRIM_LIMIT = 15_000;
@@ -3997,6 +4032,7 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
     const llm = new BedrockLlmClient({
       endpointBase: this.config.bedrock.endpointBase,
       modelId: this.config.bedrock.modelId,
+      fallbackModelIds: this.config.bedrock.fallbackModelIds,
       bearerToken: this.config.bedrock.bearerToken,
       temperature: 0.1,
       maxTokens: 4096

@@ -500,6 +500,7 @@ export class AgentLoop {
     this.llm = new BedrockLlmClient({
       endpointBase: config.bedrock.endpointBase,
       modelId: this.currentModelId,
+      fallbackModelIds: config.bedrock.fallbackModelIds,
       bearerToken: config.bedrock.bearerToken,
       temperature: config.bedrock.temperature,
       maxTokens: config.bedrock.maxTokens
