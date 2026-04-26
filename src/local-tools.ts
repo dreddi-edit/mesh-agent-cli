@@ -93,6 +93,18 @@ import { AuditLogger } from "./audit/logger.js";
 import { assertCommandAllowed } from "./command-safety.js";
 import { StructuredLogger } from "./structured-logger.js";
 import { ToolInputValidationError, validateToolInput } from "./tool-schema.js";
+import { SelfDefendingCodeEngine } from "./security/self-defending.js";
+import { PrecrimeEngine } from "./moonshots/precrime.js";
+import { ShadowDeployEngine } from "./moonshots/shadow-deploy.js";
+import { SemanticGitEngine } from "./moonshots/semantic-git.js";
+import { ProbabilisticCodebaseEngine } from "./moonshots/probabilistic-codebase.js";
+import { SpecCodeEngine } from "./moonshots/spec-code.js";
+import { ConversationalCodebaseEngine } from "./moonshots/conversational-codebase.js";
+import { NaturalLanguageSourceEngine } from "./moonshots/natural-language-source.js";
+import { FluidMeshEngine } from "./moonshots/fluid-mesh.js";
+import { LivingSoftwareEngine } from "./moonshots/living-software.js";
+import { ProofCarryingChangeEngine } from "./moonshots/proof-carrying-change.js";
+import { CausalAutopsyEngine } from "./moonshots/causal-autopsy.js";
 
 const SKIP_DIRS = [".git", "node_modules", "dist", ".mesh"];
 const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
@@ -399,6 +411,18 @@ export class LocalToolBackend implements ToolBackend {
   private readonly audit: AuditLogger;
   private readonly logger: StructuredLogger;
   private readonly startupTasks: Promise<unknown>[] = [];
+  private readonly selfDefense: SelfDefendingCodeEngine;
+  private readonly precrime: PrecrimeEngine;
+  private readonly shadowDeploy: ShadowDeployEngine;
+  private readonly semanticGit: SemanticGitEngine;
+  private readonly probabilisticCodebase: ProbabilisticCodebaseEngine;
+  private readonly specCode: SpecCodeEngine;
+  private readonly conversationalCodebase: ConversationalCodebaseEngine;
+  private readonly naturalLanguageSource: NaturalLanguageSourceEngine;
+  private readonly fluidMesh: FluidMeshEngine;
+  private readonly livingSoftware: LivingSoftwareEngine;
+  private readonly proofCarryingChange: ProofCarryingChangeEngine;
+  private readonly causalAutopsy: CausalAutopsyEngine;
 
   constructor(private readonly workspaceRoot: string, private readonly config?: AppConfig) {
     this.cache = new CacheManager(config ?? {
@@ -448,6 +472,18 @@ export class LocalToolBackend implements ToolBackend {
     this.smtFinder = new SmtEdgeCaseFinder(workspaceRoot);
     this.audit = new AuditLogger(workspaceRoot);
     this.logger = new StructuredLogger(workspaceRoot);
+    this.selfDefense = new SelfDefendingCodeEngine(workspaceRoot);
+    this.precrime = new PrecrimeEngine(workspaceRoot);
+    this.shadowDeploy = new ShadowDeployEngine(workspaceRoot, this.timelines);
+    this.semanticGit = new SemanticGitEngine(workspaceRoot);
+    this.probabilisticCodebase = new ProbabilisticCodebaseEngine(workspaceRoot);
+    this.specCode = new SpecCodeEngine(workspaceRoot);
+    this.conversationalCodebase = new ConversationalCodebaseEngine(workspaceRoot);
+    this.naturalLanguageSource = new NaturalLanguageSourceEngine(workspaceRoot);
+    this.fluidMesh = new FluidMeshEngine(workspaceRoot);
+    this.livingSoftware = new LivingSoftwareEngine(workspaceRoot);
+    this.proofCarryingChange = new ProofCarryingChangeEngine(workspaceRoot);
+    this.causalAutopsy = new CausalAutopsyEngine(workspaceRoot);
     this.startupTasks.push(
       this.bootstrapRepoDnaMemory(),
       this.agentOs.ensureDefaultDefinitions(),
@@ -1050,6 +1086,148 @@ export class LocalToolBackend implements ToolBackend {
             hypothesis: { type: "string" },
             verificationCommand: { type: "string" },
             promote: { type: "boolean", default: false }
+          }
+        }
+      },
+      {
+        name: "workspace.self_defend",
+        description: "Moonshot 05: continuously harden code. Scans/probes ReDoS-class vulnerabilities, writes a security ledger, and returns verified findings.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["scan", "probe", "status"], default: "scan" },
+            path: { type: "string" },
+            maxFiles: { type: "number", default: 500 },
+            confirm: { type: "boolean", default: false }
+          }
+        }
+      },
+      {
+        name: "workspace.precrime",
+        description: "Moonshot 08: predict likely bugs before they happen from diffs, repo structure, coverage hints, and production telemetry.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["analyze", "status"], default: "analyze" },
+            maxFiles: { type: "number", default: 250 }
+          }
+        }
+      },
+      {
+        name: "workspace.end_staging",
+        description: "Moonshot 06: shadow-deploy verification ledger. Runs checks in a timeline and reports promotion gates before human review.",
+        requiresApproval: true,
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["shadow", "status"], default: "shadow" },
+            command: { type: "string", default: "npm test" },
+            verificationCommand: { type: "string" },
+            timeoutMs: { type: "number" }
+          }
+        }
+      },
+      {
+        name: "workspace.semantic_git",
+        description: "Moonshot 02: semantic merge analysis for conflict hunks. Classifies auto-resolvable vs review-required conflicts by symbol overlap.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["analyze"], default: "analyze" },
+            path: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "workspace.probabilistic_codebase",
+        description: "Moonshot 04: plan safe probabilistic variants and routing guardrails for routes, hotspots, and pure functions.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["plan", "status"], default: "plan" },
+            intent: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "workspace.conversational_codebase",
+        description: "Moonshot 03: symbol-level memory and answers so the codebase can explain its own state, history, and conventions.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["ask", "record", "map", "status"], default: "ask" },
+            query: { type: "string" },
+            symbol: { type: "string" },
+            note: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "workspace.spec_code",
+        description: "Moonshot 01: bidirectional spec-code ledger. Synthesizes behavior contracts from code/tests/routes and detects drift.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["synthesize", "check", "status"], default: "synthesize" }
+          }
+        }
+      },
+      {
+        name: "workspace.natural_language_source",
+        description: "Moonshot 09: compile constrained natural-language intent into an implementation IR, patch plan, and verification plan.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["compile", "status"], default: "compile" },
+            intent: { type: "string" },
+            source: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "workspace.fluid_mesh",
+        description: "Moonshot 07: map repository capabilities as portable units independent of file/repo boundaries.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["map", "status"], default: "map" }
+          }
+        }
+      },
+      {
+        name: "workspace.living_software",
+        description: "Moonshot 10: synthesize all moonshot ledgers into a living-software pulse with health scores and next interventions.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["pulse", "status"], default: "pulse" }
+          }
+        }
+      },
+      {
+        name: "workspace.proof_carrying_change",
+        description: "Generate a promotion-grade proof bundle for a change: intent, touched capabilities, affected contracts, risk model, verification, rollback, and assumptions.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["generate", "verify", "status"], default: "generate" },
+            intent: { type: "string" },
+            verificationCommand: { type: "string" },
+            timeoutMs: { type: "number" }
+          }
+        }
+      },
+      {
+        name: "workspace.causal_autopsy",
+        description: "Reconstruct a failure's causal chain from symptom text, runtime evidence, diffs, config/dependency deltas, proofs, and Mesh ledgers.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["investigate", "status"], default: "investigate" },
+            symptom: { type: "string" },
+            runId: { type: "string" },
+            failingCommand: { type: "string" },
+            timeoutMs: { type: "number" }
           }
         }
       },
@@ -1790,6 +1968,7 @@ export class LocalToolBackend implements ToolBackend {
           patch: String(args.patch ?? "")
         });
       case "workspace.timeline_run":
+        assertCommandAllowed(String(args.command ?? ""));
         return this.timelines.run({
           timelineId: String(args.timelineId ?? ""),
           command: String(args.command ?? ""),
@@ -1811,6 +1990,30 @@ export class LocalToolBackend implements ToolBackend {
         });
       case "workspace.what_if":
         return this.whatIf(args, opts?.onProgress);
+      case "workspace.self_defend":
+        return this.selfDefense.run(args);
+      case "workspace.precrime":
+        return this.precrime.run(args);
+      case "workspace.end_staging":
+        return this.shadowDeploy.run(args);
+      case "workspace.semantic_git":
+        return this.semanticGit.run(args);
+      case "workspace.probabilistic_codebase":
+        return this.probabilisticCodebase.run(args);
+      case "workspace.conversational_codebase":
+        return this.conversationalCodebase.run(args);
+      case "workspace.spec_code":
+        return this.specCode.run(args);
+      case "workspace.natural_language_source":
+        return this.naturalLanguageSource.run(args);
+      case "workspace.fluid_mesh":
+        return this.fluidMesh.run(args);
+      case "workspace.living_software":
+        return this.livingSoftware.run(args);
+      case "workspace.proof_carrying_change":
+        return this.proofCarryingChange.run(args);
+      case "workspace.causal_autopsy":
+        return this.causalAutopsy.run(args);
       case "agent.assemble_team":
         return this.personaLoader.assembleTeam(String(args.task ?? ""));
       case "workspace.finalize_task":
@@ -2247,6 +2450,7 @@ export class LocalToolBackend implements ToolBackend {
   private async runInShadow(args: Record<string, unknown>, onProgress?: (chunk: string) => void): Promise<unknown> {
     const command = String(args.command ?? "").trim();
     if (!command) throw new Error("workspace.run_in_shadow requires 'command'");
+    assertCommandAllowed(command);
 
     const shadowRoot = path.join(os.tmpdir(), `mesh-shadow-${Date.now()}`);
     onProgress?.(`[Shadow Workspace] Creating at ${shadowRoot}...\n`);
@@ -2293,10 +2497,10 @@ export class LocalToolBackend implements ToolBackend {
       });
 
       // Cleanup
-      await execAsync(`rm -rf ${shadowRoot}`);
+      await fs.rm(shadowRoot, { recursive: true, force: true });
       return { ...result, note: "Executed safely in shadow workspace." };
     } catch (err) {
-      await execAsync(`rm -rf ${shadowRoot}`).catch(() => {});
+      await fs.rm(shadowRoot, { recursive: true, force: true }).catch(() => undefined);
       return { ok: false, error: (err as Error).message };
     }
   }

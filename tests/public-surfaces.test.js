@@ -29,7 +29,19 @@ test("local tools expose moonshot public interfaces", () => {
     "workspace.causal_intelligence",
     "workspace.discovery_lab",
     "workspace.reality_fork",
-    "workspace.ghost_engineer"
+    "workspace.ghost_engineer",
+    "workspace.self_defend",
+    "workspace.precrime",
+    "workspace.end_staging",
+    "workspace.semantic_git",
+    "workspace.probabilistic_codebase",
+    "workspace.conversational_codebase",
+    "workspace.spec_code",
+    "workspace.natural_language_source",
+    "workspace.fluid_mesh",
+    "workspace.living_software",
+    "workspace.proof_carrying_change",
+    "workspace.causal_autopsy"
   ];
 
   for (const toolName of expectedTools) {

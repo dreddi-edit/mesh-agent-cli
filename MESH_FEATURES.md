@@ -230,7 +230,7 @@ For massive tasks, Mesh spawns specialized workers.
 | `/voice` | `/voice [on\|off]`| Toggle or configure Speech-to-Speech mode. |
 | `/exit" | `/exit` | Quit. |
 
-### Complete Agent Tool Roster (80 Local Tools)
+### Complete Agent Tool Roster (85+ Local Tools)
 *(Tools grouped by domain, exactly as exposed by `LocalToolBackend`)*
 
 **Filesystem Core:**
@@ -244,6 +244,12 @@ For massive tasks, Mesh spawns specialized workers.
 
 **Git & Timelines:**
 `workspace.git_status`, `workspace.git_diff`, `workspace.get_recent_changes`, `workspace.semantic_undo`, `workspace.finalize_task`, `workspace.timeline_create`, `workspace.timeline_apply_patch`, `workspace.timeline_run`, `workspace.timeline_compare`, `workspace.timeline_promote`, `workspace.timeline_list`
+
+**Moonshots:**
+`workspace.self_defend`, `workspace.precrime`, `workspace.end_staging`, `workspace.semantic_git`, `workspace.probabilistic_codebase`, `workspace.conversational_codebase`, `workspace.spec_code`, `workspace.natural_language_source`, `workspace.fluid_mesh`, `workspace.living_software`
+
+**Proof & Autopsy:**
+`workspace.proof_carrying_change`, `workspace.causal_autopsy`
 
 **System & Execution:**
 `workspace.run_command`, `workspace.run_in_shadow`, `workspace.run_with_telemetry`, `workspace.get_env_info`, `workspace.get_diagnostics`
