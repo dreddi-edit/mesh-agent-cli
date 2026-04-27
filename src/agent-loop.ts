@@ -3782,10 +3782,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
         await this.runSynthesize();
         return { wasHandled: true, shouldExit: false };
       case "/twin":
-        await this.runSlashCommandSafe("Digital Twin", async (spinner) => {
-          spinner.stop();
-          await this.runDigitalTwin(args);
-        });
+        await this.runDigitalTwin(args);
         return { wasHandled: true, shouldExit: false };
       case "/repair":
         await this.runPredictiveRepair(args);
@@ -4383,20 +4380,55 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     }
 
     const mode = (args[0] || "brief").toLowerCase();
+    const spinner = ora({ text: "Running diagnostics...", color: "cyan" }).start();
+
     const indexStatus = await this.backend.callTool("workspace.get_index_status", {}) as IndexStatus;
     const syncStatus = await this.backend.callTool("workspace.check_sync", {}) as SyncStatus;
     const transcriptChars = this.estimateTranscriptChars();
     const capsule = this.sessionCapsule ? this.parseSessionCapsule(this.sessionCapsule.summary) : null;
 
+    const meshDirExists = await fs.stat(path.join(this.config.agent.workspaceRoot, ".mesh")).then(() => true).catch(() => false);
+    const gitOk = await fs.stat(path.join(this.config.agent.workspaceRoot, ".git")).then(() => true).catch(() => false);
+    const pkgOk = await fs.stat(path.join(this.config.agent.workspaceRoot, "package.json")).then(() => true).catch(() => false);
+
+    let llmOk = false;
+    const llmEndpoint = this.config.bedrock?.endpointBase;
+    if (llmEndpoint) {
+      try {
+        const res = await fetch(llmEndpoint, { method: "HEAD", signal: AbortSignal.timeout(5000) });
+        llmOk = res.status < 500;
+      } catch {
+        llmOk = false;
+      }
+    }
+
+    const indexHealthy = Number(indexStatus.percent) > 0;
+    const sessionHealthy = this.transcript.length > 0;
+
+    const ok = (v: boolean) => v ? pc.green("✔") : pc.red("✘");
+    spinner.stop();
+
+    const checks = [
+      `${ok(gitOk)} Git repository`,
+      `${ok(pkgOk)} package.json`,
+      `${ok(llmOk)} LLM endpoint reachable`,
+      `${ok(indexHealthy)} Workspace indexed (${indexStatus.percent}%)`,
+      `${ok(meshDirExists)} .mesh/ artifacts directory`,
+      `${ok(sessionHealthy)} Active session`,
+      `${ok(syncStatus.l2Enabled)} Cloud sync`
+    ];
+
     const lines = [
       "",
       `${this.themeColor(pc.bold("Doctor"))}`,
+      "",
+      ...checks,
+      "",
       `${pc.dim("workspace:")}    ${this.config.agent.workspaceRoot}`,
       `${pc.dim("mode:")}         ${this.config.agent.mode}`,
       `${pc.dim("model:")}        ${shortModelName(this.currentModelId)} ${pc.dim(`(${this.currentModelId})`)}`,
       `${pc.dim("approvals:")}    ${this.autoApproveTools ? pc.green("on") : pc.yellow("off")}`,
-      `${pc.dim("cloud sync:")}   ${syncStatus.l2Enabled ? pc.green(`on (${syncStatus.l2Count} capsules)`) : pc.yellow("off")}`,
-      `${pc.dim("index:")}        ${indexStatus.cachedFiles}/${indexStatus.totalFiles} cached (${indexStatus.percent}%)`,
+      `${pc.dim("index:")}        ${indexStatus.cachedFiles}/${indexStatus.totalFiles} cached`,
       `${pc.dim("session:")}      ${this.transcript.length} messages / ${transcriptChars} chars`,
       `${pc.dim("capsule:")}      ${this.sessionCapsule ? pc.green("loaded") : pc.dim("none")}`,
       `${pc.dim("last tool:")}    ${this.lastToolEventAt ?? "none"}`
