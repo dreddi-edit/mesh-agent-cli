@@ -3502,14 +3502,21 @@ session.on('Debugger.paused', async (message) => {
     const messages: any[] = [{ role: "user", content: [{ text: prompt }] }];
     let iterations = 0;
 
-    while (iterations < 5) {
+    while (iterations < 15) {
       const response = await llm.converse(messages, safeWireTools as any[], "You are a fast research sub-agent. Gather data and summarize.", HAIKU_MODEL_ID);
 
       if (response.kind === "text") {
         return { ok: true, summary: response.text };
       }
 
-      messages.push({ role: "assistant", content: response.toolUses.map(tu => ({ toolUse: tu })) as any });
+      const assistantContent: any[] = [];
+      if (response.text) {
+        assistantContent.push({ text: response.text });
+      }
+      for (const tu of response.toolUses) {
+        assistantContent.push({ toolUse: tu });
+      }
+      messages.push({ role: "assistant", content: assistantContent });
 
       const toolResults = await Promise.all(response.toolUses.map(async (tu) => {
         const tool = wireToolMap.get(tu.name);
