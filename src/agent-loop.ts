@@ -880,7 +880,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
                   const styles = JSON.parse(match[1]);
                   await this.portal.applyGhostStyles(styles);
                 } catch {
-                  output.write(pc.dim("[Mesh] Ghost styles parse failed — skipping live preview update.\n"));
+                  output.write(pc.red("[Mesh] Error: Ghost styles parse failed — skipping live preview update.\n"));
                 }
                 previewSent = true;
                 process.stdout.write(pc.green("\n[Ghost Sync] Live preview applied. Capturing for Vision check...\n"));
@@ -926,6 +926,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
   }
 
   public async runCli(initialPrompt?: string): Promise<void> {
+    this.llm.logEndpoint();
 
     await this.checkInit();
     this.sessionCapsule = await this.sessionStore.load();
@@ -2561,6 +2562,47 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     }
   }
 
+  private async runSlashCommandSafe(
+    label: string,
+    fn: (spinner: ReturnType<typeof ora>) => Promise<void>
+  ): Promise<void> {
+    const spinner = ora({ text: `${label}...`, color: "cyan" }).start();
+    try {
+      await fn(spinner);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Classify into user-friendly category (D-01, D-02)
+      let userMsg: string;
+      let hint: string;
+      if (msg.includes("429") || msg.includes("rate_limit") || msg.includes("ThrottlingException")) {
+        userMsg = "LLM rate limit hit";
+        hint = "Wait a moment, then try again. Run /doctor to check connectivity.";
+      } else if (msg.includes("LLM request failed") || msg.includes("fetch failed") || msg.includes("ECONNREFUSED")) {
+        userMsg = "LLM backend unavailable";
+        hint = "Run /doctor to diagnose. Check network connectivity.";
+      } else if (msg.includes("Context") && msg.includes("firewall")) {
+        userMsg = "Context too large for this operation";
+        hint = "Run /compact first to reduce context size.";
+      } else if (msg.includes("ENOENT") || msg.includes("no such file")) {
+        userMsg = "Required file not found";
+        hint = "Run /index first to initialize workspace state.";
+      } else if (msg.includes("AbortError") || msg.includes("aborted") || msg.includes("timed out")) {
+        userMsg = "Operation timed out after 60 seconds";
+        hint = "Try /compact to reduce context, then retry.";
+      } else {
+        userMsg = msg.slice(0, 200);
+        hint = "Run /doctor to diagnose or try /reset if the session is corrupted.";
+      }
+      // Track in consecutiveErrors Map (D-15)
+      const cmdKey = `${label} -> ${msg.slice(0, 80)}`;
+      const cmdErrorCount = (this.consecutiveErrors.get(cmdKey) || 0) + 1;
+      this.consecutiveErrors.set(cmdKey, cmdErrorCount);
+
+      spinner.fail(pc.red(`[Mesh] Error: ${label} failed — ${userMsg}. Try: ${hint}`));
+    }
+    // Note: ora.fail() and ora.succeed() both stop the spinner — no finally needed
+  }
+
   private async runDigitalTwin(args: string[]): Promise<void> {
     const action = args[0] || "build";
     const spinner = ora({ text: `Digital Twin ${action}...`, color: "cyan" }).start();
@@ -3696,6 +3738,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       }
     }
 
+    try {
     switch (command) {
       case "/undo": {
         const spinner = ora({ text: "Undoing last change...", color: "yellow" }).start();
@@ -3739,7 +3782,10 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
         await this.runSynthesize();
         return { wasHandled: true, shouldExit: false };
       case "/twin":
-        await this.runDigitalTwin(args);
+        await this.runSlashCommandSafe("Digital Twin", async (spinner) => {
+          spinner.stop();
+          await this.runDigitalTwin(args);
+        });
         return { wasHandled: true, shouldExit: false };
       case "/repair":
         await this.runPredictiveRepair(args);
@@ -3929,6 +3975,11 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       default:
         output.write(`\nUnknown command: ${inputCmd} (resolved to ${command}). Use /help.\n`);
         return { wasHandled: true, shouldExit: false };
+    }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      output.write(pc.red(`\n[Mesh] Error: Command "${command}" failed — ${msg.slice(0, 200)}. Try /doctor to diagnose.\n`));
+      return { wasHandled: true, shouldExit: false };
     }
   }
 
