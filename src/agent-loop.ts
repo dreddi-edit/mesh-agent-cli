@@ -1550,7 +1550,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
       this.currentTurnPreferredTools = [];
     }
 
-    return await this.forceFinalAnswer(lastAssistantText, preTurnLength);
+    return await this.forceFinalAnswer(lastAssistantText, preTurnLength, toolSpecs);
   }
 
   private prepareModelInput(currentTurnStart: number, toolSpecs: ToolSpec[]): {
@@ -1587,14 +1587,14 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     };
   }
 
-  private async forceFinalAnswer(lastAssistantText: string, currentTurnStart: number): Promise<string> {
+  private async forceFinalAnswer(lastAssistantText: string, currentTurnStart: number, toolSpecs: ToolSpec[]): Promise<string> {
     const prompt = [
       "Stop using tools now.",
       "Answer the user with the evidence already gathered.",
       "Be concise. If evidence is incomplete, say what is missing in one sentence."
     ].join(" ");
     this.transcript.push({ role: "user", content: [{ text: prompt }] });
-    const prepared = this.prepareModelInput(currentTurnStart, []);
+    const prepared = this.prepareModelInput(currentTurnStart, toolSpecs);
     const response = await this.llm.converse(
       prepared.messages,
       prepared.tools,

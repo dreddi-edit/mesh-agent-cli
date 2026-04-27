@@ -291,7 +291,11 @@ export class BedrockLlmClient {
       }
     };
 
-    if (tools.length > 0) {
+    const hasToolBlocks = messages.some(msg => 
+      msg.content.some(block => "toolUse" in block || "toolResult" in block)
+    );
+
+    if (tools.length > 0 || hasToolBlocks) {
       const toolConfig = {
         tools: tools.map((tool) => ({
           toolSpec: {
