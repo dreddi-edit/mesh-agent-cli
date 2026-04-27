@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Terminal-first AI engineering agent with local code intelligence, runtime debugging, speculative timelines, and worker orchestration.</strong>
+  <strong>A terminal-first AI engineering agent that turns your repository into an inspectable, testable, self-improving workspace.</strong>
 </p>
 
 <p align="center">
@@ -12,47 +12,39 @@
   <img alt="node" src="https://img.shields.io/badge/node-%3E%3D20-334155">
 </p>
 
+## Overview
+
+Mesh is an AI coding agent for engineers who want more than autocomplete. It runs in the terminal, understands the local workspace, keeps persistent project memory, tests candidate changes in isolated timelines, and produces durable evidence in `.mesh/` instead of relying only on chat history.
+
+The core idea: code changes should be explored, verified, explained, and remembered. Mesh combines local code intelligence, runtime debugging, speculative worktrees, autonomous repair loops, semantic contracts, and project-level memory into one CLI.
+
 ## Install
 
-Install Mesh globally. The `mesh` terminal command is created by npm's global `bin` linking.
+Install Mesh globally so the `mesh` command is linked into your shell:
 
 ```bash
 npm install -g @edgarelmo/mesh-agent-cli
 mesh
 ```
 
-Do not use plain `npm install @edgarelmo/mesh-agent-cli` if you expect `mesh` to work as a shell command. A local install only creates `./node_modules/.bin/mesh` inside that project.
-
 Useful alternatives:
 
 ```bash
-# Run after a local install
-./node_modules/.bin/mesh
-
-# Run without installing globally
+# Run without a global install
 npx -p @edgarelmo/mesh-agent-cli mesh
+
+# Run after a local project install
+./node_modules/.bin/mesh
 ```
 
-If `npm install -g` succeeds but `mesh` is still not found, your npm global bin directory is not on `PATH`:
+If global install succeeds but `mesh` is not found, your npm global bin directory is probably not on `PATH`:
 
 ```bash
 npm config get prefix
 ls "$(npm config get prefix)/bin/mesh"
 ```
 
-Add `$(npm config get prefix)/bin` to your shell `PATH` if the file exists but the command is unavailable.
-
-## What Mesh Does
-
-Mesh is built for engineering work from the terminal. It combines an agent loop with workspace-aware tools so it can inspect, edit, test, and reason over real codebases.
-
-- **Local code intelligence**: `workspace.ask_codebase`, `workspace.explain_symbol`, and `workspace.impact_map` use a persistent index under `~/.config/mesh/indexes/<workspace-hash>`.
-- **Runtime debugging**: `.mesh/runbooks/*.json` profiles power `runtime.start`, `runtime.capture_failure`, `runtime.trace_request`, `runtime.explain_failure`, and `runtime.fix_failure`.
-- **Speculative timelines**: `workspace.timeline_create`, `workspace.timeline_apply_patch`, `workspace.timeline_run`, `workspace.timeline_compare`, and `workspace.timeline_promote` test candidate changes in isolated worktrees or checkout copies.
-- **Worker orchestration**: `.mesh/agents/*.md` role definitions feed `agent.spawn`, `agent.status`, `agent.review`, and `agent.merge_verified`.
-- **Terminal frontend preview**: `/preview <url> [widthxheight]` captures Chromium screenshots via CDP and renders inline where supported.
-- **Local supervision view**: `/dashboard` opens the code graph and live tool event control plane.
-- **Voice mode**: `/voice` enables local speech-to-speech workflows. On macOS, `mesh doctor voice fix` installs voice dependencies via Homebrew.
+Add `$(npm config get prefix)/bin` to your shell `PATH` if the binary exists but the command is unavailable.
 
 ## Quick Start
 
@@ -61,38 +53,210 @@ cd path/to/your/project
 mesh
 ```
 
-From inside Mesh, ask for the work you want done:
+Then ask for real engineering work:
 
 ```text
 map this codebase and explain the main runtime path
 find the failing test and patch the smallest fix
 preview http://localhost:3000 and inspect the UI
+create a timeline for this migration and verify it before promotion
 ```
 
-Mesh stores project-specific artifacts in `.mesh/` and persistent per-workspace indexes under `~/.config/mesh/`.
+Mesh writes project-specific artifacts to `.mesh/` and persistent per-workspace indexes to `~/.config/mesh/`.
+
+## Core Capabilities
+
+### Workspace Intelligence
+
+Mesh builds a persistent understanding of your repository: file capsules, symbol maps, dependency hints, codebase summaries, and project memory. This lets the agent reason over large codebases without repeatedly dumping raw files into the model context.
+
+Common commands:
+
+- `/index` re-indexes the workspace.
+- `/status` shows runtime, model, session, git, and index state.
+- `/capsule` inspects or manages compressed session memory.
+- `/distill` updates the project brain context.
+- `/twin` builds or reads the Codebase Digital Twin.
+
+### Safe Code Changes
+
+Mesh can edit real files, but it is designed around verification. Risky changes can be tested in isolated timelines before they ever touch the main workspace. Timeline workflows support patching, running verification commands, comparing diffs, and controlled promotion.
+
+Common capabilities:
+
+- isolated timeline creation and verification
+- patch validation and surgical edits
+- command safety checks for destructive shell patterns
+- tool input validation before execution
+- undo support for recent agent file changes
+
+### Runtime Debugging
+
+Mesh can start commands under runtime observation, capture failures, extract stack traces, explain likely causes, and turn failures into timeline-first fix tasks. For Node.js, Mesh includes an inspector-backed autopsy path that can capture deeper exception context when available.
+
+Useful commands:
+
+- `/hologram start <cmd>`
+- `/replay <traceId|sentryEventId>`
+- `/bisect <symptom>`
+- runtime tools such as `runtime.capture_failure`, `runtime.explain_failure`, and `runtime.fix_failure`
+
+### Autonomous Engineering Workflows
+
+Mesh includes higher-level workflows for planning, discovery, repair, and multi-agent execution:
+
+- `/intent <goal>` compiles a product intent into an implementation contract.
+- `/fork <intent>` creates alternate implementation realities.
+- `/ghost` learns and replays the local engineer's implementation style.
+- `/lab` runs autonomous discovery over project signals.
+- `/repair` surfaces predictive repair opportunities.
+- `/tribunal <problem>` convenes a structured AI panel for hard engineering decisions.
+- `/resurrect` captures or restores session state across future sessions.
+
+### UI, Dashboard, and Voice
+
+Mesh includes developer-experience features for live work:
+
+- `/preview <url>` captures a local frontend screenshot from the terminal.
+- `/inspect [url]` attaches a visual agent portal for UI inspection.
+- `/dashboard` launches a local supervision dashboard for project state and tool events.
+- `/voice [on|off|setup]` enables local speech-to-speech workflows where supported.
+
+## Moonshot Workflows
+
+Mesh ships several advanced workflows that are designed to turn the codebase into a more active system:
+
+### Self-Defending Code
+
+`workspace.self_defend` scans and probes security-sensitive patterns, confirms selected vulnerability classes, writes security ledgers, and can create verified timeline patches for deterministic fixes such as simple ReDoS hardening.
+
+### Precrime for Software
+
+`workspace.precrime` predicts likely future incidents from changed files, risk boundaries, telemetry signals, local outcome history, and optional global Mesh Brain patterns. It can gate risky changes before promotion.
+
+### Bidirectional Spec-Code
+
+`workspace.spec_code` synthesizes behavior contracts from code, routes, and tests; accepts human-declared specs; detects drift; locks important contracts; and emits materialization plans for missing behavior.
+
+### Semantic Git
+
+`workspace.semantic_git` analyzes merge conflicts semantically, plans safe resolutions, verifies them in timelines, and only promotes when explicitly requested and verification passes.
+
+### Semantic Sheriff
+
+`/sheriff` fingerprints module semantics and reports when refactors silently change what code means, even if syntax still looks valid.
+
+### Living Software Stack
+
+Additional experimental workflows include natural-language source planning, fluid capability maps, causal autopsy, proof-carrying changes, session resurrection, tribunal decisions, and living-software pulse reports.
+
+## Typical Workflows
+
+### Understand a New Repository
+
+```text
+/index
+/twin build
+/causal build
+explain the main request path and the riskiest modules
+```
+
+### Make a Risky Change Safely
+
+```text
+/intent migrate auth middleware to the new session model
+/fork plan migrate auth middleware to the new session model
+run the safest timeline and verify with npm test
+```
+
+### Debug a Runtime Failure
+
+```text
+/hologram start npm test
+explain the captured failure and propose the smallest timeline fix
+```
+
+### Harden a Project
+
+```text
+run self defense probe on the repo
+run precrime gate on changed files
+/sheriff scan
+/sheriff verify
+```
+
+### Resolve Merge Conflicts
+
+```text
+run semantic git analyze on the conflicted file
+plan a semantic resolution
+resolve it in a timeline and verify before promotion
+```
+
+## Commands
+
+The CLI exposes a broad `/help` surface for interactive use. A detailed command-by-command guide lives in:
+
+[docs/mesh-cli-command-guide.md](docs/mesh-cli-command-guide.md)
+
+Common top-level commands:
+
+- `/help` show available commands
+- `/status` show runtime and session state
+- `/index` build workspace intelligence
+- `/preview` inspect local UI output
+- `/dashboard` open the local supervision view
+- `/intent`, `/fork`, `/ghost`, `/lab` run advanced engineering workflows
+- `/doctor` diagnose local environment issues
+- `/setup` configure model, cloud cache, theme, endpoint, and voice settings
+
+## Configuration
+
+Important environment variables:
+
+- `WORKSPACE_ROOT`: override the workspace root.
+- `BEDROCK_ENDPOINT`: use a custom LLM endpoint.
+- `BEDROCK_MODEL_ID`: override the default model.
+- `BEDROCK_FALLBACK_MODEL_IDS`: comma-separated fallback model IDs for transient failures.
+- `BEDROCK_MAX_TOKENS`: default output token cap.
+- `MESH_INDEX_PARALLELISM`: indexing concurrency. Default: `12`.
+- `MESH_EMBEDDING_MODEL`: local retrieval embedding model.
+- `MESH_STATE_DIR`: override local Mesh state directory.
+
+User settings are stored under `~/.config/mesh/`. Project artifacts are stored under `.mesh/`.
 
 ## Requirements
 
 - Node.js 20 or newer.
-- macOS, Linux, or any environment where npm global binaries are available on `PATH`.
+- macOS, Linux, or another environment where npm global binaries work.
 - Optional for voice mode on macOS: Homebrew with `ffmpeg` and `whisper-cpp`.
-
-## Performance Settings
-
-- `MESH_INDEX_PARALLELISM`: shared indexing concurrency for CLI and mesh-core paths. Default: `12`.
-- `MESH_EMBEDDING_MODEL`: local retrieval embedding model. Default: `Xenova/nomic-embed-code`, with `Xenova/all-MiniLM-L6-v2` fallback.
-- `BEDROCK_MAX_TOKENS`: default model output cap. Default: `3000`; write-heavy turns can request up to `4096`, read/search turns are capped lower.
+- Optional for frontend preview/dashboard flows: a local browser environment capable of Chrome/CDP-style capture.
 
 ## Package Commands
 
-The npm package exposes two equivalent global commands:
+The npm package exposes:
 
 ```bash
 mesh
 mesh-agent
+mesh-daemon
 ```
 
-Both commands point to the same CLI entrypoint.
+`mesh` and `mesh-agent` point to the same CLI entrypoint. `mesh-daemon` starts the daemon entrypoint.
+
+## Maturity Notes
+
+Mesh is actively evolving. Core workspace operations, indexing, timeline verification, runtime capture, command safety, audit logging, and the main terminal agent loop are intended to be practical for real projects.
+
+Some advanced workflows are intentionally conservative:
+
+- Self-defense currently auto-patches only deterministic classes where Mesh can verify behavior safely.
+- Precrime is a local predictive model plus optional global pattern input; it is not a guarantee that an incident will or will not happen.
+- Semantic Git can safely resolve distinct-symbol conflicts, but overlapping behavior still requires review.
+- Bidirectional Spec-Code can synthesize and check contracts, but arbitrary full code generation from specs remains a reviewed workflow.
+- Dashboard, voice, visual inspection, and some moonshot systems depend on local environment and available integrations.
+
+Use timeline verification, tests, and review gates for production-critical changes.
 
 ## License
 
