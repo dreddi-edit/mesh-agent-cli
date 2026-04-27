@@ -95,3 +95,42 @@ test("local tool dispatch validates inputs and blocks dangerous run_command call
     await rm(workspaceRoot, { recursive: true, force: true });
   }
 });
+
+test("sub-agent tool specs use provider-safe names", async () => {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "mesh-sub-agent-tools-"));
+  const previousStateDir = process.env.MESH_STATE_DIR;
+  const previousFetch = globalThis.fetch;
+  process.env.MESH_STATE_DIR = workspaceRoot;
+  const seenToolNames = [];
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init.body));
+    for (const entry of body.toolConfig?.tools ?? []) {
+      seenToolNames.push(entry.toolSpec.name);
+    }
+    return Response.json({
+      output: { message: { content: [{ text: "summary" }] } },
+      stopReason: "end_turn"
+    });
+  };
+
+  const config = testConfig(workspaceRoot);
+  config.bedrock.endpointBase = "https://mesh.test";
+  config.bedrock.modelId = "primary";
+  const backend = new LocalToolBackend(workspaceRoot, config);
+  try {
+    const result = await backend.callTool("agent.invoke_sub_agent", { prompt: "summarize repo" });
+    assert.equal(result.ok, true);
+    assert.ok(seenToolNames.length > 0);
+    assert.ok(seenToolNames.every((name) => /^[a-zA-Z0-9_-]+$/.test(name)));
+    assert.ok(seenToolNames.includes("workspace_list_files"));
+  } finally {
+    await backend.close();
+    globalThis.fetch = previousFetch;
+    if (previousStateDir === undefined) {
+      delete process.env.MESH_STATE_DIR;
+    } else {
+      process.env.MESH_STATE_DIR = previousStateDir;
+    }
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});

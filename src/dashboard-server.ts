@@ -1,6 +1,9 @@
 import { promises as fs } from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import { DEFAULT_MODEL_ID } from "./model-catalog.js";
+import { LocalToolBackend } from "./local-tools.js";
+import type { AppConfig } from "./config.js";
 
 const workspaceRoot = path.resolve(process.argv[2] || process.cwd());
 const dashboardDir = path.join(workspaceRoot, ".mesh", "dashboard");
@@ -9,11 +12,12 @@ const actionsPath = path.join(dashboardDir, "actions.json");
 const contextMetricsPath = path.join(dashboardDir, "context-metrics.json");
 const artifactIndexPath = path.join(workspaceRoot, ".mesh", "context", "artifacts", "index.json");
 const serverInfoPath = path.join(dashboardDir, "server.json");
-const DASHBOARD_SERVER_VERSION = "context-ledger-v5";
+const DASHBOARD_SERVER_VERSION = "context-ledger-v6";
 
 const SKIP_DIRS = new Set([".git", "node_modules", "dist", ".mesh", ".next", ".turbo", "coverage", "benchmarks"]);
 let stateCache: { at: number; value: Record<string, unknown> } | null = null;
 let graphCache: { key: string; value: Record<string, unknown> } | null = null;
+let actionBackend: LocalToolBackend | null = null;
 
 class Mutex {
   private queue: Array<() => void> = [];
@@ -39,8 +43,55 @@ class Mutex {
 
 const ioMutex = new Mutex();
 
+function dashboardToolConfig(): AppConfig {
+  return {
+    bedrock: {
+      endpointBase: process.env.BEDROCK_ENDPOINT || "",
+      bearerToken: process.env.AWS_BEARER_TOKEN_BEDROCK || process.env.BEDROCK_BEARER_TOKEN || process.env.BEDROCK_API_KEY || undefined,
+      modelId: process.env.BEDROCK_MODEL_ID || DEFAULT_MODEL_ID,
+      fallbackModelIds: [],
+      temperature: 0,
+      maxTokens: 3000
+    },
+    agent: {
+      maxSteps: 8,
+      mode: "local",
+      workspaceRoot,
+      enableCloudCache: false,
+      themeColor: "cyan",
+      voice: {
+        configured: false,
+        language: "auto",
+        speed: 260,
+        voice: "auto",
+        microphone: "default",
+        transcriptionModel: "small"
+      }
+    },
+    mcp: {
+      args: []
+    },
+    supabase: {},
+    telemetry: {
+      contribute: false
+    }
+  };
+}
+
+function getActionBackend(): LocalToolBackend {
+  if (!actionBackend) {
+    actionBackend = new LocalToolBackend(workspaceRoot, dashboardToolConfig());
+  }
+  return actionBackend;
+}
+
 async function main(): Promise<void> {
   await fs.mkdir(dashboardDir, { recursive: true });
+  const closeBackend = () => {
+    void actionBackend?.close().catch(() => undefined);
+  };
+  process.once("SIGINT", closeBackend);
+  process.once("SIGTERM", closeBackend);
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url || "/", "http://127.0.0.1");
@@ -143,6 +194,7 @@ async function buildState(): Promise<Record<string, unknown>> {
     : [];
   const repairQueue = Array.isArray(repair?.queue) ? repair.queue.slice(0, 8) : [];
   const discoveries = Array.isArray(discovery?.discoveries) ? discovery.discoveries.slice(0, 6) : [];
+  const actionQueue = normalizeActionQueue(Array.isArray(actions) ? actions : []);
 
   const summary = {
     workspace: path.basename(workspaceRoot),
@@ -176,11 +228,11 @@ async function buildState(): Promise<Record<string, unknown>> {
       status: healthScore >= 85 ? "healthy" : healthScore >= 65 ? "watch" : "attention"
     },
     actions: [
-      { label: "/repair", detail: "Prepared fixes", action: "repair" },
-      { label: "/causal", detail: "Causal graph", action: "causal" },
-      { label: "/lab", detail: "Discoveries", action: "lab" },
-      { label: "/twin", detail: "Refresh map", action: "twin" },
-      { label: "/ghost learn", detail: "Style profile", action: "ghost_learn" }
+      { label: "/repair", detail: "Find compiler/test-risk repair candidates", action: "repair" },
+      { label: "/causal", detail: "Rebuild the file/risk/test graph", action: "causal" },
+      { label: "/lab", detail: "Suggest high-impact repo improvements", action: "lab" },
+      { label: "/twin", detail: "Refresh files, routes, symbols, risks", action: "twin" },
+      { label: "/ghost learn", detail: "Learn local implementation style", action: "ghost_learn" }
     ],
     groupedFiles,
     dependencyGraph,
@@ -192,11 +244,25 @@ async function buildState(): Promise<Record<string, unknown>> {
     ghost,
     memoryRules: Array.isArray(memory?.rules) ? memory.rules.slice(0, 8) : [],
     events: Array.isArray(events) ? events.slice(0, 30) : [],
-    actionQueue: Array.isArray(actions) ? actions.slice(0, 20) : [],
+    actionQueue,
     liveUpdatedAt: new Date().toISOString()
   };
   stateCache = { at: Date.now(), value: state };
   return state;
+}
+
+function normalizeActionQueue(actions: any[]): any[] {
+  const now = Date.now();
+  return actions.slice(0, 20).map((action) => {
+    if (action?.status !== "pending") return action;
+    const createdAt = Date.parse(String(action.createdAt || ""));
+    if (Number.isFinite(createdAt) && now - createdAt < 120_000) return action;
+    return {
+      ...action,
+      status: "stale",
+      summary: "Queued by an older dashboard session. Run it again."
+    };
+  });
 }
 
 async function readRequestJson(req: http.IncomingMessage): Promise<Record<string, unknown>> {
@@ -226,14 +292,14 @@ async function enqueueAction(body: Record<string, unknown>): Promise<Record<stri
     return { ok: false, error: "unsupported action" };
   }
   await ioMutex.acquire();
-  let request;
+  let request: Record<string, unknown>;
   try {
     const existing = await readJson(actionsPath, []);
     const queue = Array.isArray(existing) ? existing : [];
     request = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       action,
-      status: "pending",
+      status: "running",
       createdAt: new Date().toISOString()
     };
     queue.unshift(request);
@@ -242,8 +308,93 @@ async function enqueueAction(body: Record<string, unknown>): Promise<Record<stri
   } finally {
     ioMutex.release();
   }
-  await appendEvent({ type: "dashboard_action", msg: `queued ${action}`, at: new Date().toISOString() });
-  return { ok: true, request };
+  await appendEvent({ type: "dashboard_action", msg: `running ${action}`, at: new Date().toISOString() });
+
+  try {
+    const result = await executeDashboardAction(action);
+    const completed = {
+      ...request,
+      status: "done",
+      finishedAt: new Date().toISOString(),
+      summary: summarizeActionResult(action, result),
+      result
+    };
+    await updateActionRecord(String(request.id), completed);
+    await appendEvent({ type: "dashboard_action", msg: `done ${action}`, at: new Date().toISOString() });
+    stateCache = null;
+    graphCache = null;
+    return { ok: true, request: completed };
+  } catch (error) {
+    const failed = {
+      ...request,
+      status: "error",
+      finishedAt: new Date().toISOString(),
+      error: (error as Error).message
+    };
+    await updateActionRecord(String(request.id), failed);
+    await appendEvent({ type: "dashboard_action", msg: `failed ${action}`, at: new Date().toISOString() });
+    stateCache = null;
+    return { ok: false, request: failed, error: (error as Error).message };
+  }
+}
+
+async function executeDashboardAction(action: string): Promise<Record<string, unknown>> {
+  const backend = getActionBackend();
+  switch (action) {
+    case "repair":
+      return await backend.callTool("workspace.predictive_repair", { action: "analyze" }) as Record<string, unknown>;
+    case "causal":
+      return await backend.callTool("workspace.causal_intelligence", { action: "build" }) as Record<string, unknown>;
+    case "lab":
+      return await backend.callTool("workspace.discovery_lab", { action: "run" }) as Record<string, unknown>;
+    case "twin":
+      return await backend.callTool("workspace.digital_twin", { action: "build" }) as Record<string, unknown>;
+    case "ghost_learn":
+      return await backend.callTool("workspace.ghost_engineer", { action: "learn" }) as Record<string, unknown>;
+    default:
+      throw new Error(`Unsupported dashboard action: ${action}`);
+  }
+}
+
+function summarizeActionResult(action: string, result: Record<string, unknown>): string {
+  if (action === "repair") {
+    const queue = Array.isArray((result as any).queue) ? (result as any).queue.length : 0;
+    return `${queue} repair candidates`;
+  }
+  if (action === "causal") {
+    const graph = (result as any).graph ?? result;
+    return `${graph.nodes?.length ?? graph.nodes ?? 0} nodes, ${graph.insights?.length ?? graph.insights ?? 0} insights`;
+  }
+  if (action === "lab") {
+    return `${Array.isArray((result as any).discoveries) ? (result as any).discoveries.length : 0} discoveries`;
+  }
+  if (action === "twin") {
+    const twin = (result as any).twin ?? result;
+    return `${twin.files?.total ?? twin.files ?? 0} files mapped`;
+  }
+  if (action === "ghost_learn") {
+    const profile = (result as any).profile ?? result;
+    return `confidence ${profile.confidence ?? "n/a"}`;
+  }
+  return "complete";
+}
+
+async function updateActionRecord(id: string, next: Record<string, unknown>): Promise<void> {
+  await ioMutex.acquire();
+  try {
+    const existing = await readJson(actionsPath, []);
+    const queue = Array.isArray(existing) ? existing : [];
+    const index = queue.findIndex((item: any) => item?.id === id);
+    if (index >= 0) {
+      queue[index] = next;
+    } else {
+      queue.unshift(next);
+    }
+    await fs.mkdir(path.dirname(actionsPath), { recursive: true });
+    await fs.writeFile(actionsPath, JSON.stringify(queue.slice(0, 100), null, 2), "utf8");
+  } finally {
+    ioMutex.release();
+  }
 }
 
 async function appendEvent(event: Record<string, unknown>): Promise<void> {
@@ -441,59 +592,69 @@ function renderHtml(): string {
   <title>Mesh Dashboard</title>
   <style>
     :root {
-      --bg: #f5f7fb;
+      --bg: #eef2f5;
       --panel: #ffffff;
-      --muted: #64748b;
-      --text: #0f172a;
-      --border: #dbe3ef;
-      --accent: #2563eb;
-      --accent-soft: #dbeafe;
-      --warn: #b45309;
-      --warn-soft: #ffedd5;
-      --danger: #b91c1c;
-      --danger-soft: #fee2e2;
-      --ok: #15803d;
-      --ok-soft: #dcfce7;
-      --shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+      --panel-2: #f8fafb;
+      --muted: #687586;
+      --text: #111827;
+      --border: #d8e0e7;
+      --border-strong: #b9c5d0;
+      --accent: #0f766e;
+      --accent-soft: #d9f4ef;
+      --warn: #9a5b10;
+      --warn-soft: #fff3d6;
+      --danger: #a52828;
+      --danger-soft: #ffe1e1;
+      --ok: #16723a;
+      --ok-soft: #ddf6e7;
+      --shadow: 0 1px 2px rgba(17, 24, 39, 0.05);
     }
     * { box-sizing: border-box; }
-    body { margin: 0; font: 14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--text); background: var(--bg); }
-    .app { min-height: 100vh; display: grid; grid-template-rows: auto auto 1fr; }
-    header { padding: 18px 24px; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; gap: 16px; align-items: center; justify-content: space-between; }
-    .brand { font-size: 18px; font-weight: 700; }
-    .subtitle { color: var(--muted); font-size: 13px; }
-    .status { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
-    .dot { width: 10px; height: 10px; border-radius: 999px; background: var(--ok); box-shadow: 0 0 0 4px var(--ok-soft); }
-    .summary { padding: 16px 24px; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; }
-    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); }
-    .metric { padding: 14px; min-height: 88px; }
-    .metric .label { font-size: 12px; color: var(--muted); }
-    .metric .value { margin-top: 8px; font-size: 28px; font-weight: 700; }
-    .metric .meta { margin-top: 4px; color: var(--muted); font-size: 12px; }
-    main { padding: 0 24px 24px; display: grid; grid-template-columns: 320px minmax(0, 1fr) 360px; gap: 16px; }
-    section { padding: 16px; }
-    h2, h3 { margin: 0 0 12px; font-size: 15px; }
-    .stack { display: grid; gap: 16px; }
-    .list { display: grid; gap: 8px; }
-    .item { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: #fbfdff; }
-    .item strong { display: block; font-size: 13px; margin-bottom: 4px; }
-    .item small { color: var(--muted); }
+    html, body { min-height: 100%; }
+    body { margin: 0; font: 13px/1.42 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--text); background: var(--bg); overflow: hidden; }
+    .app { height: 100vh; display: grid; grid-template-rows: auto auto minmax(0, 1fr); }
+    header { padding: 14px 20px; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; gap: 18px; align-items: center; justify-content: space-between; min-width: 0; }
+    .brand { font-size: 17px; font-weight: 760; letter-spacing: 0; }
+    .subtitle { color: var(--muted); font-size: 12px; max-width: min(760px, 62vw); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .status { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+    .summary { padding: 12px 20px; display: grid; grid-template-columns: repeat(6, minmax(128px, 1fr)); gap: 10px; border-bottom: 1px solid var(--border); overflow: auto hidden; }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); min-width: 0; }
+    .metric { padding: 10px 12px; min-height: 72px; }
+    .metric .label { font-size: 11px; color: var(--muted); text-transform: uppercase; font-weight: 720; }
+    .metric .value { margin-top: 4px; font-size: 24px; line-height: 1.05; font-weight: 780; letter-spacing: 0; }
+    .metric .meta { margin-top: 4px; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    main { min-height: 0; padding: 12px 20px 18px; display: grid; grid-template-columns: 300px minmax(560px, 1fr) 340px; gap: 12px; overflow: hidden; }
+    section { padding: 14px; min-width: 0; }
+    h2, h3 { margin: 0; font-size: 14px; line-height: 1.2; font-weight: 760; letter-spacing: 0; }
+    .section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+    .stack { display: grid; gap: 12px; min-height: 0; align-content: start; overflow: auto; padding-right: 2px; }
+    .list { display: grid; gap: 8px; min-width: 0; }
+    .item { border: 1px solid var(--border); border-radius: 7px; padding: 9px 10px; background: var(--panel-2); min-width: 0; }
+    .item strong { display: block; font-size: 13px; margin-bottom: 3px; overflow-wrap: anywhere; }
+    .item small { color: var(--muted); overflow-wrap: anywhere; }
     .pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 12px; font-weight: 600; }
     .pill.ok { background: var(--ok-soft); color: var(--ok); }
     .pill.warn { background: var(--warn-soft); color: var(--warn); }
     .pill.danger { background: var(--danger-soft); color: var(--danger); }
-    .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
-    .toolbar input, .toolbar select { width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font: inherit; background: #fff; }
-    .file-list { max-height: calc(100vh - 250px); overflow: auto; display: grid; gap: 8px; }
-    .file-row { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; cursor: pointer; background: #fff; }
+    .status-badge { border: 1px solid var(--border); border-radius: 999px; padding: 2px 7px; color: var(--muted); background: #fff; font-size: 11px; font-weight: 700; }
+    .status-badge.done { background: var(--ok-soft); color: var(--ok); border-color: #b8e8c9; }
+    .status-badge.running { background: var(--accent-soft); color: var(--accent); border-color: #b2ded8; }
+    .status-badge.error { background: var(--danger-soft); color: var(--danger); border-color: #ffcaca; }
+    .toolbar { display: grid; grid-template-columns: minmax(0, 1fr) 130px; gap: 8px; align-items: center; margin-bottom: 10px; }
+    .toolbar input, .toolbar select { width: 100%; min-width: 0; border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; font: inherit; background: #fff; color: var(--text); }
+    .file-section { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); }
+    .detail-grid { min-height: 0; display: grid; grid-template-columns: minmax(230px, 0.92fr) minmax(260px, 1.08fr); gap: 10px; }
+    .file-list { min-height: 240px; max-height: 100%; overflow: auto; display: grid; gap: 7px; align-content: start; padding-right: 2px; }
+    .file-row { border: 1px solid var(--border); border-radius: 7px; padding: 9px 10px; cursor: pointer; background: #fff; min-width: 0; }
     .file-row:hover, .file-row.active { border-color: var(--accent); background: var(--accent-soft); }
-    .file-row .path { font-size: 13px; font-weight: 600; word-break: break-word; }
+    .file-row .path { font-size: 13px; font-weight: 650; overflow-wrap: anywhere; }
     .file-row .meta { margin-top: 4px; color: var(--muted); font-size: 12px; }
-    .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-    .empty { color: var(--muted); padding: 18px 0; }
+    .file-detail-panel { border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); padding: 12px; min-height: 240px; overflow: auto; }
+    .empty { color: var(--muted); padding: 14px 0; }
     .muted { color: var(--muted); }
-    .center-column { min-width: 0; }
-    .graph-card { min-height: 430px; }
+    .center-column { min-width: 0; overflow: auto; }
+    .graph-card { min-height: 360px; }
     .graph-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
     .graph-head h2 { margin: 0; }
     .graph-tools { display: flex; align-items: center; gap: 10px; }
@@ -501,13 +662,13 @@ function renderHtml(): string {
     .segmented { display: inline-grid; grid-auto-flow: column; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: #fff; }
     .segmented button { border: 0; background: transparent; padding: 7px 10px; font: inherit; font-size: 12px; cursor: pointer; color: var(--muted); }
     .segmented button.active { background: var(--accent); color: #fff; }
-    .graph-shell { height: 390px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: #f8fafc; }
+    .graph-shell { height: min(380px, 42vh); min-height: 300px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: #f9fbfc; }
     .graph-svg { width: 100%; height: 100%; display: block; }
-    .graph-link { stroke: #94a3b8; stroke-width: 1.2; opacity: 0.38; }
+    .graph-link { stroke: #8a9bab; stroke-width: 1.2; opacity: 0.38; }
     .graph-link.active { stroke: var(--accent); opacity: 0.9; stroke-width: 2; }
     .graph-node { cursor: pointer; }
     .graph-node circle { stroke: #fff; stroke-width: 2; }
-    .graph-node text { fill: #334155; font-size: 11px; paint-order: stroke; stroke: #f8fafc; stroke-width: 4px; stroke-linejoin: round; }
+    .graph-node text { fill: #334155; font-size: 11px; paint-order: stroke; stroke: #f9fbfc; stroke-width: 4px; stroke-linejoin: round; }
     .graph-node.active circle { stroke: var(--accent); stroke-width: 3; }
     .graph-node.dim { opacity: 0.28; }
     .graph-column-label { fill: #64748b; font-size: 12px; font-weight: 700; text-transform: uppercase; }
@@ -518,17 +679,26 @@ function renderHtml(): string {
     .dependency-list .item { min-height: 64px; }
     .package-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
     .action-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; }
-    .action-button { border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 7px; padding: 7px 10px; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
+    .action-button { min-width: 72px; border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 7px; padding: 7px 10px; font: inherit; font-size: 12px; font-weight: 740; cursor: pointer; }
+    .action-button:hover { filter: brightness(0.96); }
     .action-button:disabled { opacity: 0.45; cursor: default; }
     .queue-state { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+    .toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); max-width: min(760px, calc(100vw - 32px)); background: #111827; color: white; padding: 9px 12px; border-radius: 7px; box-shadow: 0 12px 28px rgba(17,24,39,0.22); opacity: 0; pointer-events: none; transition: opacity 160ms ease; z-index: 20; }
+    .toast.show { opacity: 1; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: #c6d1dc; border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; }
     @media (max-width: 1400px) {
       .summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-      main { grid-template-columns: 300px minmax(0, 1fr); }
+      main { grid-template-columns: 290px minmax(0, 1fr); }
       .right-column { grid-column: 1 / -1; }
     }
     @media (max-width: 960px) {
+      body { overflow: auto; }
+      .app { height: auto; min-height: 100vh; }
       .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      main { grid-template-columns: 1fr; }
+      main { grid-template-columns: 1fr; overflow: visible; }
+      .detail-grid { grid-template-columns: 1fr; }
+      .status { display: none; }
     }
   </style>
 </head>
@@ -548,11 +718,16 @@ function renderHtml(): string {
     <main>
       <div class="stack">
         <section class="card">
-          <h2>Commands</h2>
+          <div class="section-head">
+            <h2>Command Center</h2>
+            <span class="status-badge">local</span>
+          </div>
           <div class="list" id="actions"></div>
         </section>
         <section class="card">
-          <h2>Queue</h2>
+          <div class="section-head">
+            <h2>Signals</h2>
+          </div>
           <div class="list" id="attention"></div>
         </section>
       </div>
@@ -572,15 +747,18 @@ function renderHtml(): string {
             <svg id="dependency-graph" class="graph-svg" viewBox="0 0 960 360" role="img" aria-label="Dependency graph"></svg>
           </div>
           <div class="legend">
-            <span><i class="swatch" style="background:#2563eb"></i>source</span>
+            <span><i class="swatch" style="background:#0f766e"></i>source</span>
             <span><i class="swatch" style="background:#16a34a"></i>tests</span>
-            <span><i class="swatch" style="background:#9333ea"></i>config</span>
+            <span><i class="swatch" style="background:#596579"></i>config</span>
             <span><i class="swatch" style="background:#f59e0b"></i>other</span>
           </div>
           <div class="package-grid" id="external-packages"></div>
         </section>
-        <section class="card">
-          <h2>Dateien</h2>
+        <section class="card file-section">
+          <div class="section-head">
+            <h2>Dateien</h2>
+            <span class="status-badge" id="file-count-label">0</span>
+          </div>
           <div class="toolbar">
             <input id="search" type="search" placeholder="Dateien, Pfade, Komponenten suchen" />
             <select id="group">
@@ -596,13 +774,11 @@ function renderHtml(): string {
             <div>
               <div class="file-list" id="file-list"></div>
             </div>
-            <div>
-              <div class="card" style="box-shadow:none">
-                <section>
-                  <h3>Dateidetails</h3>
-                  <div id="file-detail" class="empty">Wähle links eine Datei aus.</div>
-                </section>
+            <div class="file-detail-panel">
+              <div class="section-head">
+                <h3>Dateidetails</h3>
               </div>
+              <div id="file-detail" class="empty">Wähle links eine Datei aus.</div>
             </div>
           </div>
         </section>
@@ -626,6 +802,7 @@ function renderHtml(): string {
         </section>
       </div>
     </main>
+    <div class="toast" id="toast"></div>
   </div>
   <script>
     let currentState = null;
@@ -644,18 +821,22 @@ function renderHtml(): string {
     const workspaceLabelEl = document.getElementById("workspace-label");
     const searchEl = document.getElementById("search");
     const groupEl = document.getElementById("group");
+    const fileCountLabelEl = document.getElementById("file-count-label");
     const graphEl = document.getElementById("dependency-graph");
     const graphMetaEl = document.getElementById("graph-meta");
     const externalPackagesEl = document.getElementById("external-packages");
     const graphModeButtons = document.querySelectorAll("[data-graph-mode]");
+    const toastEl = document.getElementById("toast");
 
     const groupColors = {
-      source: "#2563eb",
+      source: "#0f766e",
       tests: "#16a34a",
       docs: "#7c3aed",
-      config: "#9333ea",
+      config: "#596579",
       other: "#f59e0b"
     };
+
+    let toastTimer = null;
 
     function esc(value) {
       return String(value == null ? "" : value)
@@ -667,6 +848,16 @@ function renderHtml(): string {
 
     function metricCard(label, value, meta) {
       return '<div class="card metric"><div class="label">' + label + '</div><div class="value">' + value + '</div><div class="meta">' + meta + '</div></div>';
+    }
+
+    function showToast(message) {
+      if (!toastEl) return;
+      toastEl.textContent = message;
+      toastEl.classList.add("show");
+      if (toastTimer) window.clearTimeout(toastTimer);
+      toastTimer = window.setTimeout(function() {
+        toastEl.classList.remove("show");
+      }, 2600);
     }
 
     function pillClass(status) {
@@ -687,10 +878,18 @@ function renderHtml(): string {
         metricCard("Ghost", currentState.summary.ghostConfidence == null ? 'n/a' : currentState.summary.ghostConfidence + '%', 'Repo-spezifische Arbeitsweise')
       ].join("");
 
+      const latestByAction = new Map();
+      (currentState.actionQueue || []).forEach(function(item) {
+        if (!latestByAction.has(item.action)) latestByAction.set(item.action, item);
+      });
       actionsEl.innerHTML = currentState.actions.map(function(action) {
-        return '<div class="item action-row"><div><strong>' + esc(action.label) + '</strong><small>' + esc(action.detail) + '</small></div><button class="action-button" data-action="' + esc(action.action) + '">Run</button></div>';
+        const latest = latestByAction.get(action.action);
+        const status = latest ? '<span class="status-badge ' + esc(latest.status) + '">' + esc(latest.status) + '</span>' : '';
+        const summary = latest && (latest.summary || latest.error) ? '<br>' + esc(latest.summary || latest.error) : '';
+        return '<div class="item action-row"><div><strong>' + esc(action.label) + ' ' + status + '</strong><small>' + esc(action.detail) + summary + '</small></div><button class="action-button" data-action="' + esc(action.action) + '">' + (latest && latest.status === 'running' ? 'Running' : 'Run') + '</button></div>';
       }).join("");
       actionsEl.querySelectorAll("[data-action]").forEach(function(button) {
+        if (button.textContent === "Running") button.disabled = true;
         button.addEventListener("click", function() {
           triggerAction(button.getAttribute("data-action"), button);
         });
@@ -699,7 +898,8 @@ function renderHtml(): string {
       const attention = [];
       attention.push('<div class="item"><strong>Health</strong><small><span class="pill ' + pillClass(currentState.health.status) + '">' + currentState.health.status + '</span> Score ' + currentState.health.score + '</small></div>');
       (currentState.actionQueue || []).slice(0, 4).forEach(function(action) {
-        attention.push('<div class="item"><strong>' + esc(action.action) + '</strong><small><span class="queue-state">' + esc(action.status) + '</span></small></div>');
+        const detail = action.summary || action.error || action.createdAt || "";
+        attention.push('<div class="item"><strong>' + esc(action.action) + ' <span class="status-badge ' + esc(action.status) + '">' + esc(action.status) + '</span></strong><small>' + esc(detail) + '</small></div>');
       });
       currentState.repairQueue.forEach(function(item) {
         attention.push('<div class="item"><strong>' + esc(item.summary || 'Repair candidate') + '</strong><small>' + esc((item.files || []).join(', ') || 'ohne Dateiangabe') + '</small></div>');
@@ -884,16 +1084,23 @@ function renderHtml(): string {
     async function triggerAction(action, button) {
       if (!action) return;
       button.disabled = true;
-      button.textContent = "Queued";
-      await fetch('/api/actions', {
+      button.textContent = "Running";
+      showToast("Running " + action + "...");
+      const response = await fetch('/api/actions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: action })
-      }).catch(function() {});
-      setTimeout(function() {
-        button.disabled = false;
-        button.textContent = "Run";
-      }, 1200);
+      }).catch(function(error) {
+        return { ok: false, json: function() { return Promise.resolve({ ok: false, error: error.message }); } };
+      });
+      const payload = await response.json().catch(function() { return { ok: false, error: "invalid response" }; });
+      if (payload.ok) {
+        showToast((payload.request && payload.request.summary) ? payload.request.summary : action + " complete");
+      } else {
+        showToast(payload.error || action + " failed");
+      }
+      button.disabled = false;
+      button.textContent = "Run";
       await refresh();
     }
 
@@ -912,6 +1119,7 @@ function renderHtml(): string {
       const files = allFiles().filter(function(entry) {
         return (group === 'all' || entry.group === group) && (!query || entry.file.toLowerCase().includes(query));
       }).slice(0, 200);
+      fileCountLabelEl.textContent = files.length + " shown";
       fileListEl.innerHTML = files.length
         ? files.map(function(entry) {
             const active = selectedFile === entry.file ? ' active' : '';

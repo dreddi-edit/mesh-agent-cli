@@ -21,7 +21,7 @@ marked.use(markedTerminal() as any);
 type EnquirerCtor = new (options: Record<string, unknown>) => { run(): Promise<unknown> };
 const { Select, Confirm, Input } = pkg as unknown as { Select: EnquirerCtor; Confirm: EnquirerCtor; Input: EnquirerCtor };
 
-const DASHBOARD_SERVER_VERSION = "context-ledger-v5";
+const DASHBOARD_SERVER_VERSION = "context-ledger-v6";
 
 import { AppConfig, loadUserSettings, saveUserSettings, shortPathLabel, UserSettings, VoiceSettings } from "./config.js";
 import {
@@ -433,6 +433,10 @@ function fitTerminalLine(value: string, width: number): string {
   return plain.slice(0, Math.max(0, width - 1)) + "…";
 }
 
+function isStreamingEndpointUnavailable(message: string): boolean {
+  return /LLM streaming failed/i.test(message) && /(?:->|status\s*)\s*(404|405)\b/i.test(message);
+}
+
 export class AgentLoop {
   private ghostTextListener: ((...args: unknown[]) => void) | null = null;
   private readonly llm: BedrockLlmClient;
@@ -477,6 +481,7 @@ export class AgentLoop {
   private consecutiveErrors = new Map<string, number>();
   private portal: MeshPortal;
   private headlessInitialized = false;
+  private streamingUnavailable = false;
 
   constructor(
     private readonly config: AppConfig,
@@ -660,19 +665,71 @@ export class AgentLoop {
     }
   }
 
-  private async handleInspect(url: string): Promise<void> {
-    const port = new URL(url).port || "3000";
+  private normalizeInspectUrl(raw: string): string {
+    const value = raw.trim() || "http://localhost:3000";
+    return /^https?:\/\//i.test(value) ? value : `http://${value}`;
+  }
 
-    // 1. Check if server is already running
-    const isRunning = await new Promise(resolve => {
-      const socket = new http.ClientRequest({ port: Number(port), method: 'HEAD', timeout: 500 });
-      socket.on('response', () => resolve(true));
-      socket.on('error', () => resolve(false));
-      socket.end();
+  private async isUrlReachable(url: string, timeoutMs = 700): Promise<boolean> {
+    return await new Promise((resolve) => {
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        resolve(false);
+        return;
+      }
+      const req = http.request(
+        {
+          hostname: parsed.hostname,
+          port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
+          path: parsed.pathname || "/",
+          method: "HEAD",
+          timeout: timeoutMs
+        },
+        (res) => {
+          res.resume();
+          resolve(Boolean(res.statusCode && res.statusCode < 500));
+        }
+      );
+      req.on("error", () => resolve(false));
+      req.on("timeout", () => {
+        req.destroy();
+        resolve(false);
+      });
+      req.end();
     });
+  }
 
-    if (!isRunning) {
-      output.write(pc.yellow(`\n[Mesh Portal] No server detected on port ${port}. Attempting to start dev server...\n`));
+  private async findReachableDevUrl(preferredUrl: string): Promise<string | null> {
+    if (await this.isUrlReachable(preferredUrl)) return preferredUrl;
+    const parsed = new URL(preferredUrl);
+    const host = parsed.hostname === "0.0.0.0" ? "127.0.0.1" : parsed.hostname;
+    const ports = uniqueLimited(
+      [
+        parsed.port || (parsed.protocol === "https:" ? "443" : "80"),
+        "5173",
+        "5174",
+        "3000",
+        "3001",
+        "4173",
+        "8080"
+      ],
+      8
+    );
+    for (const port of ports) {
+      const candidate = `${parsed.protocol}//${host}:${port}`;
+      if (await this.isUrlReachable(candidate, 450)) return candidate;
+    }
+    return null;
+  }
+
+  private async handleInspect(url: string): Promise<void> {
+    let targetUrl = this.normalizeInspectUrl(url);
+    let detectedUrl = await this.findReachableDevUrl(targetUrl);
+
+    if (!detectedUrl) {
+      output.write(pc.yellow(`\n[Mesh Portal] No dev server detected near ${targetUrl}. Starting the workspace dev script...\n`));
       try {
         const pkgPath = path.join(this.config.agent.workspaceRoot, "package.json");
         const pkg = JSON.parse(await fs.readFile(pkgPath, "utf8"));
@@ -686,17 +743,12 @@ export class AgentLoop {
             detached: true
           });
           serverProc.unref();
-          output.write(pc.green(`[Mesh Portal] Dev server launched in background. Waiting for port ${port}...\n`));
+          output.write(pc.green("[Mesh Portal] Dev server launched in background. Probing common local ports...\n"));
 
-          // Wait for port to open
-          for (let i = 0; i < 20; i++) {
+          for (let i = 0; i < 25; i++) {
             await new Promise(r => setTimeout(r, 1000));
-            if (await new Promise(res => {
-              const s = new http.ClientRequest({ port: Number(port), method: 'HEAD', timeout: 200 });
-              s.on('response', () => res(true));
-              s.on('error', () => res(false));
-              s.end();
-            })) break;
+            detectedUrl = await this.findReachableDevUrl(targetUrl);
+            if (detectedUrl) break;
           }
         } else {
           throw new Error("No 'dev' or 'start' script found in package.json");
@@ -706,9 +758,13 @@ export class AgentLoop {
       }
     }
 
-    const spinner = ora({ text: `Connecting to Neuro-Kinetic Portal at ${url}...`, color: "cyan" }).start();
+    if (detectedUrl) {
+      targetUrl = detectedUrl;
+    }
+
+    const spinner = ora({ text: `Connecting visual inspector to ${targetUrl}...`, color: "cyan" }).start();
     try {
-      await this.portal.start(url, async (event) => {
+      await this.portal.start(targetUrl, async (event) => {
         if (event.name === "meshEmit") {
           await this.handlePortalMutation(event.payload);
         }
@@ -719,9 +775,10 @@ export class AgentLoop {
       const scriptContent = await fs.readFile(scriptPath, "utf8");
       await this.portal.evaluate(scriptContent);
 
-      spinner.succeed(pc.green(`Visual Portal active on ${url}. Use Alt+Click to edit UI.`));
+      spinner.succeed(pc.green(`Visual inspector active on ${targetUrl}. Alt+Click an element to describe a UI change.`));
     } catch (e) {
-      spinner.fail(pc.red(`Portal connection failed: ${(e as Error).message}`));
+      spinner.fail(pc.red(`Visual inspector failed: ${(e as Error).message}`));
+      output.write(pc.dim(`Tip: run your app manually, then use /inspect http://localhost:<port> or /preview ${targetUrl}.\n`));
     }
   }
 
@@ -1217,7 +1274,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
       for (let step = 0; step < maxSteps; step += 1) {
         let response: LlmResponse;
 
-        if (hooks?.onDelta) {
+        if (hooks?.onDelta && !this.streamingUnavailable) {
           let accumulatedText = "";
           const streamedToolUses: any[] = [];
           try {
@@ -1265,9 +1322,10 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
             }
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            if (!/LLM streaming failed \((404|405)\)/.test(message)) {
+            if (!isStreamingEndpointUnavailable(message)) {
               throw error;
             }
+            this.streamingUnavailable = true;
 
             const prepared = this.prepareModelInput(preTurnLength, toolSpecs);
             response = await this.llm.converse(
@@ -1302,6 +1360,10 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
           if (response.usage) {
             this.sessionTokens.inputTokens += response.usage.inputTokens ?? 0;
             this.sessionTokens.outputTokens += response.usage.outputTokens ?? 0;
+          }
+
+          if (hooks?.onDelta && response.text) {
+            hooks.onDelta(response.text);
           }
         }
 
@@ -1788,8 +1850,8 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     const statusRows = [
       `mesh  ${this.config.agent.mode}  ${shortPathLabel(this.config.agent.workspaceRoot)}`,
       `branch: ${this.currentBranch}   model: ${shortModelName(this.currentModelId)}`,
-      "commands: /help /status /causal /lab /fork /ghost /tribunal /resurrect /sheriff /dashboard /exit",
-      "tip: Type / and press TAB for command completion"
+      "commands: /help for groups, /dashboard for local repo UI, /exit to quit",
+      "tip: Ask normal questions directly; slash commands are shortcuts"
     ];
 
     if (!this.useAnsi) {
@@ -1818,8 +1880,8 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
       [
         `${this.themeColor(pc.bold("mesh"))}  ${pc.dim(this.config.agent.mode)}  ${pc.dim(shortPathLabel(this.config.agent.workspaceRoot))}`,
         `${pc.dim("branch:")} ${this.themeColor(this.currentBranch)}   ${pc.dim("model:")} ${this.themeColor(shortModelName(this.currentModelId))}`,
-        `${pc.dim("commands:")} ${pc.magenta("/help")} ${pc.magenta("/status")} ${pc.magenta("/causal")} ${pc.magenta("/lab")} ${pc.magenta("/fork")} ${pc.magenta("/ghost")} ${pc.magenta("/tribunal")} ${pc.magenta("/resurrect")} ${pc.magenta("/sheriff")} ${pc.magenta("/dashboard")} ${pc.magenta("/exit")}`,
-        `${pc.dim("tip:")} ${pc.dim("Type / and press TAB for command completion")}`
+        `${pc.dim("commands:")} ${pc.magenta("/help")} ${pc.dim("for groups")}  ${pc.magenta("/dashboard")} ${pc.dim("for local repo UI")}  ${pc.magenta("/exit")}`,
+        `${pc.dim("tip:")} ${pc.dim("Ask normal questions directly; slash commands are shortcuts")}`
       ].join("\n") + "\n"
     );
     output.write(this.themeColor(hr) + "\n");
@@ -3437,22 +3499,80 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     return [...this.turnContextReports].sort((left, right) => right.totalTokens - left.totalTokens)[0] ?? null;
   }
 
-  private printHelp(): void {
+  private printHelp(args: string[] = []): void {
     const commands = this.getSlashCommands();
+    const requested = args[0]?.toLowerCase().replace(/^([^/])/, "/$1");
+    if (requested) {
+      const command = commands.find((item) => item.name === requested || item.aliases?.includes(requested));
+      if (!command) {
+        output.write(pc.yellow(`\nNo command named ${requested}. Run /help for the command groups.\n`));
+        return;
+      }
+      const examples = this.commandExamples(command.name);
+      output.write(
+        [
+          "",
+          `${pc.magenta(pc.bold(command.name))}${command.aliases?.length ? pc.dim(` (${command.aliases.join(", ")})`) : ""}`,
+          `${pc.dim("what:")}  ${command.description}`,
+          `${pc.dim("usage:")} ${command.usage}`,
+          ...(examples.length ? [`${pc.dim("examples:")}`, ...examples.map((example) => `  ${example}`)] : []),
+          ""
+        ].join("\n")
+      );
+      return;
+    }
+
+    const groups: Array<{ title: string; names: string[] }> = [
+      { title: "Start Here", names: ["/status", "/index", "/doctor", "/dashboard"] },
+      { title: "Ask About This Repo", names: ["/twin", "/repair", "/causal", "/lab", "/learn"] },
+      { title: "Build And Change", names: ["/intent", "/fork", "/ghost", "/fix", "/sheriff"] },
+      { title: "UI And Browser", names: ["/inspect", "/stop-inspect", "/preview"] },
+      { title: "Session And Settings", names: ["/model", "/capsule", "/compact", "/approvals", "/steps", "/setup", "/cost", "/undo", "/clear", "/exit"] },
+      { title: "Integrations And Advanced", names: ["/distill", "/synthesize", "/issues", "/chatops", "/production", "/replay", "/bisect", "/whatif", "/audit", "/brain", "/daemon", "/tribunal", "/resurrect", "/hologram", "/entangle", "/sync", "/voice"] }
+    ];
+    const byName = new Map(commands.map((command) => [command.name, command]));
     output.write(
       [
         "",
-        ...commands.map((command) => {
-          const names = [command.name, ...(command.aliases ?? [])].join(", ");
-          return `${pc.magenta(names.padEnd(24, " "))}${command.description}  ${pc.dim(command.usage)}`;
-        })
+        `${this.themeColor(pc.bold("Mesh Commands"))}`,
+        `${pc.dim("Run /help <command> for examples. Most commands are local analysis helpers; normal questions do not need a slash command.")}`,
+        "",
+        ...groups.flatMap((group) => [
+          this.themeColor(pc.bold(group.title)),
+          ...group.names
+            .map((name) => byName.get(name))
+            .filter((command): command is SlashCommand => Boolean(command))
+            .map((command) => `${pc.magenta(command.name.padEnd(15, " "))}${command.description}  ${pc.dim(command.usage)}`),
+          ""
+        ])
       ].join("\n") + "\n"
     );
   }
 
+  private commandExamples(commandName: string): string[] {
+    const examples: Record<string, string[]> = {
+      "/status": ["/status"],
+      "/index": ["/index"],
+      "/dashboard": ["/dashboard"],
+      "/twin": ["/twin", "/twin status"],
+      "/repair": ["/repair", "/repair status", "/repair clear"],
+      "/causal": ["/causal", "/causal query why is auth risky?"],
+      "/lab": ["/lab", "/lab status"],
+      "/inspect": ["/inspect", "/inspect http://localhost:5173"],
+      "/preview": ["/preview http://localhost:5173 1280x800"],
+      "/model": ["/model list", "/model sonnet4.6", "/model save"],
+      "/capsule": ["/capsule show", "/capsule stats", "/capsule clear"],
+      "/ghost": ["/ghost learn", "/ghost predict add billing settings"],
+      "/fork": ["/fork plan migrate dashboard to React"],
+      "/sheriff": ["/sheriff scan", "/sheriff verify"],
+      "/doctor": ["/doctor", "/doctor full", "/doctor voice"]
+    };
+    return examples[commandName] ?? [this.getSlashCommands().find((command) => command.name === commandName)?.usage ?? commandName];
+  }
+
   private getSlashCommands(): SlashCommand[] {
     return [
-      { name: "/help", aliases: ["/commands"], usage: "/help", description: "show commands" },
+      { name: "/help", aliases: ["/commands"], usage: "/help [command]", description: "show practical command groups and examples" },
       { name: "/status", usage: "/status", description: "show runtime, session, and index state" },
       { name: "/capsule", aliases: ["/memory"], usage: "/capsule [show|compact|clear|export [path]|stats|path]", description: "inspect or manage session capsule" },
       { name: "/index", usage: "/index", description: "re-index workspace and generate file capsules" },
@@ -3478,11 +3598,11 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       { name: "/fix", usage: "/fix", description: "apply a background-resolved fix for a current linter/compiler error" },
       { name: "/hologram", usage: "/hologram start <cmd>", description: "run command with V8 telemetry injection for live memory debugging" },
       { name: "/entangle", usage: "/entangle <path>", description: "quantum-link a second repository to sync AST mutations in real-time" },
-      { name: "/inspect", usage: "/inspect [url]", description: "attach visual agent portal for real-time canvas editing" },
-      { name: "/stop-inspect", usage: "/stop-inspect", description: "detach visual agent portal" },
+      { name: "/inspect", usage: "/inspect [url]", description: "attach visual browser inspector to a local UI" },
+      { name: "/stop-inspect", usage: "/stop-inspect", description: "detach visual browser inspector" },
       { name: "/preview", usage: "/preview <url> [widthxheight] [protocol=auto|kitty|iterm2|sixel|none]", description: "show real frontend screenshot in terminal via Chrome CDP" },
 
-      { name: "/dashboard", usage: "/dashboard", description: "launch local interactive 3D codebase visualizer" },
+      { name: "/dashboard", usage: "/dashboard", description: "open the local repo operations dashboard" },
       { name: "/sync", usage: "/sync", description: "check cloud (L2) cache synchronization" },
       { name: "/setup", usage: "/setup [noninteractive key=value ...]", description: "interactive or scripted settings" },
       { name: "/model", usage: "/model [pick|list|id|save]", description: "interactive chooser or switch model" },
@@ -3517,7 +3637,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     const commandList = [
       "/help", "/status", "/index", "/dashboard", "/sync", "/setup", "/clear",
       "/model", "/cost", "/compact", "/capsule", "/memory", "/approvals", "/steps", "/undo",
-      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/daemon", "/issues", "/chatops", "/production", "/replay", "/bisect", "/whatif", "/audit", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/preview", "/fix",
+      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/daemon", "/issues", "/chatops", "/production", "/replay", "/bisect", "/whatif", "/audit", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/stop-inspect", "/preview", "/fix",
       "/tribunal", "/resurrect", "/sheriff"
     ];
     // Priority 1: Exact match
@@ -3560,7 +3680,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       case "/help":
 
       case "/commands":
-        this.printHelp();
+        this.printHelp(args);
         return { wasHandled: true, shouldExit: false };
       case "/status":
         await this.printStatus();
@@ -3642,9 +3762,6 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
         return { wasHandled: true, shouldExit: false };
       case "/entangle":
         await this.runEntangle(args);
-        return { wasHandled: true, shouldExit: false };
-      case "/inspect":
-        await this.runInspect(args);
         return { wasHandled: true, shouldExit: false };
       case "/preview":
         await this.runFrontendPreview(args);

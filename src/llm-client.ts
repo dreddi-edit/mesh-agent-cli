@@ -127,7 +127,7 @@ export class BedrockLlmClient {
       const errBody = await response.text();
       const hint = this.buildErrorHint(response.status, errBody, activeModelId);
       attempts.push(`${activeModelId} -> ${response.status}: ${errBody.slice(0, 220)}${hint}`);
-      if (!this.shouldTryFallback(response.status) || modelIdOverride) {
+      if (!this.shouldTryFallback(response.status)) {
         break;
       }
     }
@@ -166,8 +166,10 @@ export class BedrockLlmClient {
         break;
       }
 
-      attempts.push(`${activeModelId} -> ${response.status}`);
-      if (!this.shouldTryFallback(response.status) || modelIdOverride) {
+      const errBody = await response.text().catch(() => "");
+      const hint = this.buildErrorHint(response.status, errBody, activeModelId);
+      attempts.push(`${activeModelId} -> ${response.status}: ${errBody.slice(0, 220)}${hint}`);
+      if (!this.shouldTryFallback(response.status)) {
         throw new Error(`LLM streaming failed after ${attempts.length} attempt(s): ${attempts.join(" | ")}`);
       }
     }
@@ -223,17 +225,14 @@ export class BedrockLlmClient {
   }
 
   private candidateModelIds(modelIdOverride?: string): string[] {
-    if (modelIdOverride) {
-      return [modelIdOverride];
-    }
     return Array.from(new Set([
-      this.options.modelId,
+      modelIdOverride || this.options.modelId,
       ...(this.options.fallbackModelIds ?? [])
     ].filter(Boolean)));
   }
 
   private shouldTryFallback(status: number): boolean {
-    return status === 429 || status >= 500;
+    return status === 404 || status === 429 || status >= 500;
   }
 
   private buildErrorHint(status: number, body: string, modelId: string): string {

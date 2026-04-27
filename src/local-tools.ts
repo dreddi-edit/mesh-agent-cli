@@ -320,6 +320,11 @@ function slugifyId(value: string): string {
     .slice(0, 80) || "item";
 }
 
+function sanitizeLlmToolName(name: string): string {
+  const normalized = name.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return normalized.length > 0 ? normalized : "tool";
+}
+
 function severityLabel(score: number): "critical" | "high" | "medium" | "low" {
   if (score >= 85) return "critical";
   if (score >= 60) return "high";
@@ -3476,14 +3481,29 @@ session.on('Debugger.paused', async (message) => {
       .map((tool) => ({
         name: tool.name,
         description: tool.description ?? "",
-        inputSchema: tool.inputSchema ?? { type: "object", properties: {} }
+        inputSchema: (tool.inputSchema as Record<string, unknown>) ?? { type: "object", properties: {} }
       }));
+    const wireToolMap = new Map<string, { name: string; description: string; inputSchema: Record<string, unknown> }>();
+    const safeWireTools = safeTools.map((tool) => {
+      let wireName = sanitizeLlmToolName(tool.name);
+      let suffix = 2;
+      while (wireToolMap.has(wireName)) {
+        wireName = `${sanitizeLlmToolName(tool.name)}_${suffix}`;
+        suffix += 1;
+      }
+      wireToolMap.set(wireName, tool);
+      return {
+        name: wireName,
+        description: tool.description,
+        inputSchema: tool.inputSchema
+      };
+    });
 
     const messages: any[] = [{ role: "user", content: [{ text: prompt }] }];
     let iterations = 0;
 
     while (iterations < 5) {
-      const response = await llm.converse(messages, safeTools as any[], "You are a fast research sub-agent. Gather data and summarize.", HAIKU_MODEL_ID);
+      const response = await llm.converse(messages, safeWireTools as any[], "You are a fast research sub-agent. Gather data and summarize.", HAIKU_MODEL_ID);
 
       if (response.kind === "text") {
         return { ok: true, summary: response.text };
@@ -3492,8 +3512,12 @@ session.on('Debugger.paused', async (message) => {
       messages.push({ role: "assistant", content: response.toolUses.map(tu => ({ toolUse: tu })) as any });
 
       const toolResults = await Promise.all(response.toolUses.map(async (tu) => {
+        const tool = wireToolMap.get(tu.name);
+        if (!tool) {
+          return { toolUseId: tu.toolUseId, status: "error", content: [{ text: `Unknown tool '${tu.name}'.` }] };
+        }
         try {
-          const res = await this.callTool(tu.name, tu.input);
+          const res = await this.callTool(tool.name, tu.input);
           return { toolUseId: tu.toolUseId, status: "success", content: [{ text: JSON.stringify(res) }] };
         } catch (e) {
           return { toolUseId: tu.toolUseId, status: "error", content: [{ text: (e as Error).message }] };
