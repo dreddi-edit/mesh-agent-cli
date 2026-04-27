@@ -151,13 +151,23 @@ interface WireTool {
   tool: ToolDefinition;
 }
 
-interface RunHooks {
+export interface RunHooks {
   onToolStart?: (wireName: string, input: Record<string, unknown>, step: number, maxSteps: number) => void;
   onToolEnd?: (wireName: string, ok: boolean, resultPreview: string) => void;
   askPermission?: (msg: string) => Promise<boolean>;
   onDelta?: (delta: string) => void;
   onCommandChunk?: (chunk: string) => void;
   silent?: boolean;
+}
+
+export interface HeadlessTurnResult {
+  text: string;
+  modelId: string;
+  usageDelta: ConverseUsage;
+  totalUsage: {
+    inputTokens: number;
+    outputTokens: number;
+  };
 }
 
 interface SessionCapsule extends PersistedSessionCapsule {}
@@ -466,6 +476,7 @@ export class AgentLoop {
   private gitStatusContext = "";
   private consecutiveErrors = new Map<string, number>();
   private portal: MeshPortal;
+  private headlessInitialized = false;
 
   constructor(
     private readonly config: AppConfig,
@@ -1109,6 +1120,63 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
         rl.close();
       }
     }
+  }
+
+  public async runHeadlessTurn(userInput: string, hooks?: RunHooks): Promise<HeadlessTurnResult> {
+    await this.initializeHeadlessSession();
+    const trimmed = userInput.trim();
+    if (!trimmed) {
+      throw new Error("Headless turn requires non-empty input");
+    }
+
+    const localAnswer = await this.tryLocalIntentAnswer(trimmed);
+    if (localAnswer) {
+      return {
+        text: localAnswer,
+        modelId: this.currentModelId,
+        usageDelta: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+        totalUsage: { ...this.sessionTokens }
+      };
+    }
+
+    await this.refreshGitStatus();
+    this.resetToolSummary();
+    const before = { ...this.sessionTokens };
+    const answer = await this.runSingleTurn(trimmed, {
+      ...hooks,
+      silent: false,
+      askPermission: hooks?.askPermission ?? (async () => false)
+    });
+
+    return {
+      text: answer,
+      modelId: this.currentModelId,
+      usageDelta: {
+        inputTokens: this.sessionTokens.inputTokens - before.inputTokens,
+        outputTokens: this.sessionTokens.outputTokens - before.outputTokens,
+        totalTokens:
+          this.sessionTokens.inputTokens -
+          before.inputTokens +
+          this.sessionTokens.outputTokens -
+          before.outputTokens
+      },
+      totalUsage: { ...this.sessionTokens }
+    };
+  }
+
+  private async initializeHeadlessSession(): Promise<void> {
+    if (this.headlessInitialized) {
+      return;
+    }
+    await this.checkInit();
+    this.sessionCapsule = await this.sessionStore.load();
+    try {
+      const instrPath = path.join(this.config.agent.workspaceRoot, ".mesh", "instructions.md");
+      this.localInstructions = await fs.readFile(instrPath, "utf-8");
+    } catch {
+      this.localInstructions = "";
+    }
+    this.headlessInitialized = true;
   }
 
   private async runSingleTurn(userInput: string, hooks?: RunHooks): Promise<string> {
