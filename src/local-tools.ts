@@ -93,6 +93,7 @@ import { AuditLogger } from "./audit/logger.js";
 import { assertCommandAllowed } from "./command-safety.js";
 import { StructuredLogger } from "./structured-logger.js";
 import { ToolInputValidationError, validateToolInput } from "./tool-schema.js";
+import { HAIKU_MODEL_ID } from "./model-catalog.js";
 import { SelfDefendingCodeEngine } from "./security/self-defending.js";
 import { PrecrimeEngine } from "./moonshots/precrime.js";
 import { ShadowDeployEngine } from "./moonshots/shadow-deploy.js";
@@ -110,6 +111,9 @@ import { LiveWireEngine } from "./moonshots/live-wire.js";
 import { SchrodingersAstEngine } from "./moonshots/schrodingers-ast.js";
 import { HiveMindEngine } from "./moonshots/hive-mind.js";
 import { EphemeralExecutionEngine } from "./moonshots/ephemeral-execution.js";
+import { TribunalEngine, TribunalLlmCall } from "./moonshots/tribunal.js";
+import { SessionResurrectionEngine } from "./moonshots/session-resurrection.js";
+import { SemanticSheriffEngine } from "./moonshots/semantic-sheriff.js";
 
 const SKIP_DIRS = [".git", "node_modules", "dist", ".mesh"];
 const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
@@ -433,6 +437,9 @@ export class LocalToolBackend implements ToolBackend {
   private readonly schrodingersAst: SchrodingersAstEngine;
   private readonly hiveMind: HiveMindEngine;
   private readonly ephemeralExecution: EphemeralExecutionEngine;
+  private readonly tribunal: TribunalEngine;
+  private readonly sessionResurrection: SessionResurrectionEngine;
+  private readonly semanticSheriff: SemanticSheriffEngine;
 
   constructor(private readonly workspaceRoot: string, private readonly config?: AppConfig) {
     this.cache = new CacheManager(config ?? {
@@ -485,7 +492,7 @@ export class LocalToolBackend implements ToolBackend {
     this.selfDefense = new SelfDefendingCodeEngine(workspaceRoot);
     this.precrime = new PrecrimeEngine(workspaceRoot);
     this.shadowDeploy = new ShadowDeployEngine(workspaceRoot, this.timelines);
-    this.semanticGit = new SemanticGitEngine(workspaceRoot);
+    this.semanticGit = new SemanticGitEngine(workspaceRoot, this.timelines);
     this.probabilisticCodebase = new ProbabilisticCodebaseEngine(workspaceRoot);
     this.specCode = new SpecCodeEngine(workspaceRoot);
     this.conversationalCodebase = new ConversationalCodebaseEngine(workspaceRoot);
@@ -499,6 +506,31 @@ export class LocalToolBackend implements ToolBackend {
     this.schrodingersAst = new SchrodingersAstEngine(workspaceRoot);
     this.hiveMind = new HiveMindEngine(workspaceRoot);
     this.ephemeralExecution = new EphemeralExecutionEngine(workspaceRoot, (name, args) => this.callTool(name, args));
+
+    // Build a lightweight callLlm callback for the Tribunal engine using the same Bedrock proxy
+    const tribunalCallLlm: TribunalLlmCall | undefined = config ? async (system, user, temperature = 0, modelHint) => {
+      const modelId = modelHint === "haiku"
+        ? HAIKU_MODEL_ID
+        : config.bedrock.modelId;
+      const llm = new BedrockLlmClient({
+        endpointBase: config.bedrock.endpointBase,
+        modelId,
+        bearerToken: config.bedrock.bearerToken,
+        temperature,
+        maxTokens: 1500
+      });
+      const response = await llm.converse(
+        [{ role: "user", content: [{ text: user }] }],
+        [],
+        system
+      );
+      return response.kind === "text" ? response.text : "";
+    } : undefined;
+
+    this.tribunal = new TribunalEngine(workspaceRoot, tribunalCallLlm);
+    this.sessionResurrection = new SessionResurrectionEngine(workspaceRoot);
+    this.semanticSheriff = new SemanticSheriffEngine(workspaceRoot);
+
     this.startupTasks.push(
       this.bootstrapRepoDnaMemory(),
       this.agentOs.ensureDefaultDefinitions(),
@@ -1110,10 +1142,12 @@ export class LocalToolBackend implements ToolBackend {
         inputSchema: {
           type: "object",
           properties: {
-            action: { type: "string", enum: ["scan", "probe", "status"], default: "scan" },
+            action: { type: "string", enum: ["scan", "probe", "harden", "daemon_tick", "status"], default: "scan" },
             path: { type: "string" },
             maxFiles: { type: "number", default: 500 },
-            confirm: { type: "boolean", default: false }
+            confirm: { type: "boolean", default: false },
+            verificationCommand: { type: "string" },
+            timeoutMs: { type: "number" }
           }
         }
       },
@@ -1123,8 +1157,16 @@ export class LocalToolBackend implements ToolBackend {
         inputSchema: {
           type: "object",
           properties: {
-            action: { type: "string", enum: ["analyze", "status"], default: "analyze" },
-            maxFiles: { type: "number", default: 250 }
+            action: { type: "string", enum: ["analyze", "gate", "record_outcome", "status"], default: "analyze" },
+            maxFiles: { type: "number", default: 250 },
+            path: { type: "string" },
+            file: { type: "string" },
+            incident: { type: "boolean" },
+            outcome: { type: "string", enum: ["incident", "clean"] },
+            severity: { type: "string", enum: ["critical", "high", "medium", "low"] },
+            tags: { type: "array", items: { type: "string" } },
+            verificationCommand: { type: "string" },
+            notes: { type: "string" }
           }
         }
       },
@@ -1205,12 +1247,15 @@ export class LocalToolBackend implements ToolBackend {
       },
       {
         name: "workspace.semantic_git",
-        description: "Moonshot 02: semantic merge analysis for conflict hunks. Classifies auto-resolvable vs review-required conflicts by symbol overlap.",
+        description: "Moonshot 02: semantic Git. Plans, verifies, and optionally promotes conflict resolutions in isolated timelines based on symbol-level merge semantics.",
         inputSchema: {
           type: "object",
           properties: {
-            action: { type: "string", enum: ["analyze", "resolve"], default: "analyze" },
-            path: { type: "string" }
+            action: { type: "string", enum: ["analyze", "plan", "resolve", "verify", "status"], default: "analyze" },
+            path: { type: "string" },
+            verificationCommand: { type: "string" },
+            timeoutMs: { type: "number" },
+            promote: { type: "boolean", default: false }
           }
         }
       },
@@ -1240,11 +1285,15 @@ export class LocalToolBackend implements ToolBackend {
       },
       {
         name: "workspace.spec_code",
-        description: "Moonshot 01: bidirectional spec-code ledger. Synthesizes behavior contracts from code/tests/routes and detects drift.",
+        description: "Moonshot 01: bidirectional spec-code system. Synthesizes behavior contracts from code/tests/routes, accepts human specs, detects drift, locks contracts, and emits materialization patch plans.",
         inputSchema: {
           type: "object",
           properties: {
-            action: { type: "string", enum: ["synthesize", "check", "status"], default: "synthesize" }
+            action: { type: "string", enum: ["synthesize", "check", "assert", "lock", "unlock", "materialize", "status"], default: "synthesize" },
+            id: { type: "string" },
+            subject: { type: "string" },
+            behavior: { type: "string" },
+            file: { type: "string" }
           }
         }
       },
@@ -1304,6 +1353,48 @@ export class LocalToolBackend implements ToolBackend {
             runId: { type: "string" },
             failingCommand: { type: "string" },
             timeoutMs: { type: "number" }
+          }
+        }
+      },
+      {
+        name: "workspace.tribunal",
+        description: "Moonshot: Cross-Model Tribunal. Routes a hard engineering problem to three expert AI panelists (Correctness, Performance, Resilience), runs a structured debate where each critiques the others, and synthesizes the dominant solution. Produces a decision artifact with full debate trail.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["convene", "status"], default: "convene" },
+            problem: { type: "string", description: "The engineering problem or decision to adjudicate." },
+            context: { type: "string", description: "Optional codebase context or constraints to include." }
+          }
+        }
+      },
+      {
+        name: "workspace.session_resurrection",
+        description: "Moonshot: Cognitive Session Resurrection. Captures your current intent, open questions, failed approaches, insights, and next actions as a persistent snapshot. Reconstructs your full mental state at the start of any future session so you never start cold again.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["capture", "resurrect", "checkpoint", "status", "clear"], default: "resurrect" },
+            intent: { type: "string", description: "Required for capture: what are you trying to accomplish?" },
+            filesInFocus: { type: "array", items: { type: "string" }, description: "Files actively being worked on." },
+            openQuestions: { type: "array", items: { type: "string" }, description: "Unresolved questions blocking progress." },
+            failedApproaches: { type: "array", items: { type: "object" }, description: "Array of {approach, reason} objects." },
+            insights: { type: "array", items: { type: "string" }, description: "Key discoveries from this session." },
+            nextActions: { type: "array", items: { type: "string" }, description: "Ordered list of highest-leverage next steps." },
+            note: { type: "string", description: "Free-form note to attach to the snapshot." }
+          }
+        }
+      },
+      {
+        name: "workspace.semantic_sheriff",
+        description: "Moonshot: Semantic Contract Sheriff. Fingerprints every module's semantic meaning (exports, purpose, behavioral patterns). Detects when refactoring silently changes what a module MEANS even when tests pass. Lock critical contracts to trigger critical-severity alerts on drift.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["scan", "verify", "lock", "unlock", "drift", "status", "clear"], default: "verify" },
+            file: { type: "string", description: "Target file for lock/unlock/verify actions." },
+            maxFiles: { type: "number", default: 400, description: "Max files to scan." },
+            force: { type: "boolean", default: false, description: "Force full re-verify of all contracts (not just changed files)." }
           }
         }
       },
@@ -2098,6 +2189,12 @@ export class LocalToolBackend implements ToolBackend {
         return this.schrodingersAst.run(args);
       case "workspace.hive_mind":
         return this.hiveMind.run(args);
+      case "workspace.tribunal":
+        return this.tribunal.run(args);
+      case "workspace.session_resurrection":
+        return this.sessionResurrection.run(args);
+      case "workspace.semantic_sheriff":
+        return this.semanticSheriff.run(args);
       case "agent.assemble_team":
         return this.personaLoader.assembleTeam(String(args.task ?? ""));
       case "workspace.finalize_task":
@@ -2205,6 +2302,8 @@ export class LocalToolBackend implements ToolBackend {
       this.watcher.close();
     }
     await Promise.allSettled(this.startupTasks);
+    await this.cache.flushCache().catch(() => undefined);
+    await this.timelines.close().catch(() => undefined);
     await this.runtimeObserver.close();
     await this.meshCore.close();
     return Promise.resolve();
@@ -3365,7 +3464,7 @@ session.on('Debugger.paused', async (message) => {
 
     const llm = new BedrockLlmClient({
       endpointBase: this.config.bedrock.endpointBase,
-      modelId: "us.anthropic.claude-haiku-4-5-20251001-v1:0", // Fallback to Haiku for speed, or current
+      modelId: HAIKU_MODEL_ID, // Fallback to Haiku for speed, or current
       bearerToken: this.config.bedrock.bearerToken,
       temperature: 0.1,
       maxTokens: 4096
@@ -3384,7 +3483,7 @@ session.on('Debugger.paused', async (message) => {
     let iterations = 0;
 
     while (iterations < 5) {
-      const response = await llm.converse(messages, safeTools as any[], "You are a fast research sub-agent. Gather data and summarize.", "us.anthropic.claude-haiku-4-5-20251001-v1:0");
+      const response = await llm.converse(messages, safeTools as any[], "You are a fast research sub-agent. Gather data and summarize.", HAIKU_MODEL_ID);
 
       if (response.kind === "text") {
         return { ok: true, summary: response.text };

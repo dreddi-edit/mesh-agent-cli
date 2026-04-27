@@ -13,6 +13,7 @@ import http from "node:http";
 import { spawn } from "node:child_process";
 import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
+import { MODEL_CATALOG } from "./model-catalog.js";
 
 // Initialize marked with terminal renderer
 marked.use(markedTerminal() as any);
@@ -201,29 +202,7 @@ interface SyncStatus {
   l2Count: number;
 }
 
-const MODEL_OPTIONS: ModelOption[] = [
-  {
-    label: "Claude Sonnet 4.6",
-    value: "us.anthropic.claude-sonnet-4-6",
-    aliases: ["sonnet4.6", "sonnet-4.6", "sonnet46"],
-    note: "default",
-    pricing: { inputPer1k: 0.003, outputPer1k: 0.015 }
-  },
-  {
-    label: "Claude Opus 4.6",
-    value: "us.anthropic.claude-opus-4-6-v1",
-    aliases: ["opus4.6", "opus-4.6", "opus46"],
-    note: "powerful",
-    pricing: { inputPer1k: 0.015, outputPer1k: 0.075 }
-  },
-  {
-    label: "Claude Haiku 4.5",
-    value: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-    aliases: ["haiku4.5", "haiku-4.5", "haiku45"],
-    note: "modern fast",
-    pricing: { inputPer1k: 0.00025, outputPer1k: 0.00125 }
-  }
-];
+const MODEL_OPTIONS: ModelOption[] = MODEL_CATALOG;
 const ALLOWED_THEMES = new Set(["cyan", "magenta", "yellow", "green", "blue", "white"]);
 
 function uniqueLimited(values: string[], limit: number): string[] {
@@ -1741,7 +1720,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     const statusRows = [
       `mesh  ${this.config.agent.mode}  ${shortPathLabel(this.config.agent.workspaceRoot)}`,
       `branch: ${this.currentBranch}   model: ${shortModelName(this.currentModelId)}`,
-      "commands: /help /status /daemon /causal /lab /fork /ghost /brain /dashboard /exit",
+      "commands: /help /status /causal /lab /fork /ghost /tribunal /resurrect /sheriff /dashboard /exit",
       "tip: Type / and press TAB for command completion"
     ];
 
@@ -1771,7 +1750,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
       [
         `${this.themeColor(pc.bold("mesh"))}  ${pc.dim(this.config.agent.mode)}  ${pc.dim(shortPathLabel(this.config.agent.workspaceRoot))}`,
         `${pc.dim("branch:")} ${this.themeColor(this.currentBranch)}   ${pc.dim("model:")} ${this.themeColor(shortModelName(this.currentModelId))}`,
-        `${pc.dim("commands:")} ${pc.magenta("/help")} ${pc.magenta("/status")} ${pc.magenta("/daemon")} ${pc.magenta("/causal")} ${pc.magenta("/lab")} ${pc.magenta("/fork")} ${pc.magenta("/ghost")} ${pc.magenta("/brain")} ${pc.magenta("/dashboard")} ${pc.magenta("/exit")}`,
+        `${pc.dim("commands:")} ${pc.magenta("/help")} ${pc.magenta("/status")} ${pc.magenta("/causal")} ${pc.magenta("/lab")} ${pc.magenta("/fork")} ${pc.magenta("/ghost")} ${pc.magenta("/tribunal")} ${pc.magenta("/resurrect")} ${pc.magenta("/sheriff")} ${pc.magenta("/dashboard")} ${pc.magenta("/exit")}`,
         `${pc.dim("tip:")} ${pc.dim("Type / and press TAB for command completion")}`
       ].join("\n") + "\n"
     );
@@ -2914,6 +2893,192 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     }
   }
 
+  private async runTribunal(args: string[]): Promise<void> {
+    const problem = args.join(" ").trim();
+    if (!problem) {
+      output.write(pc.yellow("Usage: /tribunal <problem or engineering decision to adjudicate>\n"));
+      return;
+    }
+    const spinner = ora({ text: "Convening tribunal (3 panelists deliberating in parallel)...", color: "magenta" }).start();
+    try {
+      const result: any = await this.backend.callTool("workspace.tribunal", { action: "convene", problem });
+      if (!result.ok) {
+        spinner.fail(pc.red(`Tribunal failed: ${result.reason ?? "unknown error"}`));
+        return;
+      }
+      spinner.succeed(pc.magenta(`Tribunal complete — verdict: ${result.synthesis?.verdict ?? "n/a"}`));
+      const s = result.synthesis;
+      output.write([
+        "",
+        `${pc.dim("winner:")}   ${s.winningPanelistId} (score ${s.scores?.[s.winningPanelistId] ?? "?"})`,
+        `${pc.dim("verdict:")}  ${s.verdict}`,
+        "",
+        `${pc.magenta("▶ Dominant Solution:")}`,
+        s.dominantSolution,
+        "",
+        `${pc.dim("rationale:")} ${s.rationale}`,
+        ...(s.incorporated?.length > 0 ? [`${pc.dim("incorporated:")} ${s.incorporated.slice(0, 3).join(" | ")}`] : []),
+        ...(s.dissent ? [`${pc.dim("dissent:")} ${s.dissent}`] : []),
+        `${pc.dim("artifact:")} ${result.decisionArtifactPath}`,
+        ""
+      ].join("\n"));
+    } catch (error) {
+      spinner.fail(pc.red(`Tribunal failed: ${(error as Error).message}`));
+    }
+  }
+
+  private async runSessionResurrection(args: string[]): Promise<void> {
+    const sub = args[0]?.toLowerCase() ?? "resurrect";
+    const rest = args.slice(1);
+
+    if (sub === "capture") {
+      output.write(pc.cyan(
+        "\nTo capture your session state, ask the agent:\n" +
+        '  "capture my session state" or use workspace.session_resurrection directly\n' +
+        "  The agent will extract your intent, open questions, and next actions.\n\n"
+      ));
+      output.write(pc.dim("Tip: The agent uses workspace.session_resurrection action=capture with your context.\n\n"));
+      return;
+    }
+
+    if (sub === "checkpoint") {
+      const note = rest.join(" ").trim();
+      if (!note) {
+        output.write(pc.yellow("Usage: /resurrect checkpoint <note>\n"));
+        return;
+      }
+      const spinner = ora({ text: "Saving checkpoint...", color: "cyan" }).start();
+      try {
+        const result: any = await this.backend.callTool("workspace.session_resurrection", { action: "checkpoint", note });
+        spinner.succeed(pc.cyan(`Checkpoint saved (${result.totalCheckpoints} total)`));
+      } catch (error) {
+        spinner.fail(pc.red(`Checkpoint failed: ${(error as Error).message}`));
+      }
+      return;
+    }
+
+    if (sub === "status") {
+      const spinner = ora({ text: "Reading session state...", color: "cyan" }).start();
+      try {
+        const result: any = await this.backend.callTool("workspace.session_resurrection", { action: "status" });
+        spinner.succeed(pc.cyan("Session resurrection status"));
+        if (!result.exists) {
+          output.write(pc.dim("\nNo captured session.\n\n"));
+        } else {
+          output.write([
+            "",
+            `${pc.dim("session:")}  ${result.sessionId}`,
+            `${pc.dim("captured:")} ${result.capturedAt} (${result.age} ago)`,
+            `${pc.dim("intent:")}   ${result.intent}`,
+            `${pc.dim("questions:")} ${result.openQuestionsCount}  ${pc.dim("next-actions:")} ${result.nextActionsCount}  ${pc.dim("checkpoints:")} ${result.checkpointsCount}`,
+            ""
+          ].join("\n"));
+        }
+      } catch (error) {
+        spinner.fail(pc.red(`Status failed: ${(error as Error).message}`));
+      }
+      return;
+    }
+
+    if (sub === "clear") {
+      const spinner = ora({ text: "Clearing session state...", color: "cyan" }).start();
+      try {
+        await this.backend.callTool("workspace.session_resurrection", { action: "clear" });
+        spinner.succeed(pc.cyan("Session resurrection state cleared."));
+      } catch (error) {
+        spinner.fail(pc.red(`Clear failed: ${(error as Error).message}`));
+      }
+      return;
+    }
+
+    // Default: resurrect
+    const spinner = ora({ text: "Reconstructing session state...", color: "cyan" }).start();
+    try {
+      const result: any = await this.backend.callTool("workspace.session_resurrection", { action: "resurrect" });
+      spinner.succeed(pc.cyan("Session resurrected."));
+      if (!result.exists && !result.snapshot) {
+        output.write(pc.dim("\nNo previous session to resurrect. Work on something then run /resurrect capture.\n\n"));
+      } else {
+        output.write("\n" + result.brief + "\n\n");
+      }
+    } catch (error) {
+      spinner.fail(pc.red(`Resurrection failed: ${(error as Error).message}`));
+    }
+  }
+
+  private async runSemanticSheriff(args: string[]): Promise<void> {
+    const actions = new Set(["scan", "verify", "lock", "unlock", "drift", "status", "clear"]);
+    const first = args[0]?.toLowerCase() ?? "verify";
+    const action = actions.has(first) ? first : "verify";
+    const fileArg = (action === "lock" || action === "unlock" || action === "verify") ? args[1]?.trim() : undefined;
+
+    if ((action === "lock" || action === "unlock") && !fileArg) {
+      output.write(pc.yellow(`Usage: /sheriff ${action} <file>\n`));
+      return;
+    }
+
+    const label = action === "scan" ? "Scanning and fingerprinting codebase..."
+      : action === "verify" ? "Verifying semantic contracts..."
+      : action === "lock" ? `Locking contract for ${fileArg}...`
+      : action === "drift" ? "Loading drift report..."
+      : `Sheriff ${action}...`;
+
+    const spinner = ora({ text: label, color: "yellow" }).start();
+    try {
+      const toolArgs: Record<string, unknown> = { action };
+      if (fileArg) toolArgs.file = fileArg;
+
+      const result: any = await this.backend.callTool("workspace.semantic_sheriff", toolArgs);
+      spinner.succeed(pc.yellow(`Sheriff ${action} complete.`));
+
+      if (action === "scan") {
+        output.write([
+          "",
+          `${pc.dim("scanned:")}  ${result.scanned}  ${pc.dim("updated:")} ${result.updated}  ${pc.dim("total:")} ${result.totalContracts}`,
+          `${pc.dim("path:")}     ${result.path}`,
+          ""
+        ].join("\n"));
+        return;
+      }
+
+      if (action === "verify" || action === "drift") {
+        const alerts: any[] = result.driftAlerts ?? [];
+        output.write([
+          "",
+          `${pc.dim("contracts:")} ${result.contracts}  ${pc.dim("locked:")} ${result.lockedContracts}`,
+          `${pc.dim("summary:")}  ${result.summary}`,
+          ...alerts.slice(0, 8).map((a: any) => {
+            const color = a.severity === "critical" ? pc.red : a.severity === "high" ? pc.yellow : pc.dim;
+            const changes = [
+              ...(a.changes.removedExports.length > 0 ? [`-exports: ${a.changes.removedExports.join(", ")}`] : []),
+              ...(a.changes.addedExports.length > 0 ? [`+exports: ${a.changes.addedExports.join(", ")}`] : []),
+              ...(a.changes.purposeShift ? ["purpose shifted"] : []),
+              ...(a.changes.behavioralShift ? ["behavioral patterns changed"] : [])
+            ].join("; ");
+            return color(`  ${a.severity.toUpperCase()} ${a.file} — ${changes}`);
+          }),
+          ""
+        ].join("\n"));
+        return;
+      }
+
+      if (action === "lock") {
+        output.write([
+          "",
+          `${pc.yellow("⬡")} ${result.file} locked`,
+          `${pc.dim("fingerprint:")} ${result.fingerprint}`,
+          `${pc.dim("message:")} ${result.message}`,
+          ""
+        ].join("\n"));
+        return;
+      }
+
+      output.write(`\n${pc.dim(result.message ?? JSON.stringify(result))}\n\n`);
+    } catch (error) {
+      spinner.fail(pc.red(`Sheriff ${action} failed: ${(error as Error).message}`));
+    }
+  }
+
   private async launchDashboard(): Promise<void> {
     const spinner = ora({ text: "Starting dashboard...", color: "cyan" }).start();
     try {
@@ -3262,7 +3427,10 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       { name: "/compact", usage: "/compact", description: "compress transcript into session capsule" },
       { name: "/clear", usage: "/clear", description: "clear terminal UI" },
       { name: "/voice", usage: "/voice [on|off|setup]", description: "toggle or configure Speech-to-Speech mode" },
-      { name: "/exit", aliases: ["/quit"], usage: "/exit", description: "quit" }
+      { name: "/exit", aliases: ["/quit"], usage: "/exit", description: "quit" },
+      { name: "/tribunal", usage: "/tribunal <problem>", description: "convene a 3-panelist AI tribunal — Correctness vs Performance vs Resilience — to debate and synthesize the dominant solution" },
+      { name: "/resurrect", usage: "/resurrect [capture|checkpoint <note>|status|clear]", description: "capture current session intent/state and resurrect full mental model in future sessions" },
+      { name: "/sheriff", usage: "/sheriff [scan|verify|lock <file>|drift|status|clear]", description: "fingerprint module semantics and alert when refactoring silently changes what code means" }
     ];
   }
 
@@ -3281,7 +3449,8 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     const commandList = [
       "/help", "/status", "/index", "/dashboard", "/sync", "/setup", "/clear",
       "/model", "/cost", "/compact", "/capsule", "/memory", "/approvals", "/steps", "/undo",
-      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/daemon", "/issues", "/chatops", "/production", "/replay", "/bisect", "/whatif", "/audit", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/preview", "/fix"
+      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/daemon", "/issues", "/chatops", "/production", "/replay", "/bisect", "/whatif", "/audit", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/preview", "/fix",
+      "/tribunal", "/resurrect", "/sheriff"
     ];
     // Priority 1: Exact match
     let command = inputCmd;
@@ -3390,6 +3559,15 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
         return { wasHandled: true, shouldExit: false };
       case "/fix":
         await this.runFix();
+        return { wasHandled: true, shouldExit: false };
+      case "/tribunal":
+        await this.runTribunal(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/resurrect":
+        await this.runSessionResurrection(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/sheriff":
+        await this.runSemanticSheriff(args);
         return { wasHandled: true, shouldExit: false };
       case "/hologram":
         await this.runHologram(args);

@@ -3,6 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
+import { StructuredLogger } from "./structured-logger.js";
 
 type RuntimeStatus = "running" | "exited" | "failed" | "timeout";
 
@@ -34,6 +35,7 @@ export class RuntimeObserver {
   public readonly basePath: string;
   private readonly processes = new Map<string, ChildProcessWithoutNullStreams>();
   private readonly autopsyHookPath: string;
+  private readonly logger: StructuredLogger;
 
   constructor(private readonly workspaceRoot: string) {
     this.workspaceHash = crypto
@@ -44,6 +46,7 @@ export class RuntimeObserver {
     const stateRoot = process.env.MESH_STATE_DIR || path.join(os.homedir(), ".config", "mesh");
     this.basePath = path.join(stateRoot, "runtime", this.workspaceHash);
     this.autopsyHookPath = path.join(this.basePath, "autopsy-hook.cjs");
+    this.logger = new StructuredLogger(workspaceRoot);
   }
 
   async start(args: Record<string, unknown>): Promise<{
@@ -86,6 +89,7 @@ export class RuntimeObserver {
       nodeOptions
     };
     await this.writeRecord(record);
+    void this.logger.write("info", "runtime.start", { runId: id, command, cwd, profile: profileName || undefined }).catch(() => undefined);
 
     const stdoutHandle = await fs.open(stdoutPath, "a");
     const stderrHandle = await fs.open(stderrPath, "a");
@@ -149,6 +153,7 @@ export class RuntimeObserver {
       }
     }
     this.processes.clear();
+    void this.logger.write("info", "runtime.shutdown", {}).catch(() => undefined);
   }
 
   async captureDeepAutopsy(args: Record<string, unknown>): Promise<{
@@ -385,6 +390,7 @@ export class RuntimeObserver {
     record.exitCode = exitCode;
     record.finishedAt = new Date().toISOString();
     await this.writeRecord(record);
+    void this.logger.write("info", "runtime.finish", { runId, status, exitCode }).catch(() => undefined);
   }
 }
 

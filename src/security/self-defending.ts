@@ -1,21 +1,62 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { appendJsonl, clampNumber, collectWorkspaceFiles, lineNumberAt, toPosix, writeJson } from "../moonshots/common.js";
+import { runCritic } from "../agents/critic.js";
+import { appendJsonl, clampNumber, collectWorkspaceFiles, lineNumberAt, readJson, toPosix, writeJson } from "../moonshots/common.js";
+import { TimelineManager } from "../timeline-manager.js";
+
+type FindingKind = "redos" | "command_injection" | "path_traversal" | "sqli";
+type FindingStatus = "suspicious" | "confirmed" | "timeout" | "safe";
 
 export interface SelfDefenseFinding {
   id: string;
   file: string;
   line: number;
-  kind: "redos" | "command_injection" | "path_traversal" | "sqli";
+  kind: FindingKind;
   pattern: string;
   flags: string;
   score: number;
-  status: "suspicious" | "confirmed" | "timeout" | "safe";
+  status: FindingStatus;
   evidence: string[];
   exploitInputPreview?: string;
   measuredMs?: number;
   recommendation: string;
+}
+
+interface SelfDefenseCandidate {
+  pattern: string;
+  flags: string;
+  line: number;
+  kind: FindingKind;
+}
+
+interface SecurityPolicy {
+  autoMerge: boolean;
+  maxPatchLines: number;
+  requiredPrecision: number;
+  probeBudgetPerRun: number;
+  redosMaxInputLength: number;
+  verificationCommand?: string;
+  sensitivePaths: string[];
+}
+
+interface PatchAttempt {
+  findingId: string;
+  file: string;
+  kind: FindingKind;
+  status: "not_patchable" | "timeline_ready" | "promoted" | "blocked";
+  reason?: string;
+  strategy?: string;
+  timelineId?: string;
+  diffLines?: number;
+  verification?: {
+    executed: boolean;
+    command?: string;
+    ok: boolean;
+    exitCode?: number;
+  };
+  critic?: ReturnType<typeof runCritic>;
+  promotion?: Record<string, unknown>;
 }
 
 export class SelfDefendingCodeEngine {
@@ -23,89 +64,18 @@ export class SelfDefendingCodeEngine {
 
   async run(args: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
     const action = String(args.action ?? "scan").trim().toLowerCase();
-    if (action === "status") {
-      return this.status();
-    }
+    if (action === "status") return this.status();
+    if (action === "daemon_tick") return this.daemonTick(args);
+    if (action === "harden") return this.harden(args);
     if (!["scan", "probe"].includes(action)) {
-      throw new Error("workspace.self_defend action must be scan|probe|status");
+      throw new Error("workspace.self_defend action must be scan|probe|harden|daemon_tick|status");
     }
 
     const maxFiles = clampNumber(args.maxFiles, 500, 1, 5000);
     const confirm = action === "probe" || args.confirm === true;
-    const files = typeof args.path === "string" && args.path.trim()
-      ? [toPosix(args.path.trim())]
-      : await collectWorkspaceFiles(this.workspaceRoot, { maxFiles });
-    const findings: SelfDefenseFinding[] = [];
+    const files = await this.targetFiles(args, maxFiles);
+    const findings = await this.scanFiles(files, confirm);
 
-    for (const file of files) {
-      const absolute = path.resolve(this.workspaceRoot, file);
-      if (!absolute.startsWith(path.resolve(this.workspaceRoot))) continue;
-      const raw = await fs.readFile(absolute, "utf8").catch(() => "");
-      if (!raw) continue;
-      
-      const candidates = [
-        ...extractRegexCandidates(raw, file).map(c => ({ ...c, kind: "redos" as const })),
-        ...extractCommandInjectionCandidates(raw, file).map(c => ({ ...c, kind: "command_injection" as const })),
-        ...extractPathTraversalCandidates(raw, file).map(c => ({ ...c, kind: "path_traversal" as const })),
-        ...extractSqliCandidates(raw, file).map(c => ({ ...c, kind: "sqli" as const }))
-      ];
-
-      for (const candidate of candidates) {
-        let score = 0;
-        let evidence: string[] = [];
-        let recommendation = "";
-
-        if (candidate.kind === "redos") {
-          score = redosRiskScore(candidate.pattern);
-          if (score < 35) continue;
-          evidence = explainRedosRisk(candidate.pattern);
-          recommendation = buildRecommendation(candidate.pattern);
-        } else if (candidate.kind === "command_injection") {
-          score = 80;
-          evidence = ["Dynamic shell execution with unescaped interpolation detected."];
-          recommendation = "Use structured arguments in spawn/execFile instead of shell interpolation.";
-        } else if (candidate.kind === "path_traversal") {
-          score = 70;
-          evidence = ["Unsanitized interpolation in file system path detected."];
-          recommendation = "Use path.basename or ensure strict sandboxing for dynamic file paths.";
-        } else if (candidate.kind === "sqli") {
-          score = 90;
-          evidence = ["Raw SQL query with string interpolation detected."];
-          recommendation = "Use parameterized queries or prepared statements.";
-        }
-
-        const finding: SelfDefenseFinding = {
-          id: `${file}:${candidate.line}:${hashTiny(candidate.pattern)}`,
-          file,
-          line: candidate.line,
-          kind: candidate.kind,
-          pattern: candidate.pattern,
-          flags: candidate.flags,
-          score,
-          status: "suspicious",
-          evidence,
-          recommendation
-        };
-
-        if (confirm) {
-          if (candidate.kind === "redos") {
-            const confirmation = await confirmRedos(candidate.pattern, candidate.flags);
-            finding.status = confirmation.timedOut ? "timeout" : confirmation.vulnerable ? "confirmed" : "suspicious";
-            finding.measuredMs = confirmation.maxMs;
-            finding.exploitInputPreview = confirmation.input.slice(0, 120);
-            finding.evidence.push(...confirmation.evidence);
-          } else if (candidate.kind === "command_injection" || candidate.kind === "path_traversal" || candidate.kind === "sqli") {
-            // Adversarial Probe simulation for these classes
-            finding.status = "confirmed";
-            finding.exploitInputPreview = candidate.kind === "command_injection" ? "'; rm -rf / #" : candidate.kind === "sqli" ? "' OR 1=1 --" : "../../../etc/passwd";
-            finding.evidence.push(`Confirmed structurally vulnerable to ${candidate.kind} payloads.`);
-          }
-        }
-        findings.push(finding);
-      }
-    }
-
-    findings.sort((left, right) => right.score - left.score);
     const result = {
       ok: true,
       action,
@@ -115,37 +85,265 @@ export class SelfDefendingCodeEngine {
       findings,
       policyPath: ".mesh/security/policy.yaml",
       logPath: ".mesh/security/log.jsonl",
+      companionStatePath: ".mesh/security/companions.json",
       nextActions: [
         "Run workspace.self_defend with action=probe to confirm suspicious findings.",
-        "Patch confirmed findings in a timeline and verify benign behavior before promotion.",
-        "Mark sensitive paths in .mesh/security/sensitive.yaml before enabling auto-merge."
+        "Run workspace.self_defend with action=harden to create verified timeline patches for confirmed deterministic vulnerabilities.",
+        "Set autoMerge: true in .mesh/security/policy.yaml only after reviewing sensitive paths and promotion rules."
       ]
     };
-    await this.persist(result);
+    await this.persist("self_defense_scan", result);
     return result;
   }
 
+  private async harden(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const policy = await this.loadPolicy();
+    const maxFiles = clampNumber(args.maxFiles, policy.probeBudgetPerRun, 1, 5000);
+    const files = await this.targetFiles(args, maxFiles);
+    const findings = await this.scanFiles(files, true);
+    const attempts: PatchAttempt[] = [];
+    const timelineManager = new TimelineManager(this.workspaceRoot);
+
+    try {
+      for (const finding of findings) {
+        if (finding.status !== "confirmed" && finding.status !== "timeout") continue;
+        attempts.push(await this.hardenFinding(finding, policy, args, timelineManager));
+      }
+    } finally {
+      await timelineManager.close();
+    }
+
+    const result = {
+      ok: true,
+      action: "harden",
+      scannedFiles: files.length,
+      confirmed: findings.filter((item) => item.status === "confirmed" || item.status === "timeout").length,
+      patched: attempts.filter((item) => item.status === "timeline_ready" || item.status === "promoted").length,
+      promoted: attempts.filter((item) => item.status === "promoted").length,
+      findings,
+      attempts,
+      policy: {
+        autoMerge: policy.autoMerge,
+        maxPatchLines: policy.maxPatchLines,
+        requiredPrecision: policy.requiredPrecision,
+        redosMaxInputLength: policy.redosMaxInputLength
+      },
+      ledgerPath: ".mesh/security/last-self-defense.json",
+      notificationPath: ".mesh/security/notifications.jsonl"
+    };
+    await this.persist("self_defense_harden", result);
+    return result;
+  }
+
+  private async daemonTick(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const policy = await this.loadPolicy();
+    const maxFiles = clampNumber(args.maxFiles, policy.probeBudgetPerRun, 1, 1000);
+    const files = await this.targetFiles(args, maxFiles);
+    const findings = await this.scanFiles(files, true);
+    const statePath = path.join(this.workspaceRoot, ".mesh", "security", "companions.json");
+    const previous = await readJson<{ files?: Record<string, unknown> }>(statePath, { files: {} });
+    const nextFiles = { ...(previous.files ?? {}) } as Record<string, unknown>;
+    const now = new Date().toISOString();
+
+    for (const file of files) {
+      const fileFindings = findings.filter((finding) => finding.file === file);
+      nextFiles[file] = {
+        lastProbedAt: now,
+        findingCount: fileFindings.length,
+        confirmed: fileFindings.filter((finding) => finding.status === "confirmed" || finding.status === "timeout").length,
+        highestScore: fileFindings.reduce((max, finding) => Math.max(max, finding.score), 0)
+      };
+    }
+
+    const result = {
+      ok: true,
+      action: "daemon_tick",
+      probedFiles: files.length,
+      findings,
+      nextWakeSeconds: findings.some((finding) => finding.status === "confirmed" || finding.status === "timeout") ? 300 : 3600,
+      companionStatePath: ".mesh/security/companions.json"
+    };
+    await writeJson(statePath, { updatedAt: now, files: nextFiles });
+    await this.persist("self_defense_daemon_tick", result);
+    return result;
+  }
+
+  private async hardenFinding(
+    finding: SelfDefenseFinding,
+    policy: SecurityPolicy,
+    args: Record<string, unknown>,
+    timelines: TimelineManager
+  ): Promise<PatchAttempt> {
+    if (finding.kind !== "redos") {
+      const attempt: PatchAttempt = {
+        findingId: finding.id,
+        file: finding.file,
+        kind: finding.kind,
+        status: "not_patchable",
+        reason: "This vulnerability class is confirmed, but no deterministic auto-patcher is enabled yet."
+      };
+      await this.notify(attempt);
+      return attempt;
+    }
+
+    const absolute = safeResolve(this.workspaceRoot, finding.file);
+    const raw = await fs.readFile(absolute, "utf8");
+    const patch = buildRedosGuardPatch(raw, finding, policy.redosMaxInputLength);
+    if (!patch) {
+      const attempt: PatchAttempt = {
+        findingId: finding.id,
+        file: finding.file,
+        kind: finding.kind,
+        status: "not_patchable",
+        reason: "Confirmed ReDoS, but the call site is not a simple guarded .test(identifier) pattern."
+      };
+      await this.notify(attempt);
+      return attempt;
+    }
+
+    const sensitive = isSensitivePath(finding.file, policy.sensitivePaths);
+    const timeline = await timelines.create({ name: `self-defense-${finding.kind}-${hashTiny(finding.id)}` });
+    const timelineFile = path.join(timeline.timeline.root, finding.file);
+    await fs.mkdir(path.dirname(timelineFile), { recursive: true });
+    await fs.writeFile(timelineFile, patch.content, "utf8");
+
+    const verificationCommand = String(args.verificationCommand ?? policy.verificationCommand ?? await inferVerificationCommand(this.workspaceRoot)).trim();
+    let verification: PatchAttempt["verification"] = { executed: false, ok: false };
+    if (verificationCommand) {
+      const run = await timelines.run({
+        timelineId: timeline.timeline.id,
+        command: verificationCommand,
+        timeoutMs: clampNumber(args.timeoutMs, 120_000, 5_000, 600_000)
+      });
+      verification = {
+        executed: true,
+        command: verificationCommand,
+        ok: run.ok,
+        exitCode: run.exitCode
+      };
+    }
+
+    const critic = runCritic({
+      diffPreview: patch.diffPreview,
+      verificationOk: verification.ok
+    });
+    const promotionAllowed =
+      policy.autoMerge &&
+      !sensitive &&
+      patch.diffLines <= policy.maxPatchLines &&
+      verification.ok &&
+      critic.ok &&
+      finding.score / 100 >= policy.requiredPrecision;
+
+    const attempt: PatchAttempt = {
+      findingId: finding.id,
+      file: finding.file,
+      kind: finding.kind,
+      status: promotionAllowed ? "promoted" : verification.ok && critic.ok ? "timeline_ready" : "blocked",
+      reason: promotionAllowed
+        ? "Auto-promoted by self-defense policy."
+        : sensitive
+          ? "Timeline patch ready, but sensitive paths require manual review."
+          : verification.executed && !verification.ok
+            ? "Timeline patch created, but verification failed."
+            : !verification.executed
+              ? "Timeline patch created, but no verification command was available."
+              : critic.ok
+                ? "Timeline patch ready for review; autoMerge is disabled or confidence threshold not met."
+                : "Timeline patch blocked by critic findings.",
+      strategy: patch.strategy,
+      timelineId: timeline.timeline.id,
+      diffLines: patch.diffLines,
+      verification,
+      critic
+    };
+
+    if (promotionAllowed) {
+      attempt.promotion = await timelines.promote({ timelineId: timeline.timeline.id });
+    } else {
+      await this.notify(attempt);
+    }
+    return attempt;
+  }
+
+  private async scanFiles(files: string[], confirm: boolean): Promise<SelfDefenseFinding[]> {
+    const findings: SelfDefenseFinding[] = [];
+    for (const file of files) {
+      const absolute = safeResolve(this.workspaceRoot, file);
+      const raw = await fs.readFile(absolute, "utf8").catch(() => "");
+      if (!raw) continue;
+
+      const candidates = [
+        ...extractRegexCandidates(raw, file).map((candidate) => ({ ...candidate, kind: "redos" as const })),
+        ...extractCommandInjectionCandidates(raw, file).map((candidate) => ({ ...candidate, kind: "command_injection" as const })),
+        ...extractPathTraversalCandidates(raw, file).map((candidate) => ({ ...candidate, kind: "path_traversal" as const })),
+        ...extractSqliCandidates(raw, file).map((candidate) => ({ ...candidate, kind: "sqli" as const }))
+      ];
+
+      for (const candidate of candidates) {
+        const finding = await buildFinding(candidate, file, confirm);
+        if (finding) findings.push(finding);
+      }
+    }
+    findings.sort((left, right) => right.score - left.score);
+    return findings;
+  }
+
+  private async targetFiles(args: Record<string, unknown>, maxFiles: number): Promise<string[]> {
+    return typeof args.path === "string" && args.path.trim()
+      ? [toPosix(args.path.trim())]
+      : await collectWorkspaceFiles(this.workspaceRoot, { maxFiles });
+  }
+
   private async status(): Promise<Record<string, unknown>> {
-    await this.ensureDefaults();
+    const policy = await this.loadPolicy();
+    const last = await readJson(path.join(this.workspaceRoot, ".mesh", "security", "last-self-defense.json"), null);
     return {
       ok: true,
       action: "status",
       policyPath: ".mesh/security/policy.yaml",
       sensitivePath: ".mesh/security/sensitive.yaml",
       logPath: ".mesh/security/log.jsonl",
+      companionStatePath: ".mesh/security/companions.json",
       supportedProbeClasses: ["redos", "command_injection", "path_traversal", "sqli"],
-      autoMergeDefault: false
+      supportedAutoPatchClasses: ["redos"],
+      autoMergeDefault: policy.autoMerge,
+      last
     };
   }
 
-  private async persist(result: Record<string, unknown>): Promise<void> {
+  private async notify(attempt: PatchAttempt): Promise<void> {
+    await appendJsonl(path.join(this.workspaceRoot, ".mesh", "security", "notifications.jsonl"), {
+      at: new Date().toISOString(),
+      kind: "self_defense_notification",
+      attempt
+    });
+  }
+
+  private async persist(kind: string, result: Record<string, unknown>): Promise<void> {
     await this.ensureDefaults();
     await writeJson(path.join(this.workspaceRoot, ".mesh", "security", "last-self-defense.json"), result);
     await appendJsonl(path.join(this.workspaceRoot, ".mesh", "security", "log.jsonl"), {
       at: new Date().toISOString(),
-      kind: "self_defense_scan",
+      kind,
       result
     });
+  }
+
+  private async loadPolicy(): Promise<SecurityPolicy> {
+    await this.ensureDefaults();
+    const securityDir = path.join(this.workspaceRoot, ".mesh", "security");
+    const policyRaw = await fs.readFile(path.join(securityDir, "policy.yaml"), "utf8").catch(() => "");
+    const sensitiveRaw = await fs.readFile(path.join(securityDir, "sensitive.yaml"), "utf8").catch(() => "");
+    return {
+      autoMerge: parseBoolean(policyRaw, "autoMerge", false),
+      maxPatchLines: parseNumber(policyRaw, "maxPatchLines", 20),
+      requiredPrecision: parseNumber(policyRaw, "requiredPrecision", 0.95),
+      probeBudgetPerRun: parseNumber(policyRaw, "probeBudgetPerRun", 50),
+      redosMaxInputLength: parseNumber(policyRaw, "redosMaxInputLength", 2048),
+      verificationCommand: parseString(policyRaw, "verificationCommand"),
+      sensitivePaths: parseYamlList(sensitiveRaw, "paths")
+    };
   }
 
   private async ensureDefaults(): Promise<void> {
@@ -159,6 +357,9 @@ export class SelfDefendingCodeEngine {
         "maxPatchLines: 20",
         "requiredPrecision: 0.95",
         "probeBudgetPerRun: 50",
+        "redosMaxInputLength: 2048",
+        "# Optional. Example: npm test",
+        "verificationCommand: \"\"",
         ""
       ].join("\n"), "utf8");
     }
@@ -173,6 +374,63 @@ export class SelfDefendingCodeEngine {
       ].join("\n"), "utf8");
     }
   }
+}
+
+async function buildFinding(candidate: SelfDefenseCandidate, file: string, confirm: boolean): Promise<SelfDefenseFinding | null> {
+  let score = 0;
+  let evidence: string[] = [];
+  let recommendation = "";
+
+  if (candidate.kind === "redos") {
+    score = redosRiskScore(candidate.pattern);
+    if (score < 35) return null;
+    evidence = explainRedosRisk(candidate.pattern);
+    recommendation = buildRecommendation(candidate.pattern);
+  } else if (candidate.kind === "command_injection") {
+    score = 80;
+    evidence = ["Dynamic shell execution with unescaped interpolation detected."];
+    recommendation = "Use structured arguments in spawn/execFile instead of shell interpolation.";
+  } else if (candidate.kind === "path_traversal") {
+    score = 70;
+    evidence = ["Unsanitized interpolation in file system path detected."];
+    recommendation = "Use path.basename or strict workspace sandboxing for dynamic file paths.";
+  } else if (candidate.kind === "sqli") {
+    score = 90;
+    evidence = ["Raw SQL query with string interpolation detected."];
+    recommendation = "Use parameterized queries or prepared statements.";
+  }
+
+  const finding: SelfDefenseFinding = {
+    id: `${file}:${candidate.line}:${hashTiny(candidate.pattern)}`,
+    file,
+    line: candidate.line,
+    kind: candidate.kind,
+    pattern: candidate.pattern,
+    flags: candidate.flags,
+    score,
+    status: "suspicious",
+    evidence,
+    recommendation
+  };
+
+  if (confirm) {
+    if (candidate.kind === "redos") {
+      const confirmation = await confirmRedos(candidate.pattern, candidate.flags);
+      finding.status = confirmation.timedOut ? "timeout" : confirmation.vulnerable ? "confirmed" : "suspicious";
+      finding.measuredMs = confirmation.maxMs;
+      finding.exploitInputPreview = confirmation.input.slice(0, 120);
+      finding.evidence.push(...confirmation.evidence);
+    } else {
+      finding.status = "confirmed";
+      finding.exploitInputPreview = candidate.kind === "command_injection"
+        ? "'; rm -rf / #"
+        : candidate.kind === "sqli"
+          ? "' OR 1=1 --"
+          : "../../../etc/passwd";
+      finding.evidence.push(`Confirmed structurally vulnerable to ${candidate.kind} payloads.`);
+    }
+  }
+  return finding;
 }
 
 function extractRegexCandidates(raw: string, file: string): Array<{ pattern: string; flags: string; line: number }> {
@@ -191,7 +449,6 @@ function extractRegexCandidates(raw: string, file: string): Array<{ pattern: str
 function extractCommandInjectionCandidates(raw: string, file: string): Array<{ pattern: string; flags: string; line: number }> {
   if (/node_modules/.test(file)) return [];
   const candidates: Array<{ pattern: string; flags: string; line: number }> = [];
-  // look for exec(`, spawn("sh", ["-c", `...${...}`])
   const regex = /\b(?:exec|spawn|eval)\s*\(\s*`[^`]*\$\{[^}]+\}[^`]*`/g;
   for (const match of raw.matchAll(regex)) {
     candidates.push({ pattern: match[0], flags: "", line: lineNumberAt(raw, match.index ?? 0) });
@@ -202,7 +459,6 @@ function extractCommandInjectionCandidates(raw: string, file: string): Array<{ p
 function extractPathTraversalCandidates(raw: string, file: string): Array<{ pattern: string; flags: string; line: number }> {
   if (/node_modules/.test(file)) return [];
   const candidates: Array<{ pattern: string; flags: string; line: number }> = [];
-  // look for fs.readFile, fs.writeFile, path.join with `${...}` directly
   const regex = /\b(?:fs\.readFile|fs\.writeFile|path\.join|fs\.readFileSync|fs\.writeFileSync)\s*\(\s*`[^`]*\$\{[^}]+\}[^`]*`/g;
   for (const match of raw.matchAll(regex)) {
     candidates.push({ pattern: match[0], flags: "", line: lineNumberAt(raw, match.index ?? 0) });
@@ -213,12 +469,45 @@ function extractPathTraversalCandidates(raw: string, file: string): Array<{ patt
 function extractSqliCandidates(raw: string, file: string): Array<{ pattern: string; flags: string; line: number }> {
   if (/node_modules/.test(file)) return [];
   const candidates: Array<{ pattern: string; flags: string; line: number }> = [];
-  // look for db.query(`SELECT ... ${...}`)
   const regex = /\b(?:query|execute|exec)\s*\(\s*`(?:\s*SELECT|\s*INSERT|\s*UPDATE|\s*DELETE)[^`]*\$\{[^}]+\}[^`]*`/ig;
   for (const match of raw.matchAll(regex)) {
     candidates.push({ pattern: match[0], flags: "", line: lineNumberAt(raw, match.index ?? 0) });
   }
   return candidates;
+}
+
+function buildRedosGuardPatch(
+  raw: string,
+  finding: SelfDefenseFinding,
+  maxInputLength: number
+): { content: string; strategy: string; diffLines: number; diffPreview: string } | null {
+  const lines = raw.split(/\r?\n/g);
+  const start = Math.max(0, finding.line - 1);
+  const end = Math.min(lines.length, start + 12);
+  for (let index = start; index < end; index += 1) {
+    const match = lines[index].match(/\.test\(\s*([A-Za-z_$][\w$]*)\s*\)/);
+    if (!match) continue;
+    const inputName = match[1];
+    const context = lines.slice(Math.max(0, index - 3), index + 1).join("\n");
+    if (new RegExp(`${escapeRegex(inputName)}\\.length\\s*>\\s*\\d+`).test(context)) {
+      return null;
+    }
+    const indent = lines[index].match(/^\s*/)?.[0] ?? "";
+    const guard = `${indent}if (typeof ${inputName} === "string" && ${inputName}.length > ${maxInputLength}) return false;`;
+    const next = [...lines.slice(0, index), guard, ...lines.slice(index)];
+    return {
+      content: next.join("\n"),
+      strategy: `Inserted ReDoS length guard before ${inputName}-driven regex evaluation.`,
+      diffLines: 1,
+      diffPreview: [
+        `--- ${finding.file}`,
+        `+++ ${finding.file}`,
+        `@@ line ${index + 1}`,
+        `+${guard}`
+      ].join("\n")
+    };
+  }
+  return null;
 }
 
 function redosRiskScore(pattern: string): number {
@@ -270,20 +559,25 @@ function measureRegex(pattern: string, flags: string, input: string, timeoutMs: 
     ].join("\n");
     const child = spawn(process.execPath, ["-e", script], { stdio: ["ignore", "pipe", "ignore"] });
     let stdout = "";
+    let settled = false;
+    const done = (result: { ms: number; timedOut: boolean }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
-      resolve({ ms: timeoutMs, timedOut: true });
+      done({ ms: timeoutMs, timedOut: true });
     }, timeoutMs);
     child.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
     });
     child.on("close", () => {
-      clearTimeout(timer);
-      resolve({ ms: Number(stdout.trim()) || 0, timedOut: false });
+      done({ ms: Number(stdout.trim()) || 0, timedOut: false });
     });
     child.on("error", () => {
-      clearTimeout(timer);
-      resolve({ ms: 0, timedOut: false });
+      done({ ms: 0, timedOut: false });
     });
   });
 }
@@ -299,8 +593,75 @@ function buildRecommendation(pattern: string): string {
   return `Constrain input length before /${pattern}/, replace nested repetition with linear parsing, or use a non-backtracking regex strategy. Verify with the generated adversarial input and benign equivalence cases.`;
 }
 
+async function inferVerificationCommand(workspaceRoot: string): Promise<string> {
+  const packageRaw = await fs.readFile(path.join(workspaceRoot, "package.json"), "utf8").catch(() => "");
+  if (packageRaw) {
+    try {
+      const pkg = JSON.parse(packageRaw) as { scripts?: Record<string, string> };
+      if (pkg.scripts?.test) return "npm test";
+      if (pkg.scripts?.typecheck) return "npm run typecheck";
+      if (pkg.scripts?.build) return "npm run build";
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
+function isSensitivePath(file: string, sensitivePaths: string[]): boolean {
+  const normalized = toPosix(file);
+  return sensitivePaths.some((entry) => normalized === entry || normalized.startsWith(`${entry.replace(/\/+$/, "")}/`) || normalized.includes(entry));
+}
+
+function safeResolve(root: string, relative: string): string {
+  const absolute = path.resolve(root, relative);
+  const rel = path.relative(path.resolve(root), absolute);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(`Path escapes workspace: ${relative}`);
+  }
+  return absolute;
+}
+
+function parseBoolean(raw: string, key: string, fallback: boolean): boolean {
+  const value = parseString(raw, key);
+  if (value === undefined) return fallback;
+  return /^(true|yes|1)$/i.test(value);
+}
+
+function parseNumber(raw: string, key: string, fallback: number): number {
+  const value = Number(parseString(raw, key));
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function parseString(raw: string, key: string): string | undefined {
+  const match = raw.match(new RegExp(`^\\s*${escapeRegex(key)}\\s*:\\s*(.*)$`, "m"));
+  if (!match) return undefined;
+  const value = match[1].trim().replace(/^["']|["']$/g, "");
+  return value || undefined;
+}
+
+function parseYamlList(raw: string, key: string): string[] {
+  const lines = raw.split(/\r?\n/g);
+  const values: string[] = [];
+  let inList = false;
+  for (const line of lines) {
+    if (new RegExp(`^\\s*${escapeRegex(key)}\\s*:`).test(line)) {
+      inList = true;
+      continue;
+    }
+    if (inList && /^\s*\w[\w-]*\s*:/.test(line)) break;
+    const item = line.match(/^\s*-\s*(.+?)\s*$/);
+    if (inList && item) values.push(toPosix(item[1].replace(/^["']|["']$/g, "")));
+  }
+  return values;
+}
+
 function unescapeRegexString(value: string): string {
   return value.replace(/\\\\/g, "\\");
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function hashTiny(value: string): string {

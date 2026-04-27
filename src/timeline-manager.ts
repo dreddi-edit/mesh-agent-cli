@@ -2,8 +2,9 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { promisify } from "node:util";
+import { StructuredLogger } from "./structured-logger.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -63,6 +64,8 @@ interface TimelinePromoteArgs {
 export class TimelineManager {
   public readonly workspaceHash: string;
   public readonly basePath: string;
+  private readonly runningChildren = new Set<ChildProcessWithoutNullStreams>();
+  private readonly logger: StructuredLogger;
 
   constructor(private readonly workspaceRoot: string) {
     this.workspaceHash = crypto
@@ -75,6 +78,7 @@ export class TimelineManager {
       ? path.join(os.tmpdir(), "mesh-state")
       : requestedStateRoot;
     this.basePath = path.join(stateRoot, "timelines", this.workspaceHash);
+    this.logger = new StructuredLogger(workspaceRoot);
   }
 
   async create(args: TimelineCreateArgs = {}): Promise<{ ok: true; timeline: TimelineRecord }> {
@@ -110,6 +114,7 @@ export class TimelineManager {
       verdict: "unknown"
     };
     await this.writeRecord(timeline);
+    void this.logger.write("info", "timeline.create", { timelineId: id, kind, baseRef, root }).catch(() => undefined);
     return { ok: true, timeline };
   }
 
@@ -124,6 +129,16 @@ export class TimelineManager {
     }
     timelines.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
     return { ok: true, timelines };
+  }
+
+  async close(): Promise<void> {
+    for (const child of this.runningChildren) {
+      if (!child.killed) {
+        child.kill("SIGTERM");
+      }
+    }
+    this.runningChildren.clear();
+    void this.logger.write("info", "timeline.shutdown", {}).catch(() => undefined);
   }
 
   async applyPatch(args: TimelineApplyPatchArgs): Promise<{ ok: boolean; timelineId: string; message: string; stderr?: string }> {
@@ -177,7 +192,7 @@ export class TimelineManager {
     const stdoutPath = path.join(runDir, "stdout.log");
     const stderrPath = path.join(runDir, "stderr.log");
     const startedAt = new Date().toISOString();
-    const result = await runShell(command, timeline.root, args.timeoutMs ?? 120_000);
+    const result = await runShell(command, timeline.root, args.timeoutMs ?? 120_000, this.runningChildren);
     const finishedAt = new Date().toISOString();
     await fs.writeFile(stdoutPath, result.stdout, "utf8");
     await fs.writeFile(stderrPath, result.stderr, "utf8");
@@ -197,6 +212,12 @@ export class TimelineManager {
     timeline.verdict = result.ok ? "pass" : "fail";
     timeline.updatedAt = commandRecord.finishedAt;
     await this.writeRecord(timeline);
+    void this.logger.write("info", "timeline.run.finish", {
+      timelineId: timeline.id,
+      command,
+      ok: result.ok,
+      exitCode: result.exitCode
+    }).catch(() => undefined);
 
     return {
       ok: result.ok,
@@ -294,9 +315,15 @@ async function copyWorkspace(source: string, destination: string): Promise<void>
   });
 }
 
-async function runShell(command: string, cwd: string, timeoutMs: number): Promise<{ ok: boolean; exitCode: number; stdout: string; stderr: string }> {
+async function runShell(
+  command: string,
+  cwd: string,
+  timeoutMs: number,
+  runningChildren: Set<ChildProcessWithoutNullStreams>
+): Promise<{ ok: boolean; exitCode: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     const child = spawn("sh", ["-c", command], { cwd });
+    runningChildren.add(child);
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -312,10 +339,12 @@ async function runShell(command: string, cwd: string, timeoutMs: number): Promis
       stderr += chunk.toString();
     });
     child.on("error", (error) => {
+      runningChildren.delete(child);
       clearTimeout(timer);
       resolve({ ok: false, exitCode: 1, stdout, stderr: `${stderr}\n${error.message}` });
     });
     child.on("close", (code) => {
+      runningChildren.delete(child);
       clearTimeout(timer);
       const exitCode = timedOut ? 124 : code ?? 0;
       resolve({

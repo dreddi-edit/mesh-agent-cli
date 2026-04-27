@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { config as loadDotEnv } from "dotenv";
+import { DEFAULT_FALLBACK_MODEL_IDS, DEFAULT_MODEL_ID } from "./model-catalog.js";
 
 loadDotEnv();
 
@@ -15,13 +16,6 @@ loadDotEnv();
  */
 const DEFAULT_ENDPOINT_BASE = "https://mesh-llm.edgar-baumann.workers.dev";
 
-/**
- * Default model id on Bedrock. Elmo can override via BEDROCK_MODEL_ID.
- */
-export const DEFAULT_MODEL_ID = "us.anthropic.claude-sonnet-4-6";
-export const DEFAULT_FALLBACK_MODEL_IDS = [
-  "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-];
 const LEGACY_DEFAULT_MODEL_IDS = new Set([
   "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 ]);

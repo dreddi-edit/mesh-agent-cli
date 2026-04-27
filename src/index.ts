@@ -32,6 +32,24 @@ async function main(): Promise<void> {
   void user; // available for per-user features (e.g. namespaced capsule cache)
 
   let backend: ToolBackend | null = null;
+  let shuttingDown = false;
+  const closeBackend = async () => {
+    if (!backend || shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    await backend.close().catch(() => undefined);
+  };
+  const installSignalHandlers = () => {
+    const handleSignal = (signal: NodeJS.Signals) => {
+      void closeBackend().finally(() => {
+        process.exitCode = process.exitCode || 130;
+        process.stderr.write(`\nReceived ${signal}, shutting down Mesh cleanly.\n`);
+      });
+    };
+    process.once("SIGINT", handleSignal);
+    process.once("SIGTERM", handleSignal);
+  };
 
   try {
     const localBackend = new LocalToolBackend(config.agent.workspaceRoot, config);
@@ -64,14 +82,13 @@ async function main(): Promise<void> {
     }
 
     backend = new CompositeToolBackend(backends);
+    installSignalHandlers();
 
     const agent = new AgentLoop(config, backend);
     const prompt = process.argv.slice(2).join(" ");
     await agent.runCli(prompt);
   } finally {
-    if (backend) {
-      await backend.close();
-    }
+    await closeBackend();
   }
 }
 

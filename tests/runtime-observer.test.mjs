@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { RuntimeObserver } from "../src/runtime-observer.ts";
+import { RuntimeObserver, mergeNodeOptions } from "../src/runtime-observer.ts";
 
 test("runtime observer captures a real autopsy report for crashing node runs", async () => {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "mesh-runtime-observer-"));
@@ -38,4 +38,15 @@ test("runtime observer captures a real autopsy report for crashing node runs", a
     }
     await rm(workspaceRoot, { recursive: true, force: true });
   }
+});
+
+test("runtime observer only inherits allowlisted NODE_OPTIONS flags", () => {
+  assert.match(
+    mergeNodeOptions("--enable-source-maps --stack-trace-limit=100", ["--require=/tmp/hook.cjs"]),
+    /--require=\/tmp\/hook\.cjs/
+  );
+  assert.throws(
+    () => mergeNodeOptions("--inspect-brk", ["--require=/tmp/hook.cjs"]),
+    /Unsafe NODE_OPTIONS rejected/
+  );
 });

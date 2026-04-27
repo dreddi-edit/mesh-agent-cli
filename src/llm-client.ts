@@ -12,6 +12,8 @@
  * pass a Bedrock API key via bearerToken (BYOK).
  */
 
+import { DEFAULT_MODEL_ID } from "./model-catalog.js";
+
 export type TextBlock = { text: string };
 export type ImageBlock = {
   image: {
@@ -194,11 +196,10 @@ export class BedrockLlmClient {
           if (event.contentBlockDelta?.delta?.text) {
             const delta = event.contentBlockDelta.delta.text;
             
-            // JIT Reversion: Prevent the LLM from streaming known broken patterns
-            // (e.g., calling a variable that doesn't exist, or obvious syntax typos)
-            if (delta.includes("undefined.") || delta.includes("null.")) {
-               yield { kind: "stop", text: "\n[JIT REVERSION] Aborted: Potential null pointer access detected in stream." };
-               return; 
+            const hazard = detectStreamingHazard(buffer, delta);
+            if (hazard) {
+              yield { kind: "stop", text: `\n[JIT REVERSION] Aborted: ${hazard}` };
+              return;
             }
 
             yield { kind: "text", text: delta };
@@ -240,7 +241,7 @@ export class BedrockLlmClient {
       status === 400 &&
       body.includes("on-demand throughput isn’t supported")
     ) {
-      return ` | Hint: model '${modelId}' needs an inference profile id. Try '/model us.anthropic.claude-sonnet-4-6'`;
+      return ` | Hint: model '${modelId}' needs an inference profile id. Try '/model ${DEFAULT_MODEL_ID}'`;
     }
     if (status === 403 && body.includes("\"model_not_allowed\"")) {
       return " | Hint: this model is blocked by worker ALLOWED_MODELS.";
@@ -343,4 +344,37 @@ export class BedrockLlmClient {
 
     return { kind: "text", text, stopReason, usage };
   }
+}
+
+export function detectStreamingHazard(streamSoFar: string, delta: string): string | null {
+  const window = `${streamSoFar}${delta}`.slice(-1200);
+  const checks: Array<{ pattern: RegExp; reason: string }> = [
+    {
+      pattern: /\b(?:undefined|null)\s*\.\s*[a-zA-Z_$][\w$]*/i,
+      reason: "potential null/undefined property access detected in stream"
+    },
+    {
+      pattern: /\b(?:undefined|null)\s*\[/i,
+      reason: "potential null/undefined indexed access detected in stream"
+    },
+    {
+      pattern: /\b(?:document|window|localStorage)\b(?!\s*typeof)\s*\.\s*[a-zA-Z_$][\w$]*/i,
+      reason: "browser-only global access detected without an environment guard"
+    },
+    {
+      pattern: /\bprocess\.env\.[A-Z0-9_]+\s*\.\s*[a-zA-Z_$][\w$]*/i,
+      reason: "unsafe chained env access detected in stream"
+    },
+    {
+      pattern: /\b[A-Za-z_$][\w$]*\s+as\s+any\b/,
+      reason: "type erasure via 'as any' detected in stream"
+    }
+  ];
+
+  for (const check of checks) {
+    if (check.pattern.test(window)) {
+      return check.reason;
+    }
+  }
+  return null;
 }
