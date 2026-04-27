@@ -1,16 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { BedrockLlmClient } from "../src/llm-client.ts";
+
+// === Sanitization tests (from 01-01 scaffold) ===
 
 test("sanitizeLlmOutput strips <thinking> and <thought> blocks from LLM output", async () => {
-  // Dynamic import so the test file is loadable before the function exists
   let sanitizeLlmOutput;
   try {
-    // This import will fail until Plan 03 adds the function — that is expected
-    // For now, write the test so it documents the contract
     const mod = await import("../src/agent-loop.ts");
     sanitizeLlmOutput = mod.sanitizeLlmOutput;
   } catch {
-    // Function not yet exported — skip this test
     return;
   }
   if (!sanitizeLlmOutput) return;
@@ -43,9 +42,9 @@ test("sanitizeLlmOutput strips <thought> blocks and XML artifact wrappers", asyn
   assert.ok(cleaned2.includes("Final answer"), "final answer preserved");
 });
 
+// === Error format tests (from 01-01 scaffold) ===
+
 test("JSON.parse failures in agent-loop produce [Mesh] Error: format not raw SyntaxError", async () => {
-  // This is a contract test — documents what the output format must be.
-  // The actual wrapping happens in Plan 04. For now it verifies the format string.
   const errorPrefix = "[Mesh] Error:";
   const sampleMessage = "[Mesh] Error: Intent file is corrupted. Try /index first to rebuild workspace state.";
   assert.ok(sampleMessage.startsWith(errorPrefix), `Error messages must start with "${errorPrefix}"`);
@@ -53,7 +52,6 @@ test("JSON.parse failures in agent-loop produce [Mesh] Error: format not raw Syn
 });
 
 test("AbortSignal.any combines controller signal with 60s timeout", async () => {
-  // Verify Node.js 20 APIs are available (they will be needed in Plan 02)
   assert.ok(typeof AbortSignal.timeout === "function", "AbortSignal.timeout must exist (Node 20+)");
   assert.ok(typeof AbortSignal.any === "function", "AbortSignal.any must exist (Node 20+)");
 
@@ -61,8 +59,147 @@ test("AbortSignal.any combines controller signal with 60s timeout", async () => 
   const combined = AbortSignal.any([controller.signal, AbortSignal.timeout(200)]);
   assert.ok(combined instanceof AbortSignal, "AbortSignal.any must return an AbortSignal");
 
-  // Verify abort propagates — trigger via controller (synchronous, no timer needed)
   assert.ok(!combined.aborted, "signal must not be aborted yet");
   controller.abort();
   assert.ok(combined.aborted, "combined signal must be aborted after controller.abort()");
+});
+
+// === LLM client tests (from 01-02) ===
+
+test("logEndpoint writes LLM endpoint to stderr", () => {
+  const client = new BedrockLlmClient({
+    endpointBase: "https://mesh.example.test",
+    modelId: "test-model",
+    temperature: 0,
+    maxTokens: 100
+  });
+
+  const chunks = [];
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk) => {
+    chunks.push(typeof chunk === "string" ? chunk : chunk.toString());
+    return true;
+  };
+
+  try {
+    client.logEndpoint();
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+
+  const output = chunks.join("");
+  assert.match(output, /\[Mesh\] LLM endpoint: https:\/\/mesh\.example\.test/);
+});
+
+test("converse() passes combinedSignal derived from caller signal to fetch", async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedSignalFromFetch = null;
+  globalThis.fetch = async (_url, init) => {
+    capturedSignalFromFetch = init.signal;
+    return new Response(JSON.stringify({
+      output: { message: { content: [{ text: "signal ok" }] } },
+      stopReason: "end_turn"
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+
+  try {
+    const client = new BedrockLlmClient({
+      endpointBase: "https://mesh.example.test",
+      modelId: "test-model",
+      temperature: 0,
+      maxTokens: 100
+    });
+
+    const controller = new AbortController();
+    await client.converse(
+      [{ role: "user", content: [{ text: "hello" }] }],
+      [],
+      "system",
+      undefined,
+      controller.signal
+    );
+
+    assert.ok(capturedSignalFromFetch instanceof AbortSignal,
+      "fetch must receive an AbortSignal (the combined signal)");
+    assert.equal(capturedSignalFromFetch.aborted, false,
+      "combined signal should not be pre-aborted when controller is still active");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("converse() applies timeout signal even when no caller abort signal is provided", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    assert.ok(init.signal instanceof AbortSignal, "fetch must always receive an AbortSignal");
+    assert.equal(init.signal.aborted, false, "signal should not be aborted yet");
+    return new Response(JSON.stringify({
+      output: { message: { content: [{ text: "ok" }] } },
+      stopReason: "end_turn"
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+
+  try {
+    const client = new BedrockLlmClient({
+      endpointBase: "https://mesh.example.test",
+      modelId: "test-model",
+      temperature: 0,
+      maxTokens: 100
+    });
+
+    const response = await client.converse(
+      [{ role: "user", content: [{ text: "hello" }] }],
+      [],
+      "system"
+    );
+
+    assert.equal(response.kind, "text");
+    assert.equal(response.text, "ok");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("AbortSignal.any combines caller abort signal with 60s timeout (LLM-02)", async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedSignal = null;
+  globalThis.fetch = async (_url, init) => {
+    capturedSignal = init.signal;
+    return new Response(JSON.stringify({
+      output: { message: { content: [{ text: "combined signal ok" }] } },
+      stopReason: "end_turn"
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+
+  try {
+    const client = new BedrockLlmClient({
+      endpointBase: "https://mesh.example.test",
+      modelId: "test-model",
+      temperature: 0,
+      maxTokens: 100
+    });
+
+    const controller = new AbortController();
+    await client.converse(
+      [{ role: "user", content: [{ text: "hello" }] }],
+      [],
+      "system",
+      undefined,
+      controller.signal
+    );
+
+    assert.ok(capturedSignal instanceof AbortSignal, "fetch must receive an AbortSignal");
+    assert.equal(capturedSignal.aborted, false, "combined signal should not be aborted before use");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
