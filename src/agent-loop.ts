@@ -731,8 +731,13 @@ export class AgentLoop {
       output.write(pc.yellow(`\n[Mesh Portal] No dev server detected near ${targetUrl}. Starting the workspace dev script...\n`));
       try {
         const pkgPath = path.join(this.config.agent.workspaceRoot, "package.json");
-        const pkg = JSON.parse(await fs.readFile(pkgPath, "utf8"));
-        const devScript = pkg.scripts?.dev || pkg.scripts?.start;
+        let pkg: Record<string, any> = {};
+        try {
+          pkg = JSON.parse(await fs.readFile(pkgPath, "utf8"));
+        } catch {
+          // package.json missing or malformed — devScript will be undefined, handled below
+        }
+        const devScript = (pkg.scripts as Record<string, string> | undefined)?.dev || (pkg.scripts as Record<string, string> | undefined)?.start;
 
         if (devScript) {
           const { spawn } = await import("node:child_process");
@@ -871,8 +876,12 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
             try {
               const match = delta.match(/PREVIEW_STYLE\s*(\{.*?\})/);
               if (match) {
-                const styles = JSON.parse(match[1]);
-                await this.portal.applyGhostStyles(styles);
+                try {
+                  const styles = JSON.parse(match[1]);
+                  await this.portal.applyGhostStyles(styles);
+                } catch {
+                  output.write(pc.red("[Mesh] Error: Ghost styles parse failed — skipping live preview update.\n"));
+                }
                 previewSent = true;
                 process.stdout.write(pc.green("\n[Ghost Sync] Live preview applied. Capturing for Vision check...\n"));
 
@@ -917,6 +926,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
   }
 
   public async runCli(initialPrompt?: string): Promise<void> {
+    this.llm.logEndpoint();
 
     await this.checkInit();
     this.sessionCapsule = await this.sessionStore.load();
@@ -1515,7 +1525,16 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
             const errorCount = (this.consecutiveErrors.get(errorKey) || 0) + 1;
             this.consecutiveErrors.set(errorKey, errorCount);
 
-            let resultText = `Tool execution failed: ${errorMsg}`;
+            const toolName = sel.tool.name;
+            let hint = "Try /doctor to diagnose.";
+            if (errorMsg.includes("ENOENT") || errorMsg.includes("no such file")) {
+              hint = "Check that the file path exists, or run /index to rebuild workspace state.";
+            } else if (errorMsg.includes("EACCES") || errorMsg.includes("permission denied")) {
+              hint = "Check file permissions with your OS.";
+            } else if (errorMsg.includes("timed out") || errorMsg.includes("AbortError")) {
+              hint = "The operation timed out — try /compact to reduce context.";
+            }
+            let resultText = `[Mesh] Error: ${toolName} failed — ${errorMsg.slice(0, 200)}. ${hint}`;
             if (errorCount >= 2) {
               resultText += "\n\n[MESH SYSTEM WARNING] This exact error has occurred multiple times. DO NOT retry the same action. Either try a different approach or stop and ask the user for clarification.";
             }
@@ -2404,7 +2423,13 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     const intentPath = path.join(this.config.agent.workspaceRoot, ".mesh", "latest_intent.json");
     try {
       const intentRaw = await fs.readFile(intentPath, "utf8");
-      const intent = JSON.parse(intentRaw);
+      let intent: Record<string, any>;
+      try {
+        intent = JSON.parse(intentRaw);
+      } catch {
+        output.write(pc.red("\n[Mesh] Error: Intent file is corrupted. Try /index first to rebuild workspace state.\n"));
+        return;
+      }
 
       output.write(pc.cyan(`\n[Predictive Synthesis] Analyzing your recent change: ${intent.message}\n`));
 
@@ -2535,6 +2560,47 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     } else {
       output.write(pc.yellow("\nNo background fixes currently available. Try introducing an error or running /doctor.\n"));
     }
+  }
+
+  private async runSlashCommandSafe(
+    label: string,
+    fn: (spinner: ReturnType<typeof ora>) => Promise<void>
+  ): Promise<void> {
+    const spinner = ora({ text: `${label}...`, color: "cyan" }).start();
+    try {
+      await fn(spinner);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Classify into user-friendly category (D-01, D-02)
+      let userMsg: string;
+      let hint: string;
+      if (msg.includes("429") || msg.includes("rate_limit") || msg.includes("ThrottlingException")) {
+        userMsg = "LLM rate limit hit";
+        hint = "Wait a moment, then try again. Run /doctor to check connectivity.";
+      } else if (msg.includes("LLM request failed") || msg.includes("fetch failed") || msg.includes("ECONNREFUSED")) {
+        userMsg = "LLM backend unavailable";
+        hint = "Run /doctor to diagnose. Check network connectivity.";
+      } else if (msg.includes("Context") && msg.includes("firewall")) {
+        userMsg = "Context too large for this operation";
+        hint = "Run /compact first to reduce context size.";
+      } else if (msg.includes("ENOENT") || msg.includes("no such file")) {
+        userMsg = "Required file not found";
+        hint = "Run /index first to initialize workspace state.";
+      } else if (msg.includes("AbortError") || msg.includes("aborted") || msg.includes("timed out")) {
+        userMsg = "Operation timed out after 60 seconds";
+        hint = "Try /compact to reduce context, then retry.";
+      } else {
+        userMsg = msg.slice(0, 200);
+        hint = "Run /doctor to diagnose or try /reset if the session is corrupted.";
+      }
+      // Track in consecutiveErrors Map (D-15)
+      const cmdKey = `${label} -> ${msg.slice(0, 80)}`;
+      const cmdErrorCount = (this.consecutiveErrors.get(cmdKey) || 0) + 1;
+      this.consecutiveErrors.set(cmdKey, cmdErrorCount);
+
+      spinner.fail(pc.red(`[Mesh] Error: ${label} failed — ${userMsg}. Try: ${hint}`));
+    }
+    // Note: ora.fail() and ora.succeed() both stop the spinner — no finally needed
   }
 
   private async runDigitalTwin(args: string[]): Promise<void> {
@@ -3672,6 +3738,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       }
     }
 
+    try {
     switch (command) {
       case "/undo": {
         const spinner = ora({ text: "Undoing last change...", color: "yellow" }).start();
@@ -3715,7 +3782,10 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
         await this.runSynthesize();
         return { wasHandled: true, shouldExit: false };
       case "/twin":
-        await this.runDigitalTwin(args);
+        await this.runSlashCommandSafe("Digital Twin", async (spinner) => {
+          spinner.stop();
+          await this.runDigitalTwin(args);
+        });
         return { wasHandled: true, shouldExit: false };
       case "/repair":
         await this.runPredictiveRepair(args);
@@ -3905,6 +3975,11 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       default:
         output.write(`\nUnknown command: ${inputCmd} (resolved to ${command}). Use /help.\n`);
         return { wasHandled: true, shouldExit: false };
+    }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      output.write(pc.red(`\n[Mesh] Error: Command "${command}" failed — ${msg.slice(0, 200)}. Try /doctor to diagnose.\n`));
+      return { wasHandled: true, shouldExit: false };
     }
   }
 
