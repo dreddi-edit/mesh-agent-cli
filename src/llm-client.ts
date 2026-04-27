@@ -138,6 +138,7 @@ export class BedrockLlmClient {
       if (!this.shouldTryFallback(response.status)) {
         break;
       }
+      process.stderr.write(`[Mesh] Model ${activeModelId} failed (${response.status}), trying fallback...\n`);
     }
 
     throw new Error(`LLM request failed after ${attempts.length} attempt(s): ${attempts.join(" | ")}`);
