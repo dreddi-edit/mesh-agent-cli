@@ -8,7 +8,8 @@ test("Bedrock client retries fallback model on transient 429 response", async ()
   const requestedUrls = [];
   globalThis.fetch = async (url) => {
     requestedUrls.push(String(url));
-    if (requestedUrls.length === 1) {
+    // Primary model always returns 429 (exhausts all retries); fallback returns 200
+    if (String(url).includes("primary-model")) {
       return new Response("rate limited", { status: 429 });
     }
     return new Response(JSON.stringify({
@@ -41,8 +42,9 @@ test("Bedrock client retries fallback model on transient 429 response", async ()
 
     assert.equal(response.kind, "text");
     assert.equal(response.text, "fallback ok");
+    // First call is always primary-model; last call is fallback-model
     assert.match(requestedUrls[0], /primary-model/);
-    assert.match(requestedUrls[1], /fallback-model/);
+    assert.match(requestedUrls[requestedUrls.length - 1], /fallback-model/);
   } finally {
     globalThis.fetch = originalFetch;
   }

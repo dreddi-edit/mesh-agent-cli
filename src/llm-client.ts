@@ -112,7 +112,7 @@ export class BedrockLlmClient {
 
     const attempts: string[] = [];
     for (const activeModelId of this.candidateModelIds(modelIdOverride)) {
-      const response = await fetch(this.buildUrl(activeModelId), {
+      const response = await this.fetchWithRetry(this.buildUrl(activeModelId), {
         method: "POST",
         headers,
         body: JSON.stringify(body),
@@ -233,6 +233,32 @@ export class BedrockLlmClient {
 
   private shouldTryFallback(status: number): boolean {
     return status === 404 || status === 429 || status >= 500;
+  }
+
+  private isRetryableStatus(status: number): boolean {
+    return status === 429 || status === 408 || status >= 500;
+  }
+
+  private async fetchWithRetry(
+    url: string,
+    init: RequestInit,
+    maxRetries = 3
+  ): Promise<Response> {
+    const delays = [1000, 2000, 4000]; // D-05: 1s/2s/4s
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const response = await fetch(url, init);
+      if (response.ok || !this.isRetryableStatus(response.status)) {
+        return response;
+      }
+      if (attempt < maxRetries) {
+        const base = delays[attempt] ?? 4000;
+        const jitter = Math.random() * base * 0.25;
+        await new Promise(r => setTimeout(r, base + jitter));
+      } else {
+        return response; // return last response; outer loop decides model fallback
+      }
+    }
+    return fetch(url, init); // TypeScript unreachable, satisfies return type
   }
 
   private buildErrorHint(status: number, body: string, modelId: string): string {
