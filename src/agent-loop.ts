@@ -731,8 +731,13 @@ export class AgentLoop {
       output.write(pc.yellow(`\n[Mesh Portal] No dev server detected near ${targetUrl}. Starting the workspace dev script...\n`));
       try {
         const pkgPath = path.join(this.config.agent.workspaceRoot, "package.json");
-        const pkg = JSON.parse(await fs.readFile(pkgPath, "utf8"));
-        const devScript = pkg.scripts?.dev || pkg.scripts?.start;
+        let pkg: Record<string, any> = {};
+        try {
+          pkg = JSON.parse(await fs.readFile(pkgPath, "utf8"));
+        } catch {
+          // package.json missing or malformed — devScript will be undefined, handled below
+        }
+        const devScript = (pkg.scripts as Record<string, string> | undefined)?.dev || (pkg.scripts as Record<string, string> | undefined)?.start;
 
         if (devScript) {
           const { spawn } = await import("node:child_process");
@@ -871,8 +876,12 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
             try {
               const match = delta.match(/PREVIEW_STYLE\s*(\{.*?\})/);
               if (match) {
-                const styles = JSON.parse(match[1]);
-                await this.portal.applyGhostStyles(styles);
+                try {
+                  const styles = JSON.parse(match[1]);
+                  await this.portal.applyGhostStyles(styles);
+                } catch {
+                  output.write(pc.dim("[Mesh] Ghost styles parse failed — skipping live preview update.\n"));
+                }
                 previewSent = true;
                 process.stdout.write(pc.green("\n[Ghost Sync] Live preview applied. Capturing for Vision check...\n"));
 
@@ -1515,7 +1524,16 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
             const errorCount = (this.consecutiveErrors.get(errorKey) || 0) + 1;
             this.consecutiveErrors.set(errorKey, errorCount);
 
-            let resultText = `Tool execution failed: ${errorMsg}`;
+            const toolName = sel.tool.name;
+            let hint = "Try /doctor to diagnose.";
+            if (errorMsg.includes("ENOENT") || errorMsg.includes("no such file")) {
+              hint = "Check that the file path exists, or run /index to rebuild workspace state.";
+            } else if (errorMsg.includes("EACCES") || errorMsg.includes("permission denied")) {
+              hint = "Check file permissions with your OS.";
+            } else if (errorMsg.includes("timed out") || errorMsg.includes("AbortError")) {
+              hint = "The operation timed out — try /compact to reduce context.";
+            }
+            let resultText = `[Mesh] Error: ${toolName} failed — ${errorMsg.slice(0, 200)}. ${hint}`;
             if (errorCount >= 2) {
               resultText += "\n\n[MESH SYSTEM WARNING] This exact error has occurred multiple times. DO NOT retry the same action. Either try a different approach or stop and ask the user for clarification.";
             }
@@ -2404,7 +2422,13 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     const intentPath = path.join(this.config.agent.workspaceRoot, ".mesh", "latest_intent.json");
     try {
       const intentRaw = await fs.readFile(intentPath, "utf8");
-      const intent = JSON.parse(intentRaw);
+      let intent: Record<string, any>;
+      try {
+        intent = JSON.parse(intentRaw);
+      } catch {
+        output.write(pc.red("\n[Mesh] Error: Intent file is corrupted. Try /index first to rebuild workspace state.\n"));
+        return;
+      }
 
       output.write(pc.cyan(`\n[Predictive Synthesis] Analyzing your recent change: ${intent.message}\n`));
 
