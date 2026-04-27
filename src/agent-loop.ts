@@ -135,15 +135,14 @@ const RECOMMENDED_SYSTEM_VOICE_BY_LANGUAGE: Record<string, string> = {
 
 const VOICE_EXIT_PATTERNS = [
   /^\/voice off$/,
-  /^(voice|voice mode|voice chat)\s+(off|stop|exit|quit|disable)(\s+(please|now))?$/,
-  /^(stop|exit|quit|disable)\s+(voice|voice mode|voice chat)(\s+(please|now))?$/,
-  /^(stop listening|stop recording)$/,
-  /^(voice|sprachmodus|stimmmodus)\s+(aus|off)(\s+bitte)?$/,
-  /^(beende|beenden|stoppe|stopp)\s+(voice|sprachmodus|stimmmodus)(\s+bitte)?$/,
-  /^(zuruck|zuruck zum text|zuruck zum textmodus)$/,
-  /^(zurück|zurück zum text|zurück zum textmodus)$/,
-  /^(textmodus|text modus)\s+(an|zuruck)$/,
-  /^(textmodus|text)\s+bitte$/
+  /(voice|sprachmodus|stimmmodus)\s*(aus|off|beenden|beendet|stoppen|stoppt)/i,
+  /(beende|beendet|beenden|stoppe|stoppen|stopp|verlasse|verlassen)\s*(den\s*)?(voice|sprachmodus|stimmmodus)/i,
+  /(stop|exit|quit|disable)\s+(voice)/i,
+  /(voice|voice mode|voice chat)\s+(off|stop|exit|quit|disable)/i,
+  /stop listening/i,
+  /stop recording/i,
+  /textmodus\s*(an|zuruck|bitte)/i,
+  /zuruck zum text/i
 ];
 
 interface WireTool {
@@ -1122,7 +1121,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
               spinner.stop();
               spinner.clear();
             }
-            this.renderAssistantTurn(spokenAnswer, { plainText: true });
+            this.renderAssistantTurn(spokenAnswer);
             await this.voiceManager.speak(spokenAnswer, this.getVoiceReplyLanguage()).catch((error) => {
               this.renderSystemMessage(pc.red(`Voice output failed: ${(error as Error).message}`));
             });
@@ -1145,7 +1144,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
             if (hasStartedStreaming) {
               output.write("\n");
             } else if (answer) {
-              this.renderAssistantTurn(answer, { plainText: true });
+              this.renderAssistantTurn(answer);
             }
           }
         } finally {
@@ -1820,7 +1819,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
       spinner.stop();
       spinner.clear();
     }
-    this.renderAssistantTurn(answer, { plainText: true });
+    this.renderAssistantTurn(answer);
   }
 
   private printBanner(): void {
@@ -2396,7 +2395,6 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
       await fs.writeFile(brainPath, summary, "utf8");
 
       spinner.succeed(pc.magenta("Project Brain distilled and saved to .mesh/project-brain.md"));
-      output.write(pc.dim(summary) + "\n");
     } catch (e) {
       spinner.fail(pc.red(`Distillation failed: ${(e as Error).message}`));
     }
@@ -3419,16 +3417,8 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     output.write(`\n${label}> ${text}\n`);
   }
 
-  private renderAssistantTurn(text: string, options?: { plainText?: boolean }): void {
-    if (options?.plainText) {
-      if (this.useAnsi) {
-        output.write("\n" + this.themeColor(pc.bold("assistant")) + pc.dim(" › ") + "\n" + text + "\n");
-        return;
-      }
-      output.write(`\nassistant> ${text}\n`);
-      return;
-    }
-    const rendered = marked.parse(text);
+  private renderAssistantTurn(text: string): void {
+    const rendered = marked.parse(text) as string;
     if (this.useAnsi) {
       output.write("\n" + this.themeColor(pc.bold("assistant")) + pc.dim(" › ") + "\n" + rendered + "\n");
       return;
