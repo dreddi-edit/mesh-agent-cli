@@ -3418,12 +3418,42 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
   }
 
   private renderAssistantTurn(text: string): void {
-    const rendered = marked.parse(text) as string;
+    const cleaned = this.sanitizeLlmOutput(text);
+    const rendered = marked.parse(cleaned) as string;
     if (this.useAnsi) {
       output.write("\n" + this.themeColor(pc.bold("assistant")) + pc.dim(" › ") + "\n" + rendered + "\n");
       return;
     }
-    output.write(`\nassistant> ${text}\n`);
+    output.write(`\nassistant> ${cleaned}\n`);
+  }
+
+  private sanitizeLlmOutput(text: string): string {
+    let clean = text
+      // Strip <thinking>...</thinking> blocks completely (content included) — D-10
+      .replace(/<thinking>[\s\S]*?<\/thinking>/g, "")
+      // Strip <thought>...</thought> blocks completely — D-10
+      // (system prompt at line 77 explicitly instructs model to emit these)
+      .replace(/<thought>[\s\S]*?<\/thought>/g, "")
+      // Strip <reflection>...</reflection> and <scratchpad>...</scratchpad> blocks
+      .replace(/<reflection>[\s\S]*?<\/reflection>/g, "")
+      .replace(/<scratchpad>[\s\S]*?<\/scratchpad>/g, "")
+      // Remove XML artifact wrapper TAGS but preserve their text content — D-11
+      .replace(/<\/?(artifact|result|answer)[^>]*>/g, "")
+      // Remove orphaned open/close thinking-variant tags (incomplete blocks)
+      .replace(/<\/?(thinking|thought|reflection|scratchpad)[^>]*>/g, "")
+      // Normalize literal \n escape sequences from raw LLM output — D-12
+      .replace(/\\n/g, "\n")
+      // Collapse excessive blank lines (4+ newlines → 2)
+      .replace(/\n{4,}/g, "\n\n")
+      .trim();
+    // Close unclosed code fences — D-12 (RESEARCH.md Pattern 3)
+    // Count ``` fence markers; odd count means one was never closed
+    const fenceCount = (clean.match(/^```/gm) || []).length;
+    if (fenceCount % 2 !== 0) clean += "\n```";
+    // Repair broken table rows: remove lines that are only pipe characters and whitespace
+    // (orphaned | lines that appear when a table is cut mid-row) — D-12
+    clean = clean.replace(/^\s*\|\s*$/gm, "");
+    return clean;
   }
 
   private renderSystemMessage(text: string): void {
@@ -4757,4 +4787,27 @@ ${baseSummary}`;
       }, 0);
     }, 0);
   }
+}
+
+// Export sanitizeLlmOutput as a standalone function for unit testing.
+// This allows tests/error-and-sanitization.test.mjs to import it without
+// instantiating AgentLoop (which requires heavy config setup).
+// The logic is identical to the private method above — keep them in sync.
+export function sanitizeLlmOutput(text: string): string {
+  let clean = text
+    .replace(/<thinking>[\s\S]*?<\/thinking>/g, "")
+    .replace(/<thought>[\s\S]*?<\/thought>/g, "")
+    .replace(/<reflection>[\s\S]*?<\/reflection>/g, "")
+    .replace(/<scratchpad>[\s\S]*?<\/scratchpad>/g, "")
+    .replace(/<\/?(artifact|result|answer)[^>]*>/g, "")
+    .replace(/<\/?(thinking|thought|reflection|scratchpad)[^>]*>/g, "")
+    .replace(/\\n/g, "\n")
+    .replace(/\n{4,}/g, "\n\n")
+    .trim();
+  // Close unclosed code fences — D-12
+  const fenceCount = (clean.match(/^```/gm) || []).length;
+  if (fenceCount % 2 !== 0) clean += "\n```";
+  // Repair broken table rows — D-12
+  clean = clean.replace(/^\s*\|\s*$/gm, "");
+  return clean;
 }
