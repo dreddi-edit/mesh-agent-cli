@@ -93,6 +93,10 @@ interface ConverseResponseShape {
 export class BedrockLlmClient {
   constructor(private readonly options: LlmClientOptions) {}
 
+  logEndpoint(): void {
+    process.stderr.write(`[Mesh] LLM endpoint: ${this.options.endpointBase}\n`);
+  }
+
   async converse(
     messages: ConverseMessage[],
     tools: ToolSpec[],
@@ -110,13 +114,17 @@ export class BedrockLlmClient {
       headers.authorization = `Bearer ${this.options.bearerToken}`;
     }
 
+    const combinedSignal = abortSignal
+      ? AbortSignal.any([abortSignal, AbortSignal.timeout(60_000)])
+      : AbortSignal.timeout(60_000);
+
     const attempts: string[] = [];
     for (const activeModelId of this.candidateModelIds(modelIdOverride)) {
       const response = await this.fetchWithRetry(this.buildUrl(activeModelId), {
         method: "POST",
         headers,
         body: JSON.stringify(body),
-        signal: abortSignal
+        signal: combinedSignal
       });
 
       if (response.ok) {
@@ -152,6 +160,10 @@ export class BedrockLlmClient {
       headers.authorization = `Bearer ${this.options.bearerToken}`;
     }
 
+    const combinedSignal = abortSignal
+      ? AbortSignal.any([abortSignal, AbortSignal.timeout(60_000)])
+      : AbortSignal.timeout(60_000);
+
     let response: Response | null = null;
     const attempts: string[] = [];
     for (const activeModelId of this.candidateModelIds(modelIdOverride)) {
@@ -159,7 +171,7 @@ export class BedrockLlmClient {
         method: "POST",
         headers,
         body: JSON.stringify(body),
-        signal: abortSignal
+        signal: combinedSignal
       });
 
       if (response.ok) {
