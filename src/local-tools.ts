@@ -507,6 +507,7 @@ export class LocalToolBackend implements ToolBackend {
       apiKey: config?.bedrock?.bearerToken,
       baseUrl: config?.bedrock?.endpointBase
     });
+    this.startLiveSyncWatcher();
     this.timelines = new TimelineManager(workspaceRoot);
     this.runtimeObserver = new RuntimeObserver(workspaceRoot);
     this.agentOs = new AgentOs(workspaceRoot, this.timelines);
@@ -2696,9 +2697,16 @@ export class LocalToolBackend implements ToolBackend {
 
     await fs.rename(absSrc, absDst);
     // Invalidate cache for both
-    await this.cache.deleteCapsule(toPosixRelative(this.workspaceRoot, absSrc), "low");
-    await this.cache.deleteCapsule(toPosixRelative(this.workspaceRoot, absSrc), "medium");
-    await this.cache.deleteCapsule(toPosixRelative(this.workspaceRoot, absSrc), "high");
+    const relSrc = toPosixRelative(this.workspaceRoot, absSrc);
+    const relDst = toPosixRelative(this.workspaceRoot, absDst);
+    await this.cache.deleteCapsule(relSrc, "low");
+    await this.cache.deleteCapsule(relSrc, "medium");
+    await this.cache.deleteCapsule(relSrc, "high");
+
+    // Trigger speculative background indexing
+    this.workspaceIndex.partialUpdate([relDst]).catch(() => {});
+    // Note: Old path will be removed during the next ensureIndex naturally or we could explicitly remove it
+    // But since partialUpdate merges by path,Dst is fresh. 
 
     return { ok: true, source: src, destination: dst };
   }
@@ -2730,11 +2738,14 @@ export class LocalToolBackend implements ToolBackend {
     const newContent = content.replace(search, replace);
     await fs.writeFile(absolutePath, newContent, "utf8");
 
-    // Invalidate cache
+    // Invalidate cache and trigger background indexing
     const rel = toPosixRelative(this.workspaceRoot, absolutePath);
     await this.cache.deleteCapsule(rel, "low");
     await this.cache.deleteCapsule(rel, "medium");
     await this.cache.deleteCapsule(rel, "high");
+    
+    // Background JIT re-indexing
+    this.workspaceIndex.partialUpdate([rel]).catch(() => {});
 
     return { ok: true, path: rel, patched: true };
   }
@@ -2937,7 +2948,40 @@ export class LocalToolBackend implements ToolBackend {
     return { ok: true, lexicon: this.projectLexicon, note: "Use #ID in alien_patch to reference these terms." };
   }
 
-  private async saveBackup(requestedPath: string): Promise<void> {
+  private startLiveSyncWatcher() {
+    const root = this.workspaceRoot;
+    let debounceTimer: NodeJS.Timeout | null = null;
+    const pendingChanges = new Set<string>();
+
+    const triggerUpdate = () => {
+      if (pendingChanges.size === 0) return;
+      const paths = Array.from(pendingChanges);
+      pendingChanges.clear();
+      this.workspaceIndex.partialUpdate(paths).catch(() => {});
+    };
+
+    try {
+      const watcher = watch(root, { recursive: true }, (event, filename) => {
+        if (!filename) return;
+
+        // Filter out noise
+        if (filename.includes("node_modules") || filename.includes(".git") || filename.includes(".mesh")) return;
+        if (!/\.(ts|tsx|js|jsx|json|md|py|go|rs)$/.test(filename)) return;
+
+        pendingChanges.add(filename);
+
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(triggerUpdate, 1500);
+      });
+
+      // Ensure watcher doesn't block process exit
+      watcher.unref?.();
+    } catch (err) {
+      // Fallback: system might not support recursive watch
+    }
+  }
+
+  private async saveBackup(relativePath: string): Promise<void> {
     try {
       const absolutePath = ensureInsideRoot(this.workspaceRoot, requestedPath);
       if (existsSync(absolutePath)) {
@@ -4317,9 +4361,12 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
     await fs.writeFile(absolutePath, content, "utf8");
 
+    const rel = toPosixRelative(this.workspaceRoot, absolutePath);
+    this.workspaceIndex.partialUpdate([rel]).catch(() => {});
+
     return {
       ok: true,
-      path: toPosixRelative(this.workspaceRoot, absolutePath),
+      path: rel,
       bytesWritten: Buffer.byteLength(content, "utf8")
     };
   }

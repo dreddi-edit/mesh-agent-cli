@@ -622,12 +622,88 @@ export class WorkspaceIndex {
     };
   }
 
+  async partialUpdate(relativePaths: string[]): Promise<void> {
+    if (relativePaths.length === 0) return;
+    const index = await this.ensureIndex();
+    const context: BuildContext = {
+      dirtyFiles: await this.readDirtyFiles()
+    };
+
+    // 1. Identify dependents to re-index (semantic ripple effect)
+    const expandedPaths = new Set(relativePaths);
+    for (const relPath of relativePaths) {
+      const record = index.files.find(f => f.path === relPath);
+      if (record && record.dependents) {
+        for (const dep of record.dependents) {
+          expandedPaths.add(dep);
+        }
+      }
+    }
+
+    const pathsToProcess = Array.from(expandedPaths);
+    const updatedFiles: IndexedFileRecord[] = [];
+    
+    // 2. Parallel processing with concurrency limit
+    const concurrency = 8;
+    for (let i = 0; i < pathsToProcess.length; i += concurrency) {
+      const batch = pathsToProcess.slice(i, i + concurrency);
+      const results = await Promise.all(batch.map(async (relPath) => {
+        const absPath = path.resolve(this.workspaceRoot, relPath);
+        try {
+          return await this.buildRecord(absPath, relPath, context);
+        } catch {
+          return null;
+        }
+      }));
+      updatedFiles.push(...results.filter((f): f is IndexedFileRecord => f !== null));
+    }
+
+    if (updatedFiles.length > 0) {
+      const fileMap = new Map(index.files.map(f => [f.path, f]));
+      for (const record of updatedFiles) {
+        fileMap.set(record.path, record);
+      }
+      
+      const newFiles = Array.from(fileMap.values()).sort((a, b) => a.path.localeCompare(b.path));
+      this.connectDependents(newFiles);
+      this.connectTests(newFiles);
+      
+      index.files = newFiles;
+      index.indexedAt = new Date().toISOString();
+      await fs.writeFile(this.indexPath, JSON.stringify(index, null, 2), "utf8");
+    }
+  }
+
   private async ensureIndex(): Promise<PersistedWorkspaceIndex> {
-    const status = await this.status();
-    if (!this.cachedIndex || status.totalFiles !== status.cachedFiles || status.staleFiles > 0) {
+    const existing = await this.loadIndex();
+    if (!existing) {
       return this.rebuild();
     }
-    return this.cachedIndex;
+
+    // Check for stale files incrementally
+    const files = await collectIndexableFiles(this.workspaceRoot, 10000, this.workspaceRoot);
+    const indexed = new Map(existing.files.map((record) => [record.path, record]));
+    const stale: string[] = [];
+
+    for (const absolutePath of files) {
+      const rel = toPosixRelative(this.workspaceRoot, absolutePath);
+      const stat = await fs.stat(absolutePath).catch(() => null);
+      const record = indexed.get(rel);
+      if (!stat?.isFile()) continue;
+      if (!record || Math.floor(stat.mtimeMs) !== record.mtimeMs || stat.size !== record.size) {
+        stale.push(rel);
+      }
+    }
+
+    if (stale.length > 0) {
+      // If many files are stale (> 25% or > 50 files), do a full rebuild for consistency
+      if (stale.length > 50 || stale.length > files.length * 0.25) {
+        return this.rebuild();
+      }
+      await this.partialUpdate(stale);
+    }
+
+    return this.cachedIndex!;
   }
 
   private async loadIndex(): Promise<PersistedWorkspaceIndex | null> {

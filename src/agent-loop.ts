@@ -38,6 +38,7 @@ import { ContextArtifactStore } from "./context-artifacts.js";
 import { PersistedSessionCapsule, SessionCapsuleStore } from "./session-capsule-store.js";
 import { buildSessionManager, type SessionManager, type SerializedTurn } from "./session-manager.js";
 import { MeshPortal } from "./mesh-portal.js";
+import { MeshDoctorEngine } from "./doctor.js";
 import { ToolBackend, ToolDefinition } from "./tool-backend.js";
 import { VoiceDependencyStatus, VoiceManager } from "./voice-manager.js";
 
@@ -4574,76 +4575,39 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     }
 
     const mode = (args[0] || "brief").toLowerCase();
-    const spinner = ora({ text: "Running diagnostics...", color: "cyan" }).start();
+    output.write(this.themeColor(`\n${pc.bold("Mesh System Diagnostics")}\n`));
+    const spinner = ora({ text: "Running doctor checks...", color: "cyan" }).start();
+    
+    try {
+      const doctor = new MeshDoctorEngine(this.config);
+      const report = await doctor.run();
+      spinner.stop();
 
-    const indexStatus = await this.backend.callTool("workspace.get_index_status", {}) as IndexStatus;
-    const syncStatus = await this.backend.callTool("workspace.check_sync", {}) as SyncStatus;
-    const transcriptChars = this.estimateTranscriptChars();
-    const capsule = this.sessionCapsule ? this.parseSessionCapsule(this.sessionCapsule.summary) : null;
-
-    const meshDirExists = await fs.stat(path.join(this.config.agent.workspaceRoot, ".mesh")).then(() => true).catch(() => false);
-    const gitOk = await fs.stat(path.join(this.config.agent.workspaceRoot, ".git")).then(() => true).catch(() => false);
-    const pkgOk = await fs.stat(path.join(this.config.agent.workspaceRoot, "package.json")).then(() => true).catch(() => false);
-
-    let llmOk = false;
-    const llmEndpoint = this.config.bedrock?.endpointBase;
-    if (llmEndpoint) {
-      try {
-        const res = await fetch(llmEndpoint, { method: "HEAD", signal: AbortSignal.timeout(5000) });
-        llmOk = res.status < 500;
-      } catch {
-        llmOk = false;
+      for (const check of report.checks) {
+        const icon = check.status === "pass" ? pc.green("✔") : check.status === "warn" ? pc.yellow("⚠") : pc.red("✘");
+        const titleColor = check.status === "pass" ? pc.white : check.status === "warn" ? pc.yellow : pc.red;
+        
+        output.write(`${icon} ${pc.bold(titleColor(check.title.padEnd(25)))} ${check.message}\n`);
+        if (check.details && check.details.length > 0) {
+          for (const detail of check.details) {
+            output.write(`   ${pc.dim(detail)}\n`);
+          }
+        }
+        output.write("\n");
       }
-    }
 
-    const indexHealthy = Number(indexStatus.percent) > 0;
-    const sessionHealthy = this.transcript.length > 0;
-
-    const ok = (v: boolean) => v ? pc.green("✔") : pc.red("✘");
-    spinner.stop();
-
-    const checks = [
-      `${ok(gitOk)} Git repository`,
-      `${ok(pkgOk)} package.json`,
-      `${ok(llmOk)} LLM endpoint reachable`,
-      `${ok(indexHealthy)} Workspace indexed (${indexStatus.percent}%)`,
-      `${ok(meshDirExists)} .mesh/ artifacts directory`,
-      `${ok(sessionHealthy)} Active session`,
-      `${ok(syncStatus.l2Enabled)} Cloud sync`
-    ];
-
-    const lines = [
-      "",
-      `${this.themeColor(pc.bold("Doctor"))}`,
-      "",
-      ...checks,
-      "",
-      `${pc.dim("workspace:")}    ${this.config.agent.workspaceRoot}`,
-      `${pc.dim("mode:")}         ${this.config.agent.mode}`,
-      `${pc.dim("model:")}        ${shortModelName(this.currentModelId)} ${pc.dim(`(${this.currentModelId})`)}`,
-      `${pc.dim("approvals:")}    ${this.autoApproveTools ? pc.green("on") : pc.yellow("off")}`,
-      `${pc.dim("index:")}        ${indexStatus.cachedFiles}/${indexStatus.totalFiles} cached`,
-      `${pc.dim("session:")}      ${this.transcript.length} messages / ${transcriptChars} chars`,
-      `${pc.dim("capsule:")}      ${this.sessionCapsule ? pc.green("loaded") : pc.dim("none")}`,
-      `${pc.dim("last tool:")}    ${this.lastToolEventAt ?? "none"}`
-    ];
-
-    if (mode === "full") {
-      lines.push(
-        `${pc.dim("capsule path:")} ${this.getDefaultCapsuleExportPath()}`,
-        `${pc.dim("theme:")}        ${this.config.agent.themeColor}`
-      );
-      if (capsule) {
-        lines.push(
-          `${pc.dim("decisions:")}    ${capsule.decisions.length ? capsule.decisions.join(" | ") : "-"}`,
-          `${pc.dim("open threads:")} ${capsule.openThreads.length ? capsule.openThreads.join(" | ") : "-"}`,
-          `${pc.dim("next actions:")} ${capsule.nextActions.length ? capsule.nextActions.join(" | ") : "-"}`
-        );
+      if (report.ok) {
+        output.write(pc.green(pc.bold("All systems operational. Mesh is ready for duty.\n")));
+      } else {
+        output.write(pc.red(pc.bold("Some systems are failing. Check the warnings above to restore full functionality.\n")));
       }
-    }
 
-    lines.push("");
-    output.write(lines.join("\n"));
+      const indexStatus = await this.backend.callTool("workspace.get_index_status", {}) as any;
+      output.write(`\n${pc.dim("Workspace index: ")} ${indexStatus?.percent ?? 0}% (${indexStatus?.indexedFiles ?? 0} files)\n\n`);
+
+    } catch (err) {
+      spinner.fail(pc.red(`Doctor failed unexpectedly: ${(err as Error).message}`));
+    }
   }
 
   private async ensureVoiceCoreDependencies(

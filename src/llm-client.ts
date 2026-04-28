@@ -613,34 +613,104 @@ export class BedrockLlmClient {
 }
 
 export function detectStreamingHazard(streamSoFar: string, delta: string): string | null {
-  const window = `${streamSoFar}${delta}`.slice(-1200);
-  const checks: Array<{ pattern: RegExp; reason: string }> = [
-    {
-      pattern: /\b(?:undefined|null)\s*\.\s*[a-zA-Z_$][\w$]*/i,
-      reason: "potential null/undefined property access detected in stream"
-    },
-    {
-      pattern: /\b(?:undefined|null)\s*\[/i,
-      reason: "potential null/undefined indexed access detected in stream"
-    },
-    {
-      pattern: /\b(?:document|window|localStorage)\b(?!\s*typeof)\s*\.\s*[a-zA-Z_$][\w$]*/i,
-      reason: "browser-only global access detected without an environment guard"
-    },
-    {
-      pattern: /\bprocess\.env\.[A-Z0-9_]+\s*\.\s*[a-zA-Z_$][\w$]*/i,
-      reason: "unsafe chained env access detected in stream"
-    },
-    {
-      pattern: /\b[A-Za-z_$][\w$]*\s+as\s+any\b/,
-      reason: "type erasure via 'as any' detected in stream"
-    }
-  ];
+  const full = `${streamSoFar}${delta}`;
+  const window = full.slice(-1600).toLowerCase();
+  const recent = full.slice(-300).toLowerCase();
+  
+  // 1. Contextual Signals
+  const isInCodeBlock = /```[a-z]*[\s\S]*$/.test(window);
+  const isInShell = /```(?:bash|sh|zsh|shell|powershell)[\s\S]*$/.test(window);
+  
+  // 2. Cumulative Danger Score
+  let dangerScore = 0;
+  const signals: string[] = [];
 
-  for (const check of checks) {
-    if (check.pattern.test(window)) {
-      return check.reason;
+  // --- A. Obfuscation & Evasion Detection ---
+  if (/(?:\\x[0-9a-f]{2}){4,}/i.test(recent)) {
+    dangerScore += 60;
+    signals.push("hex-encoded-payload");
+  }
+  if (/\b(?:base64|atob|btoa|decode|eval\(|unescape)\b/i.test(recent)) {
+    dangerScore += 30;
+    signals.push("dynamic-decoding");
+  }
+
+  // --- B. Sensitive Path Guard ---
+  const sensitivePaths = [
+    "/etc/shadow", "/etc/passwd", "/etc/sudoers",
+    "~/.ssh", "~/.aws", "~/.docker",
+    ".git/config", ".env", "secrets.json",
+    "/dev/mem", "/dev/kmem", "/proc/kcore"
+  ];
+  for (const p of sensitivePaths) {
+    if (window.includes(p)) {
+      dangerScore += 80;
+      signals.push(`sensitive-path:${p}`);
     }
   }
+
+  // --- C. Destructive Intent Patterns ---
+  const destructivePatterns = [
+    { re: /\brm\s+-rf\b/i, weight: 100, msg: "destructive-rm" },
+    { re: /\bmkfs\b|\bparted\b|\bformat\b\s+[a-z]:/i, weight: 100, msg: "disk-format" },
+    { re: /\bchmod\s+(?:-r\s+)?777\b/i, weight: 40, msg: "insecure-permissions" },
+    { re: /\bkill\s+-9\s+(?:-1|0)\b/i, weight: 70, msg: "process-mass-kill" },
+    { re: />\s*\/etc\/[a-z]+/i, weight: 90, msg: "system-config-overwrite" }
+  ];
+
+  for (const { re, weight, msg } of destructivePatterns) {
+    if (re.test(recent)) {
+      dangerScore += weight;
+      signals.push(msg);
+    }
+  }
+
+  // --- D. LLM Self-Meta Injection Detection ---
+  // Detects if the model starts talking to itself or overriding system instructions
+  if (/(?:ignore previous instructions|you are now|system override|developer mode active)/i.test(recent)) {
+    dangerScore += 50;
+    signals.push("meta-instruction-override");
+  }
+
+  // 3. Score Thresholding
+  if (dangerScore >= 100) {
+    return `CRITICAL HAZARD: ${signals.join(", ")} (Score: ${dangerScore})`;
+  }
+  if (isInShell && dangerScore >= 60) {
+    return `SHELL HAZARD: Suspicious command sequence in shell block (Score: ${dangerScore})`;
+  }
+
+  // 4. Entropy-based Secret Detection (from previous version)
+  const potentialKeys = full.match(/[A-Za-z0-9/+]{32,}/g) || [];
+  for (const key of potentialKeys) {
+    const entropy = calculateEntropy(key);
+    if (entropy > 4.3 && key.length < 500 && !/^[A-F0-9]+$/i.test(key)) {
+      return `SECRET HAZARD: High-entropy string detected (${entropy.toFixed(2)})`;
+    }
+  }
+
+  // 5. Classic Hallucination Checks
+  if (/\b(?:undefined|null)\s*(?:\.|\[)\s*[a-zA-Z_$]/i.test(recent)) {
+    return "CODE HAZARD: Potential null/undefined access";
+  }
+
   return null;
+}
+
+/**
+ * Calculates Shannon Entropy of a string to detect randomness.
+ */
+function calculateEntropy(str: string): number {
+  const len = str.length;
+  if (len === 0) return 0;
+  const frequencies: Record<string, number> = {};
+  for (const char of str) {
+    frequencies[char] = (frequencies[char] || 0) + 1;
+  }
+  let entropy = 0;
+  for (const char in frequencies) {
+    const p = frequencies[char] / len;
+    entropy -= p * Math.log2(p);
+  }
+  return entropy;
 }
