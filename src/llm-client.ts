@@ -309,6 +309,7 @@ export class BedrockLlmClient {
       },
       {
         apiKey: this.options.bearerToken,
+        baseUrl: this.options.endpointBase,
         abortSignal
       }
     );

@@ -69,7 +69,7 @@ export function resolveNvidiaEndpoint(): string {
 export function resolveNvidiaApiKey(fallbackToken?: string): string | undefined {
   const direct = process.env.NVIDIA_API_KEY || process.env.NVAPI_KEY || process.env.NVIDIA_BEARER_TOKEN;
   if (direct && direct.trim()) return direct.trim();
-  if (fallbackToken && fallbackToken.trim().startsWith("nvapi-")) return fallbackToken.trim();
+  if (fallbackToken && fallbackToken.trim()) return fallbackToken.trim();
   return undefined;
 }
 
@@ -119,14 +119,15 @@ export function resolvePiiModels(): string[] {
 
 export async function nvidiaChatCompletion(
   request: NvidiaChatCompletionRequest,
-  options: { apiKey?: string; abortSignal?: AbortSignal } = {}
+  options: { apiKey?: string; abortSignal?: AbortSignal; baseUrl?: string } = {}
 ): Promise<{ response: Response; data: NvidiaChatCompletionResponse | null; rawText: string }> {
   const apiKey = resolveNvidiaApiKey(options.apiKey);
   if (!apiKey) {
     throw new Error("NVIDIA_API_KEY is required for NVIDIA-hosted models.");
   }
 
-  const response = await fetch(`${resolveNvidiaEndpoint().replace(/\/+$/, "")}/chat/completions`, {
+  const base = (options.baseUrl || resolveNvidiaEndpoint()).replace(/\/+$/, "");
+  const response = await fetch(`${base}/chat/completions`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -156,7 +157,7 @@ export async function nvidiaChatCompletion(
 export async function nvidiaEmbedding(
   model: string,
   input: string,
-  options: { apiKey?: string; inputType?: "query" | "passage"; abortSignal?: AbortSignal } = {}
+  options: { apiKey?: string; inputType?: "query" | "passage"; abortSignal?: AbortSignal; baseUrl?: string } = {}
 ): Promise<number[]> {
   const apiKey = resolveNvidiaApiKey(options.apiKey);
   if (!apiKey) {
@@ -169,7 +170,8 @@ export async function nvidiaEmbedding(
   };
   if (options.inputType) payload.input_type = options.inputType;
 
-  const response = await fetch(`${resolveNvidiaEndpoint().replace(/\/+$/, "")}/embeddings`, {
+  const base = (options.baseUrl || resolveNvidiaEndpoint()).replace(/\/+$/, "");
+  const response = await fetch(`${base}/embeddings`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -188,7 +190,7 @@ export async function nvidiaEmbedding(
 
 export async function nvidiaEmbeddingWithFallbacks(
   input: string,
-  options: { apiKey?: string; inputType?: "query" | "passage"; abortSignal?: AbortSignal; models?: string[] } = {}
+  options: { apiKey?: string; inputType?: "query" | "passage"; abortSignal?: AbortSignal; models?: string[]; baseUrl?: string } = {}
 ): Promise<{ model: string; embedding: number[] }> {
   let lastError: Error | null = null;
   for (const model of options.models ?? resolveEmbeddingModels()) {
@@ -196,7 +198,8 @@ export async function nvidiaEmbeddingWithFallbacks(
       const embedding = await nvidiaEmbedding(model, input, {
         apiKey: options.apiKey,
         inputType: options.inputType ?? (model.startsWith("nvidia/") ? "query" : undefined),
-        abortSignal: options.abortSignal
+        abortSignal: options.abortSignal,
+        baseUrl: options.baseUrl
       });
       if (embedding.length > 0) {
         return { model, embedding };
@@ -212,7 +215,8 @@ export async function analyzeImageWithNvidia(
   imageBase64: string,
   prompt: string,
   model = process.env.MESH_VISION_MODEL || DEFAULT_NVIDIA_VISION_MODELS[0],
-  apiKey?: string
+  apiKey?: string,
+  baseUrl?: string
 ): Promise<string> {
   let lastError: Error | null = null;
   for (const candidate of uniqueModels([model, ...resolveVisionModels()])) {
@@ -231,7 +235,7 @@ export async function analyzeImageWithNvidia(
         temperature: 0,
         maxTokens: 400
       },
-      { apiKey, abortSignal: AbortSignal.timeout(30_000) }
+      { apiKey, abortSignal: AbortSignal.timeout(30_000), baseUrl }
     );
     if (response.ok) {
       return extractNvidiaText(data);
@@ -244,7 +248,8 @@ export async function analyzeImageWithNvidia(
 export async function classifySafetyWithNvidia(
   text: string,
   model = process.env.MESH_SAFETY_MODEL || DEFAULT_NVIDIA_SAFETY_MODELS[0],
-  apiKey?: string
+  apiKey?: string,
+  baseUrl?: string
 ): Promise<string> {
   let lastError: Error | null = null;
   for (const candidate of uniqueModels([model, ...resolveSafetyModels()])) {
@@ -263,7 +268,7 @@ export async function classifySafetyWithNvidia(
         temperature: 0,
         maxTokens: 160
       },
-      { apiKey, abortSignal: AbortSignal.timeout(30_000) }
+      { apiKey, abortSignal: AbortSignal.timeout(30_000), baseUrl }
     );
     if (response.ok) {
       return extractNvidiaText(data);
@@ -276,7 +281,8 @@ export async function classifySafetyWithNvidia(
 export async function detectPiiWithNvidia(
   text: string,
   model = process.env.MESH_PII_MODEL || DEFAULT_NVIDIA_PII_MODELS[0],
-  apiKey?: string
+  apiKey?: string,
+  baseUrl?: string
 ): Promise<string> {
   let lastError: Error | null = null;
   for (const candidate of uniqueModels([model, ...resolvePiiModels()])) {
@@ -295,7 +301,7 @@ export async function detectPiiWithNvidia(
         temperature: 0,
         maxTokens: 220
       },
-      { apiKey, abortSignal: AbortSignal.timeout(30_000) }
+      { apiKey, abortSignal: AbortSignal.timeout(30_000), baseUrl }
     );
     if (response.ok) {
       return extractNvidiaText(data);

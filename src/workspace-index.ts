@@ -198,7 +198,8 @@ export class WorkspaceIndex {
   constructor(
     private readonly workspaceRoot: string,
     private readonly meshCore: MeshCoreAdapter,
-    private readonly cacheManager: CacheManager
+    private readonly cacheManager: CacheManager,
+    private readonly config: { apiKey?: string; baseUrl?: string } = {}
   ) {
     this.workspaceHash = crypto
       .createHash("sha256")
@@ -287,6 +288,75 @@ export class WorkspaceIndex {
     return index;
   }
 
+  private async buildChunks(
+    relativePath: string,
+    raw: string,
+    capsule: StructuredCapsule,
+    symbols: SymbolRecord[],
+    routes: RouteRecord[],
+    isTest: boolean
+  ): Promise<IndexedChunk[]> {
+    const chunks: IndexedChunk[] = [
+      {
+        id: `${relativePath}:file`,
+        kind: isTest ? "test" : "file",
+        text: [
+          capsule.purpose,
+          capsule.exports.join(" "),
+          capsule.imports.join(" "),
+          capsule.sideEffects.join(" "),
+          capsule.risks.join(" ")
+        ].join("\n"),
+        lineStart: 1,
+        lineEnd: raw.split(/\r?\n/g).length,
+        vector: await this.vectorize(capsule.purpose)
+      }
+    ];
+    for (const symbol of symbols.slice(0, 80)) {
+      const text = `${symbol.kind} ${symbol.name} ${symbol.signature ?? ""}`;
+      chunks.push({
+        id: `${relativePath}:${symbol.name}`,
+        kind: "symbol",
+        text,
+        lineStart: symbol.lineStart,
+        lineEnd: symbol.lineEnd,
+        vector: await this.vectorize(text)
+      });
+    }
+    for (const route of routes) {
+      const text = `${route.method} ${route.route}`;
+      chunks.push({
+        id: `${relativePath}:route:${route.line}`,
+        kind: "route",
+        text,
+        lineStart: route.line,
+        lineEnd: route.line,
+        vector: await this.vectorize(text)
+      });
+    }
+    return chunks;
+  }
+
+  private async vectorize(value: string): Promise<number[]> {
+    if (!value || value.trim() === "") return [];
+    if (isRemoteEmbeddingModel(DEFAULT_EMBEDDING_MODEL)) {
+      const result = await nvidiaEmbeddingWithFallbacks(
+        value,
+        {
+          inputType: DEFAULT_EMBEDDING_MODEL.startsWith("nvidia/") ? "query" : undefined,
+          models: [DEFAULT_EMBEDDING_MODEL, ...DEFAULT_NVIDIA_EMBEDDING_MODELS],
+          apiKey: this.config.apiKey,
+          baseUrl: this.config.baseUrl
+        }
+      );
+      return result.embedding;
+    }
+    const extractor = await getEmbeddingPipeline();
+    if (!extractor) return [];
+    const output = await extractor(value, { pooling: "mean", normalize: true });
+    return Array.from(output.data);
+  }
+
   async search(query: string, mode: CodeQueryMode = "architecture", limit = 8): Promise<{
     ok: true;
     query: string;
@@ -301,7 +371,7 @@ export class WorkspaceIndex {
 
     const index = await this.ensureIndex();
     const queryTokens = tokenize(normalizedQuery);
-    const queryVector = await vectorize(normalizedQuery);
+    const queryVector = await this.vectorize(normalizedQuery);
     const safeLimit = Math.max(1, Math.min(limit, 25));
 
     // Check RAG semantic cache
@@ -615,8 +685,8 @@ export class WorkspaceIndex {
       risks,
       testLinks: []
     };
-    const chunks = await buildChunks(relativePath, raw, capsule, symbols, routes, isTest);
-    const textVector = await vectorize([
+    const chunks = await this.buildChunks(relativePath, raw, capsule, symbols, routes, isTest);
+    const textVector = await this.vectorize([
       relativePath,
       purpose,
       exports.join(" "),
@@ -839,23 +909,6 @@ async function getEmbeddingPipeline() {
     }
   }
   return embeddingPipeline;
-}
-
-async function vectorize(value: string): Promise<number[]> {
-  if (!value || value.trim() === "") return [];
-  if (isRemoteEmbeddingModel(DEFAULT_EMBEDDING_MODEL)) {
-    const result = await nvidiaEmbeddingWithFallbacks(
-      value,
-      {
-        inputType: DEFAULT_EMBEDDING_MODEL.startsWith("nvidia/") ? "query" : undefined,
-        models: [DEFAULT_EMBEDDING_MODEL, ...DEFAULT_NVIDIA_EMBEDDING_MODELS]
-      }
-    );
-    return result.embedding;
-  }
-  const extractor = await getEmbeddingPipeline();
-  const output = await extractor(value, { pooling: "mean", normalize: true });
-  return Array.from(output.data);
 }
 
 function isRemoteEmbeddingModel(modelId: string): boolean {
@@ -1142,55 +1195,6 @@ function inferPurpose(
   }
   const firstComment = raw.match(/^\s*(?:\/\*\*?\s*([\s\S]*?)\*\/|\/\/\s*(.+))/)?.[1]?.trim();
   return firstComment ? firstComment.replace(/\s+/g, " ").slice(0, 240) : `Source file ${relativePath}`;
-}
-
-async function buildChunks(
-  relativePath: string,
-  raw: string,
-  capsule: StructuredCapsule,
-  symbols: SymbolRecord[],
-  routes: RouteRecord[],
-  isTest: boolean
-): Promise<IndexedChunk[]> {
-  const chunks: IndexedChunk[] = [
-    {
-      id: `${relativePath}:file`,
-      kind: isTest ? "test" : "file",
-      text: [
-        capsule.purpose,
-        capsule.exports.join(" "),
-        capsule.imports.join(" "),
-        capsule.sideEffects.join(" "),
-        capsule.risks.join(" ")
-      ].join("\n"),
-      lineStart: 1,
-      lineEnd: raw.split(/\r?\n/g).length,
-      vector: await vectorize(capsule.purpose)
-    }
-  ];
-  for (const symbol of symbols.slice(0, 80)) {
-    const text = `${symbol.kind} ${symbol.name} ${symbol.signature ?? ""}`;
-    chunks.push({
-      id: `${relativePath}:${symbol.name}`,
-      kind: "symbol",
-      text,
-      lineStart: symbol.lineStart,
-      lineEnd: symbol.lineEnd,
-      vector: await vectorize(text)
-    });
-  }
-  for (const route of routes) {
-    const text = `${route.method} ${route.route}`;
-    chunks.push({
-      id: `${relativePath}:route:${route.line}`,
-      kind: "route",
-      text,
-      lineStart: route.line,
-      lineEnd: route.line,
-      vector: await vectorize(text)
-    });
-  }
-  return chunks;
 }
 
 function detectLanguage(relativePath: string): string {

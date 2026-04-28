@@ -503,7 +503,10 @@ export class LocalToolBackend implements ToolBackend {
       supabase: {},
       telemetry: { contribute: false }
     });
-    this.workspaceIndex = new WorkspaceIndex(workspaceRoot, this.meshCore, this.cache);
+    this.workspaceIndex = new WorkspaceIndex(workspaceRoot, this.meshCore, this.cache, {
+      apiKey: config?.bedrock?.bearerToken,
+      baseUrl: config?.bedrock?.endpointBase
+    });
     this.timelines = new TimelineManager(workspaceRoot);
     this.runtimeObserver = new RuntimeObserver(workspaceRoot);
     this.agentOs = new AgentOs(workspaceRoot, this.timelines);
