@@ -2482,20 +2482,38 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
   }
 
   private async distillProjectBrain(): Promise<void> {
-    const spinner = ora({ text: "Distilling Project Brain (analyzing conventions)...", color: "magenta" }).start();
+    const spinner = ora({ text: "Distilling Session into Project Brain...", color: "magenta" }).start();
     try {
-      const res = await this.backend.callTool("agent.invoke_sub_agent", {
-        prompt: "Read the most important files in this workspace (like package.json, config files, and core source files). Analyze the tech stack, naming conventions, state management, and architectural patterns. Write a concise, bullet-point markdown guide (max 15 bullets) that a senior engineer would need to perfectly blend into this codebase. Focus ONLY on conventions, not features."
-      });
+      const transcriptDump = this.transcript.map(t => `${t.role}: ${JSON.stringify(t.content)}`).join('\n').slice(-24000);
+      
+      const res = await this.llm.converse([
+        { 
+          role: "user", 
+          content: [{ text: `Analyze this recent conversation and extract any clear architectural decisions, learned project rules, or strict user preferences (e.g. "use Vanilla CSS", "always use functional components", "use path aliases"). Ignore normal code edits or bug fixes. Output ONLY a valid JSON array of strings, each string being a concise, imperative rule. If absolutely nothing was decided, output [].\n\n<conversation>\n${transcriptDump}\n</conversation>` }] 
+        }
+      ], [], "You are a specialized JSON-only extractor.", this.currentModelId);
+      
+      let newRules: string[] = [];
+      try {
+        const jsonMatch = (res.text || "").match(/\[.*\]/s);
+        newRules = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+      } catch {
+        throw new Error("Model did not return a valid JSON array.");
+      }
 
-      const summary = (res as any).summary || (res as any).error;
-      if (!summary) throw new Error("Sub-agent failed to generate summary.");
-
-      const brainPath = path.join(this.config.agent.workspaceRoot, ".mesh", "project-brain.md");
-      await fs.mkdir(path.dirname(brainPath), { recursive: true });
-      await fs.writeFile(brainPath, summary, "utf8");
-
-      spinner.succeed(pc.magenta("Project Brain distilled and saved to .mesh/project-brain.md"));
+      if (Array.isArray(newRules) && newRules.length > 0) {
+        for (const rule of newRules) {
+           await this.backend.callTool("workspace.engineering_memory", { 
+             action: "record", 
+             outcome: "positive",
+             rule: rule, 
+             note: "Distilled automatically from session conversation." 
+           });
+        }
+        spinner.succeed(pc.magenta(`Distilled ${newRules.length} new rules into Engineering Memory.`));
+      } else {
+        spinner.info(pc.dim("No clear new project-wide rules found to distill in this session."));
+      }
     } catch (e) {
       spinner.fail(pc.red(`Distillation failed: ${(e as Error).message}`));
     }
@@ -4785,6 +4803,21 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       }
     } catch {
       // No company brain exists yet
+    }
+
+    try {
+      const memoryPath = path.join(this.config.agent.workspaceRoot, ".mesh", "engineering-memory.json");
+      const memoryRaw = readFileSync(memoryPath, "utf8");
+      const memory = JSON.parse(memoryRaw);
+      if (memory && (memory.rules?.length || memory.decisions?.length)) {
+        const lines = [
+          "Rules:", ...(memory.rules || []).map((r: any) => `- ${r.rule || r}`),
+          "Decisions:", ...(memory.decisions || memory.acceptedPatterns || []).map((d: any) => `- ${d.pattern || d}`)
+        ].join("\n");
+        sections.push(`\n[ENGINEERING MEMORY (Session Distiller)]\nApply these distilled project decisions and rules learned from previous sessions:\n${clampBlock(lines, 2_400)}`);
+      }
+    } catch {
+      // No engineering memory exists yet
     }
 
     if (this.voiceMode) {

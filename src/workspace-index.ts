@@ -357,6 +357,50 @@ export class WorkspaceIndex {
     return Array.from(output.data);
   }
 
+  async getSemanticSlice(filePath: string, symbol: string): Promise<{ ok: boolean; error?: string; slice?: string }> {
+    const target = symbol.trim().toLowerCase();
+    if (!target) return { ok: false, error: "Symbol name required" };
+
+    const index = await this.ensureIndex();
+    const relPath = normalizeRelPath(toPosixRelative(this.workspaceRoot, path.resolve(this.workspaceRoot, filePath)));
+    
+    const record = index.files.find(f => f.path === relPath);
+    if (!record) return { ok: false, error: "File not found in index" };
+
+    const match = record.symbols.find(s => s.name.toLowerCase() === target || s.name.toLowerCase().includes(target));
+    if (!match) return { ok: false, error: `Symbol '${symbol}' not found in ${relPath}` };
+
+    try {
+      const absPath = path.resolve(this.workspaceRoot, relPath);
+      const raw = await fs.readFile(absPath, "utf8");
+      const lines = raw.split(/\r?\n/g);
+      
+      const importLines: string[] = [];
+      const importRegex = /^(?:import|export)\s+.*(?:from\s+["'][^"']+["']|require\(["'][^"']+["']\))/;
+      for (const line of lines) {
+        if (importRegex.test(line.trim())) {
+          importLines.push(line);
+        }
+      }
+
+      const bodyLines = lines.slice(match.lineStart - 1, match.lineEnd);
+      
+      const slice = [
+        `// --- Context Sliced from ${relPath} ---`,
+        `// Imports (${importLines.length} lines elided for brevity...)`,
+        ...importLines.slice(0, 15),
+        importLines.length > 15 ? "// ... more imports" : "",
+        "",
+        `// --- Symbol: ${match.kind} ${match.name} (L${match.lineStart}-L${match.lineEnd}) ---`,
+        ...bodyLines
+      ].filter(Boolean).join("\n");
+
+      return { ok: true, slice };
+    } catch (err) {
+      return { ok: false, error: `Failed to read slice: ${(err as Error).message}` };
+    }
+  }
+
   async search(query: string, mode: CodeQueryMode = "architecture", limit = 8): Promise<{
     ok: true;
     query: string;

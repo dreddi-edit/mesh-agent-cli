@@ -745,6 +745,18 @@ export class LocalToolBackend implements ToolBackend {
         }
       },
       {
+        name: "workspace.read_slice",
+        description: "Read a semantic context slice of a specific function/class from a file. PERFECT for minimizing context usage on large files while retaining all necessary imports and the exact AST block.",
+        inputSchema: {
+          type: "object",
+          required: ["path", "symbol"],
+          properties: {
+            path: { type: "string" },
+            symbol: { type: "string", description: "The exact name of the function, class, or method you want to read." }
+          }
+        }
+      },
+      {
         name: "workspace.open_artifact",
         description: "Open a specific locally stored tool-result artifact by id. ONLY call this when the user explicitly asks to see artifact details, or when a prior tool call returned truncated data and you need a specific field. NEVER call this automatically after another tool call — the tool result is already in context.",
         inputSchema: {
@@ -2171,6 +2183,8 @@ export class LocalToolBackend implements ToolBackend {
         return this.listFiles(args);
       case "workspace.read_file":
         return this.readFile(args);
+      case "workspace.read_slice":
+        return this.readSlice(args);
       case "workspace.open_artifact":
         return openContextArtifact(this.workspaceRoot, args);
       case "workspace.search_files":
@@ -2469,6 +2483,31 @@ export class LocalToolBackend implements ToolBackend {
       requestedPath,
       count: files.length,
       files: files.map((item) => toPosixRelative(this.workspaceRoot, item)).sort((a, b) => a.localeCompare(b))
+    };
+  }
+
+  private async readSlice(args: Record<string, unknown>): Promise<unknown> {
+    const requestedPath = String(args.path ?? "").trim();
+    const symbol = String(args.symbol ?? "").trim();
+    if (!requestedPath || !symbol) {
+      throw new Error("workspace.read_slice requires 'path' and 'symbol'");
+    }
+
+    const absolutePath = ensureInsideRoot(this.workspaceRoot, requestedPath);
+    if (!existsSync(absolutePath)) {
+      throw new Error(`File not found: ${requestedPath}`);
+    }
+
+    const result = await this.workspaceIndex.getSemanticSlice(requestedPath, symbol);
+    if (!result.ok || !result.slice) {
+      throw new Error(result.error || `Failed to read semantic slice for ${symbol} in ${requestedPath}`);
+    }
+
+    return {
+      ok: true,
+      path: toPosixRelative(this.workspaceRoot, absolutePath),
+      symbol,
+      content: result.slice
     };
   }
 
