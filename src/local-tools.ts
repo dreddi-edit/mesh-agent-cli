@@ -686,7 +686,7 @@ export class LocalToolBackend implements ToolBackend {
       },
       {
         name: "workspace.open_artifact",
-        description: "Open a specific locally stored tool-result artifact by id. Use this only when an Artifact card lacks enough detail.",
+        description: "Open a specific locally stored tool-result artifact by id. ONLY call this when the user explicitly asks to see artifact details, or when a prior tool call returned truncated data and you need a specific field. NEVER call this automatically after another tool call — the tool result is already in context.",
         inputSchema: {
           type: "object",
           required: ["id"],

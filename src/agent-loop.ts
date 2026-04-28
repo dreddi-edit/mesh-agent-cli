@@ -51,6 +51,7 @@ const SYSTEM_PROMPT = [
   "- **Adaptability**: Match the language of the user (German or English).",
   "- **Never** execute destructive terminal commands without explicit user permission.",
   "- **Token Law**: Raw tool output is stored locally, not in context. Answer from compressed evidence.",
+  "- **No Artifact Loop**: NEVER call 'workspace.open_artifact' immediately after another tool call. The tool result is already in context. Only call it when the user explicitly requests more detail, or when the prior result was truncated and you need a specific missing field.",
   "",
   "# Capabilities",
   "- **CAPSULE-FIRST**: Prefer 'workspace.ask_codebase' with the right mode, then 'workspace.read_file' or 'workspace.read_dir_overview'.",
@@ -472,6 +473,7 @@ export class AgentLoop {
   private turnToolNames = new Map<string, number>();
   private turnArtifactCharsStored = 0;
   private turnArtifactEnvelopeChars = 0;
+  private sessionRawSaved = 0;
   private turnContextReports: ContextBudgetReport[] = [];
   private lastContextReport: ContextBudgetReport | null = null;
   private currentTurnRouteContext: string | null = null;
@@ -1164,16 +1166,6 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
           }
         }
 
-        if (this.useAnsi && !this.voiceMode) {
-          const dIn = this.sessionTokens.inputTokens - tokensBefore.inputTokens;
-          const dOut = this.sessionTokens.outputTokens - tokensBefore.outputTokens;
-          if (dIn > 0 || dOut > 0) {
-            const model = MODEL_OPTIONS.find(o => this.currentModelId.includes(o.value) || o.value.includes(this.currentModelId));
-            const { inputPer1k, outputPer1k } = model?.pricing ?? { inputPer1k: 0.003, outputPer1k: 0.015 };
-            const cost = (dIn * inputPer1k / 1000) + (dOut * outputPer1k / 1000);
-            output.write(pc.dim(`\napi turn: ↑${dIn.toLocaleString()} ↓${dOut.toLocaleString()} · $${cost.toFixed(4)}${dIn > 50_000 ? " · high" : ""}\n`));
-          }
-        }
         this.printToolSummary();
 
         const compactionMessage = await this.autoCompactIfNeeded();
@@ -1918,9 +1910,22 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     const top = `${this.themeColor(leftLine)}${pc.white(pc.bold(label))}${this.themeColor(rightLine)}`;
     const bottom = `${this.themeColor("❯")} `;
 
-    return `\n${top}\n${bottom}`;
+    const statsLine = this.buildSessionStatsLine();
+    return `\n${top}\n${statsLine}${bottom}`;
   }
 
+  private buildSessionStatsLine(): string {
+    const inT = this.sessionTokens.inputTokens;
+    const outT = this.sessionTokens.outputTokens;
+    if (inT === 0 && outT === 0) return "";
+    const model = MODEL_OPTIONS.find((o) => this.currentModelId.includes(o.value) || o.value.includes(this.currentModelId));
+    const { inputPer1k, outputPer1k } = model?.pricing ?? { inputPer1k: 0.003, outputPer1k: 0.015 };
+    const cost = (inT * inputPer1k / 1000) + (outT * outputPer1k / 1000);
+    const report = this.lastContextReport;
+    const ctxPart = report ? ` · ctx ${formatTokenCount(report.totalTokens)}/${formatTokenCount(report.maxInputTokens)}` : "";
+    const savedPart = this.sessionRawSaved > 0 ? ` · saved ~${formatTokenCount(Math.ceil(this.sessionRawSaved / 4))}` : "";
+    return pc.dim(`↑${formatTokenCount(inT)} ↓${formatTokenCount(outT)} · $${cost.toFixed(4)}${ctxPart}${savedPart}\n`);
+  }
 
   private async printSync(): Promise<void> {
     const status = await this.backend.callTool("workspace.check_sync", {}) as SyncStatus;
@@ -3570,12 +3575,9 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     }
     const report = this.peakContextReport();
     if (report) {
-      const saved = Math.max(0, this.turnArtifactCharsStored - this.turnArtifactEnvelopeChars);
-      const model = MODEL_OPTIONS.find((o) => this.currentModelId.includes(o.value) || o.value.includes(this.currentModelId));
-      const { inputPer1k } = model?.pricing ?? { inputPer1k: 0.003 };
-      const turnCostUsd = (report.totalTokens * inputPer1k) / 1000;
-      output.write(pc.dim(`\ncontext est: ${formatTokenCount(report.totalTokens)}/${formatTokenCount(report.maxInputTokens)} · $${turnCostUsd.toFixed(4)} · tools ${report.toolsOut}/${report.toolsIn} · messages ${report.messagesOut}/${report.messagesIn}${saved > 0 ? ` · raw saved ~${formatTokenCount(Math.ceil(saved / 4))} tok` : ""}`));
-      void this.writeContextMetrics(report, saved);
+      const turnSaved = Math.max(0, this.turnArtifactCharsStored - this.turnArtifactEnvelopeChars);
+      this.sessionRawSaved += turnSaved;
+      void this.writeContextMetrics(report, turnSaved);
     }
     if (this.turnToolCalls > 0 || report) output.write("\n");
   }
