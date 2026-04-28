@@ -76,5 +76,13 @@ export const MODEL_CATALOG: ModelCatalogEntry[] = [
     note: "nvidia robust fallback",
     provider: "nvidia",
     pricing: { inputPer1k: 0, outputPer1k: 0 }
+  },
+  {
+    label: "Minimax M2.7",
+    value: "minimax/minimax-m2.7",
+    aliases: ["minimax", "minimax-m2.7", "m2.7"],
+    note: "nvidia high-throughput",
+    provider: "nvidia",
+    pricing: { inputPer1k: 0, outputPer1k: 0 }
   }
 ];
