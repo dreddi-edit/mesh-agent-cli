@@ -3022,10 +3022,10 @@ export class LocalToolBackend implements ToolBackend {
 
   private async saveBackup(relativePath: string): Promise<void> {
     try {
-      const absolutePath = ensureInsideRoot(this.workspaceRoot, requestedPath);
+      const absolutePath = ensureInsideRoot(this.workspaceRoot, relativePath);
       if (existsSync(absolutePath)) {
         const content = await fs.readFile(absolutePath, "utf8");
-        this.changeStack.push({ path: requestedPath, content });
+        this.changeStack.push({ path: relativePath, content });
         if (this.changeStack.length > 50) this.changeStack.shift();
       }
     } catch {
