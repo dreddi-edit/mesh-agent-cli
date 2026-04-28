@@ -22,6 +22,7 @@ import { handleBrainRequest } from "./brain";
 
 export interface Env {
   BEDROCK_API_KEY: string;
+  NVIDIA_API_KEY?: string;
   SUPABASE_JWT_SECRET: string;
   BEDROCK_REGION?: string;
   ALLOWED_MODELS?: string;
@@ -35,6 +36,8 @@ interface KVNamespace {
 }
 
 const CONVERSE_PATH_RE = /^\/model\/([^/]+)\/converse$/;
+const OPENAI_CHAT_PATH = "/chat/completions";
+const OPENAI_EMBED_PATH = "/embeddings";
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
@@ -65,18 +68,15 @@ export default {
     const userId = payload.sub;
 
     const url = new URL(req.url);
-    const match = CONVERSE_PATH_RE.exec(url.pathname);
-    if (!match) {
+    const converseMatch = CONVERSE_PATH_RE.exec(url.pathname);
+    const isOpenAiChat = url.pathname === OPENAI_CHAT_PATH;
+    const isOpenAiEmbed = url.pathname === OPENAI_EMBED_PATH;
+
+    if (!converseMatch && !isOpenAiChat && !isOpenAiEmbed) {
       return json(
-        { error: "not_found", hint: "Use POST /model/{modelId}/converse" },
+        { error: "not_found", hint: "Use POST /model/{modelId}/converse OR /chat/completions OR /embeddings" },
         404
       );
-    }
-
-    const modelId = decodeURIComponent(match[1]);
-
-    if (!isModelAllowed(modelId, env.ALLOWED_MODELS)) {
-      return json({ error: "model_not_allowed", modelId }, 403);
     }
 
     // Rate limit per Supabase User ID.
@@ -90,8 +90,41 @@ export default {
       );
     }
 
+    // Handle OpenAI-compatible NVIDIA requests
+    if (isOpenAiChat || isOpenAiEmbed) {
+      if (!env.NVIDIA_API_KEY) {
+        return json({ error: "server_misconfigured_no_nvidia_key" }, 500);
+      }
+      
+      const target = `https://integrate.api.nvidia.com/v1${url.pathname}`;
+      const bodyText = await req.text();
+
+      const upstream = await fetch(target, {
+        method: "POST",
+        headers: {
+          "authorization": `Bearer ${env.NVIDIA_API_KEY}`,
+          "content-type": "application/json"
+        },
+        body: bodyText
+      });
+
+      return new Response(upstream.body, {
+        status: upstream.status,
+        headers: {
+          "content-type": "application/json",
+          "access-control-allow-origin": "*"
+        }
+      });
+    }
+
+    // Handle Bedrock Converse requests
+    const modelId = decodeURIComponent(converseMatch![1]);
+    if (!isModelAllowed(modelId, env.ALLOWED_MODELS)) {
+      return json({ error: "model_not_allowed", modelId }, 403);
+    }
+
     if (!env.BEDROCK_API_KEY) {
-      return json({ error: "server_misconfigured_no_key" }, 500);
+      return json({ error: "server_misconfigured_no_bedrock_key" }, 500);
     }
 
     const region = env.BEDROCK_REGION || "us-east-1";
@@ -99,7 +132,6 @@ export default {
       modelId
     )}/converse`;
 
-    // Forward body as-is. Client is expected to send valid Bedrock Converse payload.
     const bodyText = await req.text();
 
     const upstream = await fetch(target, {
@@ -111,14 +143,12 @@ export default {
       body: bodyText
     });
 
-    const responseHeaders: Record<string, string> = {
-      "content-type": "application/json",
-      "access-control-allow-origin": "*"
-    };
-
     return new Response(upstream.body, {
       status: upstream.status,
-      headers: responseHeaders
+      headers: {
+        "content-type": "application/json",
+        "access-control-allow-origin": "*"
+      }
     });
   }
 };
