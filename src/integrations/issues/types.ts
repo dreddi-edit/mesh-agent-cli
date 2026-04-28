@@ -15,6 +15,7 @@ export interface IssueProviderConfig {
   enabled: boolean;
   tokenKeychainService?: string;
   project?: string;
+  labels?: string[];
 }
 
 export interface IssuePipelineResult {

@@ -54,13 +54,16 @@ export class MeshRuntime {
 }
 
 export async function createMeshRuntime(options: MeshRuntimeOptions): Promise<MeshRuntime> {
+  let accessToken: string | undefined;
   if (!options.skipAuth) {
     const auth = new AuthManager();
     await auth.ensureAuthenticated();
+    accessToken = auth.getAccessToken();
   }
 
   const config = await loadConfig();
   config.agent.workspaceRoot = path.resolve(options.workspaceRoot);
+  config.bedrock.bearerToken ||= accessToken;
 
   const backends: ToolBackend[] = [new LocalToolBackend(config.agent.workspaceRoot, config)];
 
@@ -97,4 +100,3 @@ async function loadWorkspaceMcpBackends(configPath: string, backends: ToolBacken
     // Missing or invalid workspace MCP config should not block local runtime startup.
   }
 }
-

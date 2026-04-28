@@ -10,6 +10,15 @@ import os from "node:os";
 const MOCK_SESSION_DIR = path.join(os.homedir(), ".config", "mesh");
 const MOCK_SESSION_FILE = path.join(MOCK_SESSION_DIR, "session.json");
 
+function createUnsignedJwt(payload = {}) {
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return [
+    encode({ alg: "none", typ: "JWT" }),
+    encode({ exp: Math.floor(Date.now() / 1000) + 3600, ...payload }),
+    "signature"
+  ].join(".");
+}
+
 test("AuthManager - Unit Tests", async (t) => {
   // Save original globals and modules to restore later
   const originalReadFile = fs.readFile;
@@ -29,7 +38,7 @@ test("AuthManager - Unit Tests", async (t) => {
     fs.readFile = async (filePath) => {
       if (filePath === MOCK_SESSION_FILE) {
         return JSON.stringify({
-          access_token: "mock-access-token",
+          access_token: createUnsignedJwt(),
           refresh_token: "mock-refresh-token"
         });
       }

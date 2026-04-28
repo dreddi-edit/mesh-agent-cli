@@ -11,18 +11,58 @@ import { ToolBackend } from "./tool-backend.js";
 import { CompositeToolBackend } from "./composite-backend.js";
 import { runDaemonCli } from "./daemon.js";
 
+async function readPackageVersion(): Promise<string> {
+  try {
+    const raw = await fs.readFile(new URL("../package.json", import.meta.url), "utf8");
+    const parsed = JSON.parse(raw) as { version?: string };
+    return parsed.version || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function printHelp(): void {
+  process.stdout.write(
+    [
+      "Mesh CLI",
+      "",
+      "Usage:",
+      "  mesh                         start interactive agent",
+      "  mesh \"<task>\"                 run one task",
+      "  mesh daemon <start|status|digest|stop>",
+      "  mesh logout",
+      "  mesh --version",
+      "",
+      "Inside the interactive CLI, run /help for command groups."
+    ].join("\n") + "\n"
+  );
+}
+
 async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  const firstArg = args[0];
+
+  if (firstArg === "--help" || firstArg === "-h" || firstArg === "help") {
+    printHelp();
+    return;
+  }
+
+  if (firstArg === "--version" || firstArg === "-v" || firstArg === "version") {
+    process.stdout.write(`${await readPackageVersion()}\n`);
+    return;
+  }
+
   const config = await loadConfig();
   const auth = new AuthManager();
 
   // Handle `mesh logout` shorthand
-  if (process.argv[2] === "logout") {
+  if (firstArg === "logout") {
     await auth.signOut();
     return;
   }
 
-  if (process.argv[2] === "daemon") {
-    const code = await runDaemonCli(process.argv.slice(3));
+  if (firstArg === "daemon") {
+    const code = await runDaemonCli(args.slice(1));
     process.exitCode = code;
     return;
   }
@@ -30,6 +70,7 @@ async function main(): Promise<void> {
   // Auth gate — blocks until user is logged in
   const user = await auth.ensureAuthenticated();
   void user; // available for per-user features (e.g. namespaced capsule cache)
+  config.bedrock.bearerToken ||= auth.getAccessToken();
 
   let backend: ToolBackend | null = null;
   let shuttingDown = false;

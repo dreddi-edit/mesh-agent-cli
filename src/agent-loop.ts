@@ -14,6 +14,7 @@ import { spawn } from "node:child_process";
 import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
 import { MODEL_CATALOG } from "./model-catalog.js";
+import { routeMeshTask } from "./model-router.js";
 
 // Initialize marked with terminal renderer
 marked.use(markedTerminal() as any);
@@ -55,6 +56,7 @@ const SYSTEM_PROMPT = [
   "",
   "# How to read the codebase",
   "You have a fully indexed, live capsule of this workspace. Use it correctly:",
+  "- For durable company context, decisions, ownership signals, risk memory, and repo-specific lessons: use 'workspace.company_brain' first.",
   "- For questions about code, behavior, or structure: 'workspace.ask_codebase' first.",
   "- For symbol definitions, callers, and usages: 'workspace.explain_symbol' or 'workspace.find_references'.",
   "- For data flow across files: 'workspace.trace_symbol'.",
@@ -73,6 +75,7 @@ const SYSTEM_PROMPT = [
   "  Format: !ID > { [code] }",
   "- For risky changes: create a ghost timeline first ('workspace.timeline_create'), run and verify there, then promote.",
   "- Before promoting: run 'workspace.validate_patch' and 'workspace.ghost_verify'.",
+  "- Before production-ready handoff or PR preparation: run 'workspace.production_readiness' with action='gate'. It checks model routing, RAG quality, timelines, runtime learning, visual evidence, memory, and review gates.",
   "",
   "# How to debug",
   "- For a failing test or command: 'runtime.start' → 'runtime.capture_failure' → 'runtime.explain_failure'.",
@@ -82,6 +85,7 @@ const SYSTEM_PROMPT = [
   "- For diagnosing why something broke after a change: 'workspace.causal_autopsy'.",
   "",
   "# How to work on complex tasks",
+  "- For issue-to-PR work: use 'workspace.issue_autopilot' to plan, patch in an isolated timeline, verify, review, write a proof bundle, and optionally create the PR.",
   "- For tasks that touch many files or need parallel exploration: spawn sub-agents with 'agent.spawn' or 'agent.spawn_swarm'.",
   "- For competing fix approaches: 'agent.race_fixes' — run both in ghost timelines, compare results, promote the winner.",
   "- For multi-step plans before execution: 'agent.plan' to validate the approach first.",
@@ -93,6 +97,7 @@ const SYSTEM_PROMPT = [
   "- When the user describes a problem: immediately use 'workspace.ask_codebase' or 'workspace.causal_intelligence' to locate the root cause before responding.",
   "- When you see TODOs or known gaps while working: note them or resolve with 'workspace.todo_resolver'.",
   "- When tests are missing for a changed file: proactively offer to generate property tests via 'workspace.generate_properties'.",
+  "- For broad production hardening: use 'workspace.model_route' first, then 'workspace.production_readiness' to keep work aligned with the right specialist models and gates.",
   "",
   "# Safety",
   "- Never run destructive shell commands (rm -rf, drop table, git reset --hard, force push) without explicit user confirmation.",
@@ -305,6 +310,7 @@ function selectWireToolsForTurn(wireTools: WireTool[], inputText: string): WireT
       "workspace.validate_patch",
       "workspace.git_diff",
       "workspace.impact_map",
+      "workspace.company_brain",
       "workspace.explain_symbol",
       "workspace.list_symbols",
       "workspace.finalize_task"
@@ -327,11 +333,15 @@ function selectWireToolsForTurn(wireTools: WireTool[], inputText: string): WireT
     );
   }
 
-  if (/(offene probleme|problem|bug|issue|risk|risiko|audit|review|diagnos|causal|lab|repair|twin|ghost|fork|intent|memory|cockpit)/i.test(lower)) {
+  if (/(offene probleme|problem|bug|issue|ticket|pr|pull request|risk|risiko|audit|review|diagnos|causal|lab|repair|twin|ghost|fork|intent|memory|brain|cockpit)/i.test(lower)) {
     add(
       "workspace.digital_twin",
       "workspace.predictive_repair",
       "workspace.engineering_memory",
+      "workspace.company_brain",
+      "workspace.issue_autopilot",
+      "workspace.production_readiness",
+      "workspace.model_route",
       "workspace.intent_compile",
       "workspace.cockpit_snapshot",
       "workspace.causal_intelligence",
@@ -1782,6 +1792,11 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
       "Purpose: pre-routed local index context. Prefer these refs before more search tools.",
       `Query mode: ${mode}`
     ];
+    const route = routeMeshTask(inputText);
+    lines.push(
+      `Model route: ${route.taskType} confidence=${route.confidence} primary=${route.primaryChatModel}`,
+      `Required gates: ${route.requiredGates.join(", ")}`
+    );
     if (indexResult.status === "fulfilled") {
       const value = indexResult.value as any;
       const matches = Array.isArray(value?.topMatches) ? value.topMatches : [];
@@ -2687,6 +2702,10 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
   private async runIssuePipeline(args: string[]): Promise<void> {
     const action = (args[0] || "scan").toLowerCase();
     const provider = args[1]?.toLowerCase();
+    if (["plan", "run", "pr", "create-pr"].includes(action)) {
+      await this.runIssueAutopilot(args);
+      return;
+    }
     const spinner = ora({ text: `Issue pipeline ${action}...`, color: "yellow" }).start();
     try {
       const result: any = await this.backend.callTool("workspace.issue_pipeline", { action, provider });
@@ -2702,6 +2721,41 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       ].join("\n"));
     } catch (error) {
       spinner.fail(pc.red(`Issue pipeline failed: ${(error as Error).message}`));
+    }
+  }
+
+  private async runIssueAutopilot(args: string[]): Promise<void> {
+    const action = (args[0] || "status").toLowerCase().replace("-", "_");
+    const rest = args.slice(1);
+    const target = rest.join(" ").trim();
+    const payload: Record<string, unknown> = {
+      action: action === "create_pr" ? "pr" : action
+    };
+    if (/^https?:\/\//i.test(rest[0] ?? "")) {
+      payload.issueUrl = rest[0];
+    } else if (target) {
+      payload.title = target;
+      payload.body = target;
+    }
+    const spinner = ora({ text: `Issue Autopilot ${payload.action}...`, color: "yellow" }).start();
+    try {
+      const result: any = await this.backend.callTool("workspace.issue_autopilot", payload);
+      spinner.succeed(pc.yellow(`Issue Autopilot ${result.status ?? result.action} complete.`));
+      output.write([
+        "",
+        `${pc.dim("ok:")} ${result.ok ? pc.green("yes") : pc.red("no")}`,
+        ...(result.runId ? [`${pc.dim("run:")} ${result.runId}`] : []),
+        ...(result.issue ? [`${pc.dim("issue:")} ${result.issue.provider}:${result.issue.id} ${result.issue.title}`] : []),
+        ...(result.plan?.branchName ? [`${pc.dim("branch:")} ${result.plan.branchName}`] : []),
+        ...(result.plan?.verificationCommand ? [`${pc.dim("verify:")} ${result.plan.verificationCommand}`] : []),
+        ...(result.timeline?.id ? [`${pc.dim("timeline:")} ${result.timeline.id}`] : []),
+        ...(result.proof?.verdict ? [`${pc.dim("proof:")} ${result.proof.verdict} ${result.proof.proofId ?? ""}`] : []),
+        ...(result.pr?.url ? [`${pc.dim("pr:")} ${result.pr.url}`] : []),
+        ...((result.plan?.likelyFiles ?? []).slice(0, 8).map((file: string) => `${pc.yellow("•")} ${file}`)),
+        ""
+      ].join("\n"));
+    } catch (error) {
+      spinner.fail(pc.red(`Issue Autopilot failed: ${(error as Error).message}`));
     }
   }
 
@@ -2734,6 +2788,30 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
 
   private async runProductionStatus(args: string[]): Promise<void> {
     const action = (args[0] || "status").toLowerCase();
+    if (["audit", "gate", "review", "readiness"].includes(action)) {
+      const intent = args.slice(1).join(" ").trim() || "production readiness";
+      const spinner = ora({ text: `Production readiness ${action}...`, color: "red" }).start();
+      try {
+        const result: any = await this.backend.callTool("workspace.production_readiness", {
+          action: action === "readiness" ? "audit" : action,
+          intent
+        });
+        spinner.succeed(pc.red(`Production readiness ${result.status}.`));
+        output.write([
+          "",
+          `${pc.dim("score:")} ${result.score}/100`,
+          `${pc.dim("ledger:")} ${result.ledgerPath}`,
+          ...((result.dimensions ?? []).map((entry: any) =>
+            `${entry.status === "pass" ? pc.green("•") : entry.status === "warn" ? pc.yellow("•") : pc.red("•")} ${entry.title}: ${entry.score}/100`
+          )),
+          ...((result.blockers ?? []).slice(0, 5).map((entry: string) => `${pc.red("blocker:")} ${entry}`)),
+          ""
+        ].join("\n"));
+      } catch (error) {
+        spinner.fail(pc.red(`Production readiness failed: ${(error as Error).message}`));
+      }
+      return;
+    }
     const spinner = ora({ text: `Production ${action}...`, color: "red" }).start();
     try {
       const result: any = await this.backend.callTool("workspace.production_status", { action });
@@ -2906,6 +2984,48 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       ].join("\n"));
     } catch (error) {
       spinner.fail(pc.red(`Mesh Brain failed: ${(error as Error).message}`));
+    }
+  }
+
+  private async runCompanyBrain(args: string[]): Promise<void> {
+    const action = (args[0] || "status").toLowerCase().replace("-", "_");
+    const rest = args.slice(1).join(" ").trim();
+    const payload: Record<string, unknown> = { action };
+    if (["query", "ask", "search"].includes(action)) payload.query = rest;
+    if (["record", "ingest"].includes(action)) {
+      payload.kind = action === "ingest" ? "lesson" : "decision";
+      payload.title = rest.slice(0, 160);
+      payload.body = rest;
+    }
+    const spinner = ora({ text: `Company Brain ${action}...`, color: "blue" }).start();
+    try {
+      const result: any = await this.backend.callTool("workspace.company_brain", payload);
+      spinner.succeed(pc.blue(`Company Brain ${result.status ?? result.action} complete.`));
+      if (result.citations) {
+        output.write([
+          "",
+          `${pc.dim("query:")} ${result.query}`,
+          `${pc.dim("answer:")} ${result.answer}`,
+          ...((result.citations ?? []).slice(0, 8).map((item: any) =>
+            `${pc.blue("•")} ${item.file ?? item.title} ${item.lineStart ? `L${item.lineStart}` : ""} score=${item.score}`
+          )),
+          ""
+        ].join("\n"));
+        return;
+      }
+      output.write([
+        "",
+        `${pc.dim("path:")} ${result.path ?? result.summaryPath ?? "n/a"}`,
+        ...(result.summaryPath ? [`${pc.dim("summary:")} ${result.summaryPath}`] : []),
+        ...(result.files !== undefined ? [`${pc.dim("files:")} ${result.files}`] : []),
+        ...(result.documents !== undefined ? [`${pc.dim("documents:")} ${result.documents}`] : []),
+        ...(result.rules !== undefined ? [`${pc.dim("rules:")} ${result.rules}`] : []),
+        ...(result.decisions !== undefined ? [`${pc.dim("decisions:")} ${result.decisions}`] : []),
+        ...((result.domains ?? []).slice(0, 8).map((entry: any) => `${pc.blue("•")} ${entry.name}: ${entry.files} files, ${entry.risks} risks`)),
+        ""
+      ].join("\n"));
+    } catch (error) {
+      spinner.fail(pc.red(`Company Brain failed: ${(error as Error).message}`));
     }
   }
 
@@ -3629,8 +3749,8 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
 
     const groups: Array<{ title: string; names: string[] }> = [
       { title: "Start Here", names: ["/status", "/index", "/doctor", "/dashboard"] },
-      { title: "Ask About This Repo", names: ["/twin", "/repair", "/causal", "/lab", "/learn"] },
-      { title: "Build And Change", names: ["/intent", "/fork", "/ghost", "/fix", "/sheriff"] },
+      { title: "Ask About This Repo", names: ["/company", "/twin", "/repair", "/causal", "/lab", "/learn"] },
+      { title: "Build And Change", names: ["/autopilot", "/intent", "/fork", "/ghost", "/fix", "/sheriff"] },
       { title: "UI And Browser", names: ["/inspect", "/stop-inspect", "/preview"] },
       { title: "Session And Settings", names: ["/model", "/capsule", "/compact", "/approvals", "/steps", "/setup", "/cost", "/undo", "/clear", "/exit"] },
       { title: "Integrations And Advanced", names: ["/distill", "/synthesize", "/issues", "/chatops", "/production", "/replay", "/bisect", "/whatif", "/audit", "/brain", "/daemon", "/tribunal", "/resurrect", "/hologram", "/entangle", "/sync", "/voice"] }
@@ -3661,6 +3781,8 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       "/dashboard": ["/dashboard"],
       "/twin": ["/twin", "/twin status"],
       "/repair": ["/repair", "/repair status", "/repair clear"],
+      "/company": ["/company build", "/company query auth flow", "/company record API clients must validate env tokens"],
+      "/autopilot": ["/autopilot plan https://github.com/org/repo/issues/123", "/autopilot run fix the failing auth test", "/autopilot pr https://github.com/org/repo/issues/123"],
       "/causal": ["/causal", "/causal query why is auth risky?"],
       "/lab": ["/lab", "/lab status"],
       "/inspect": ["/inspect", "/inspect http://localhost:5173"],
@@ -3683,12 +3805,14 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       { name: "/index", usage: "/index", description: "re-index workspace and generate file capsules" },
       { name: "/distill", usage: "/distill", description: "analyze workspace and update the project brain context" },
       { name: "/synthesize", usage: "/synthesize", description: "auto-generate structural changes based on background heuristics" },
+      { name: "/company", aliases: ["/company-brain"], usage: "/company [build|status|query <question>|record <decision>]", description: "build or query the durable Company Codebase Brain" },
       { name: "/twin", usage: "/twin [build|read|status]", description: "build or inspect the Codebase Digital Twin" },
       { name: "/repair", usage: "/repair [analyze|status|clear]", description: "inspect the Predictive Repair Daemon queue" },
       { name: "/daemon", usage: "/daemon [start|status|digest|stop]", description: "control Mesh background daemon mode" },
       { name: "/issues", usage: "/issues [scan|status] [provider]", description: "run issue-to-PR pipeline for GitHub/Linear/Jira tickets" },
+      { name: "/autopilot", usage: "/autopilot [status|plan|run|pr] <issueUrl|manual title>", description: "turn an issue into a verified timeline patch, proof bundle, and optional PR" },
       { name: "/chatops", usage: "/chatops [investigate|approve|status] [platform] [message|threadId]", description: "run Slack/Discord co-engineer investigation and approval flow" },
-      { name: "/production", usage: "/production [refresh|status]", description: "show production telemetry impact signals and top regressions" },
+      { name: "/production", usage: "/production [refresh|status|audit|gate|review] [intent]", description: "show telemetry or run the production readiness gate" },
       { name: "/replay", usage: "/replay <traceId|sentryEventId> [commitRange]", description: "replay a production trace and detect divergence/introducing commit" },
       { name: "/bisect", usage: "/bisect <symptom> [verificationCommand]", description: "autonomous symptom bisect over commit history" },
       { name: "/whatif", usage: "/whatif <hypothesis>", description: "run a counterfactual migration analysis in isolated timeline" },
@@ -3742,7 +3866,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     const commandList = [
       "/help", "/status", "/index", "/dashboard", "/sync", "/setup", "/clear",
       "/model", "/cost", "/compact", "/capsule", "/memory", "/approvals", "/steps", "/undo",
-      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/twin", "/repair", "/daemon", "/issues", "/chatops", "/production", "/replay", "/bisect", "/whatif", "/audit", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/stop-inspect", "/preview", "/fix",
+      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/company", "/company-brain", "/twin", "/repair", "/daemon", "/issues", "/autopilot", "/chatops", "/production", "/replay", "/bisect", "/whatif", "/audit", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/stop-inspect", "/preview", "/fix",
       "/tribunal", "/resurrect", "/sheriff"
     ];
     // Priority 1: Exact match
@@ -3800,6 +3924,10 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       case "/synthesize":
         await this.runSynthesize();
         return { wasHandled: true, shouldExit: false };
+      case "/company":
+      case "/company-brain":
+        await this.runCompanyBrain(args);
+        return { wasHandled: true, shouldExit: false };
       case "/twin":
         await this.runDigitalTwin(args);
         return { wasHandled: true, shouldExit: false };
@@ -3811,6 +3939,9 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
         return { wasHandled: true, shouldExit: false };
       case "/issues":
         await this.runIssuePipeline(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/autopilot":
+        await this.runIssueAutopilot(args);
         return { wasHandled: true, shouldExit: false };
       case "/chatops":
         await this.runChatops(args);
@@ -4636,6 +4767,16 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       }
     } catch {
       // No project brain exists yet
+    }
+
+    try {
+      const companyBrainPath = path.join(this.config.agent.workspaceRoot, ".mesh", "company-brain", "summary.md");
+      const companyBrain = readFileSync(companyBrainPath, "utf8");
+      if (companyBrain) {
+        sections.push(`\n[COMPANY CODEBASE BRAIN]\nUse these durable repo facts, rules, risks, and decisions before proposing changes:\n${clampBlock(companyBrain, 3_200)}`);
+      }
+    } catch {
+      // No company brain exists yet
     }
 
     if (this.voiceMode) {

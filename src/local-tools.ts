@@ -69,6 +69,10 @@ import { ToolBackend, ToolCallOpts, ToolDefinition } from "./tool-backend.js";
 import { AppConfig } from "./config.js";
 import { BedrockLlmClient } from "./llm-client.js";
 import { analyzeImageWithNvidia, DEFAULT_NVIDIA_VISION_MODELS, resolveNvidiaApiKey } from "./nvidia-services.js";
+import { routeMeshTask } from "./model-router.js";
+import { ProductionReadinessEngine } from "./production-readiness.js";
+import { CompanyBrainEngine } from "./company-brain.js";
+import { IssueAutopilotEngine } from "./issue-autopilot.js";
 import { WorkspaceIndex, CodeQueryMode } from "./workspace-index.js";
 import { TimelineManager } from "./timeline-manager.js";
 import { RuntimeObserver } from "./runtime-observer.js";
@@ -210,6 +214,33 @@ function uniqueStrings(values: Array<string | undefined | null>, limit = 100): s
 function pickFirstMatch(source: Record<string, unknown>, keys: string[], fallback: string): string {
   const found = keys.find((key) => Object.keys(source).some((sourceKey) => sourceKey.toLowerCase().includes(key)));
   return found ?? fallback;
+}
+
+function ragQueryVariants(query: string, mode: CodeQueryMode): string[] {
+  const normalized = query.replace(/\s+/g, " ").trim();
+  const variants = [normalized];
+  if (mode === "bug") variants.push(`${normalized} stack error failure root cause`);
+  if (mode === "test-impact") variants.push(`${normalized} tests specs verification coverage`);
+  if (mode === "edit-impact") variants.push(`${normalized} callers dependencies exports affected files`);
+  if (mode === "runtime-path") variants.push(`${normalized} route handler request runtime server`);
+  if (mode === "ownership") variants.push(`${normalized} owner module boundary integration`);
+  const symbols = Array.from(normalized.matchAll(/[A-Z][A-Za-z0-9_]{2,}|[a-zA-Z0-9_-]+\.[tj]sx?/g))
+    .map((match) => match[0])
+    .slice(0, 8)
+    .join(" ");
+  if (symbols) variants.push(symbols);
+  return uniqueStrings(variants, 4);
+}
+
+function lexicalOverlapScore(query: string, text: string): number {
+  const queryTokens = new Set(query.toLowerCase().split(/[^a-z0-9_.$/-]+/i).filter((token) => token.length > 2));
+  if (queryTokens.size === 0) return 0;
+  const haystack = text.toLowerCase();
+  let hits = 0;
+  for (const token of queryTokens) {
+    if (haystack.includes(token)) hits += 1;
+  }
+  return hits / queryTokens.size;
 }
 
 function aggregateCohortRules(
@@ -446,6 +477,9 @@ export class LocalToolBackend implements ToolBackend {
   private readonly tribunal: TribunalEngine;
   private readonly sessionResurrection: SessionResurrectionEngine;
   private readonly semanticSheriff: SemanticSheriffEngine;
+  private readonly productionReadiness: ProductionReadinessEngine;
+  private readonly companyBrain: CompanyBrainEngine;
+  private readonly issueAutopilot: IssueAutopilotEngine;
 
   constructor(private readonly workspaceRoot: string, private readonly config?: AppConfig) {
     this.cache = new CacheManager(config ?? {
@@ -536,6 +570,27 @@ export class LocalToolBackend implements ToolBackend {
     this.tribunal = new TribunalEngine(workspaceRoot, tribunalCallLlm);
     this.sessionResurrection = new SessionResurrectionEngine(workspaceRoot);
     this.semanticSheriff = new SemanticSheriffEngine(workspaceRoot);
+    this.productionReadiness = new ProductionReadinessEngine(workspaceRoot, (name, args) => this.callTool(name, args));
+    this.companyBrain = new CompanyBrainEngine(workspaceRoot, (name, args) => this.callTool(name, args));
+    this.issueAutopilot = new IssueAutopilotEngine(workspaceRoot, {
+      callTool: (name, args) => this.callTool(name, args),
+      callLlm: config ? async ({ system, user, temperature = 0.1, maxTokens = 8192 }) => {
+        const llm = new BedrockLlmClient({
+          endpointBase: config.bedrock.endpointBase,
+          modelId: config.bedrock.modelId,
+          fallbackModelIds: config.bedrock.fallbackModelIds,
+          bearerToken: config.bedrock.bearerToken,
+          temperature,
+          maxTokens
+        });
+        const response = await llm.converse(
+          [{ role: "user", content: [{ text: user }] }],
+          [],
+          system
+        );
+        return response.kind === "text" ? response.text : "";
+      } : undefined
+    });
 
     this.startupTasks.push(
       this.bootstrapRepoDnaMemory(),
@@ -1894,6 +1949,28 @@ export class LocalToolBackend implements ToolBackend {
         }
       },
       {
+        name: "workspace.company_brain",
+        description: "Company Codebase Brain: build, query, record, ingest, or export durable repo intelligence with citations, decisions, risks, ownership, and verification memory.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["build", "query", "status", "record", "ingest", "export"], default: "status" },
+            query: { type: "string", description: "Question or search query for action=query." },
+            question: { type: "string", description: "Alias for query." },
+            title: { type: "string", description: "Decision/rule/lesson title for action=record." },
+            body: { type: "string", description: "Decision/rule/lesson body for action=record or action=ingest." },
+            rule: { type: "string", description: "Rule to persist into Company Brain and Engineering Memory." },
+            note: { type: "string", description: "Short note to persist." },
+            kind: { type: "string", enum: ["decision", "rule", "lesson", "risk", "owner", "pattern", "runtime", "autopilot"], default: "decision" },
+            source: { type: "string" },
+            files: { type: "array", items: { type: "string" } },
+            limit: { type: "number", default: 8 },
+            maxFiles: { type: "number", default: 1200 },
+            path: { type: "string", description: "Export path for action=export." }
+          }
+        }
+      },
+      {
         name: "workspace.daemon",
         description: "Daemon mode controls: start/stop/status/digest for the background Mesh service.",
         inputSchema: {
@@ -1912,6 +1989,35 @@ export class LocalToolBackend implements ToolBackend {
             action: { type: "string", enum: ["scan", "status"], default: "scan" },
             provider: { type: "string", enum: ["github", "linear", "jira"] },
             issueId: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "workspace.issue_autopilot",
+        description: "Production Issue-to-PR Autopilot: convert a GitHub/Linear/Jira/manual issue into a verified timeline patch, proof bundle, and optional PR branch/PR.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["status", "plan", "run", "pr", "create_pr", "submit_pr"], default: "status" },
+            issueUrl: { type: "string", description: "GitHub issue URL or external issue URL." },
+            url: { type: "string", description: "Alias for issueUrl." },
+            provider: { type: "string", enum: ["github", "linear", "jira", "manual"] },
+            issueId: { type: "string" },
+            title: { type: "string", description: "Manual issue title." },
+            body: { type: "string", description: "Manual issue body." },
+            description: { type: "string", description: "Alias for body." },
+            labels: { type: "array", items: { type: "string" } },
+            verificationCommand: { type: "string", description: "Command run in the isolated timeline." },
+            baseRef: { type: "string" },
+            baseBranch: { type: "string" },
+            branchName: { type: "string" },
+            prTitle: { type: "string" },
+            patch: { type: "string", description: "Optional raw git patch to apply instead of LLM generation." },
+            maxAttempts: { type: "number", default: 2 },
+            timeoutMs: { type: "number", default: 240000 },
+            submitPr: { type: "boolean", default: false },
+            push: { type: "boolean", default: true },
+            maxBrainFiles: { type: "number", default: 1200 }
           }
         }
       },
@@ -1935,6 +2041,30 @@ export class LocalToolBackend implements ToolBackend {
           type: "object",
           properties: {
             action: { type: "string", enum: ["refresh", "status"], default: "status" }
+          }
+        }
+      },
+      {
+        name: "workspace.model_route",
+        description: "Route a task to the best Mesh model roles: chat, sidecar, retrieval, vision, safety, and required verification gates.",
+        inputSchema: {
+          type: "object",
+          required: ["task"],
+          properties: {
+            task: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "workspace.production_readiness",
+        description: "Production readiness gate across model orchestration, RAG, timelines, runtime learning, visual checks, memory, and PR review.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["audit", "gate", "review", "status"], default: "audit" },
+            intent: { type: "string" },
+            verificationCommand: { type: "string" },
+            url: { type: "string", description: "Optional local app URL for live visual readiness checks." }
           }
         }
       },
@@ -2269,6 +2399,8 @@ export class LocalToolBackend implements ToolBackend {
         return this.engineeringMemory(args);
       case "workspace.brain":
         return this.meshBrainTool(args);
+      case "workspace.company_brain":
+        return this.companyBrain.run(args);
       case "workspace.daemon":
         return this.daemonControl(args);
       case "workspace.issue_pipeline":
@@ -2277,6 +2409,8 @@ export class LocalToolBackend implements ToolBackend {
           provider: typeof args.provider === "string" ? args.provider : undefined,
           issueId: typeof args.issueId === "string" ? args.issueId : undefined
         });
+      case "workspace.issue_autopilot":
+        return this.issueAutopilot.run(args);
       case "workspace.chatops":
         return this.chatops.run({
           action: typeof args.action === "string" ? args.action : "investigate",
@@ -2286,6 +2420,10 @@ export class LocalToolBackend implements ToolBackend {
         });
       case "workspace.production_status":
         return this.productionStatus(args);
+      case "workspace.model_route":
+        return { ok: true, route: routeMeshTask(String(args.task ?? "")) };
+      case "workspace.production_readiness":
+        return this.productionReadiness.run(args);
       case "workspace.intent_compile":
         return this.intentCompile(args);
       case "workspace.cockpit_snapshot":
@@ -3759,20 +3897,60 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
       : "architecture";
     const limit = Math.max(1, Math.min(Number(args.limit) || 8, 25));
     onProgress?.(`[Index] Querying persistent code index (${mode}) for "${query}"...\n`);
-    const result: any = await this.workspaceIndex.search(query, mode, limit);
+    const variants = ragQueryVariants(query, mode);
+    const searches = await Promise.all(
+      variants.map((variant) => this.workspaceIndex.search(variant, mode, Math.min(25, limit * 2)))
+    );
+    const result: any = searches[0];
     const production = await this.telemetry.topSignals(50).catch(() => []);
-    const boosted = (result.results ?? []).map((entry: any) => {
-      const signal = production.find((item) => item.file === entry.file);
+    const productionByFile = new Map(production.map((item) => [item.file, item]));
+    const merged = new Map<string, any>();
+
+    for (let variantIndex = 0; variantIndex < searches.length; variantIndex += 1) {
+      const variant = variants[variantIndex];
+      for (const entry of searches[variantIndex].results ?? []) {
+        const existing = merged.get(entry.file);
+        const variantWeight = variantIndex === 0 ? 1 : 0.72;
+        const overlap = lexicalOverlapScore(query, `${entry.file}\n${entry.purpose}\n${entry.matchedSignals?.join(" ") ?? ""}`);
+        const score = Number(entry.score ?? 0) * variantWeight + overlap * 4;
+        if (!existing) {
+          merged.set(entry.file, {
+            ...entry,
+            score,
+            baseScore: entry.score,
+            matchedVariants: [variant],
+            citations: Array.isArray(entry.citations) ? entry.citations : []
+          });
+        } else {
+          existing.score = Math.max(existing.score, score) + 0.35;
+          existing.matchedVariants = uniqueStrings([...(existing.matchedVariants ?? []), variant], 6);
+          existing.citations = [...(existing.citations ?? []), ...(entry.citations ?? [])].slice(0, 8);
+          existing.matchedSignals = uniqueStrings([...(existing.matchedSignals ?? []), ...(entry.matchedSignals ?? [])], 12);
+        }
+      }
+    }
+
+    const boosted = Array.from(merged.values()).map((entry: any) => {
+      const signal = productionByFile.get(entry.file);
+      const productionBoost = signal ? scoreSignal(signal) : 0;
+      const finalScore = Number(entry.score ?? 0) + Math.min(8, productionBoost / 250);
       return {
         ...entry,
-        productionBoost: signal
-          ? scoreSignal(signal)
-          : 0
+        score: Number(finalScore.toFixed(3)),
+        productionBoost
       };
-    }).sort((left: any, right: any) => (right.productionBoost ?? 0) - (left.productionBoost ?? 0));
+    }).sort((left: any, right: any) => (right.score ?? 0) - (left.score ?? 0)).slice(0, limit);
     return {
       ...result,
+      query,
+      queryVariants: variants,
       results: boosted,
+      topMatches: boosted.map((entry: any) => ({
+        path: entry.file,
+        score: entry.score,
+        snippet: `[Fonte: ${entry.file}]\n${entry.purpose}`
+      })),
+      resultsFound: Math.max(result.resultsFound ?? 0, merged.size),
       productionSignals: production.slice(0, 10)
     };
   }

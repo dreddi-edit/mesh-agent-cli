@@ -1,4 +1,11 @@
 const NVIDIA_ENDPOINT_BASE = "https://integrate.api.nvidia.com/v1";
+export const DEFAULT_NVIDIA_CHAT_MODELS = [
+  "qwen/qwen3-coder-480b-a35b-instruct",
+  "moonshotai/kimi-k2.5",
+  "mistralai/devstral-2-123b-instruct-2512",
+  "deepseek-ai/deepseek-v3.2",
+  "meta/llama-3.3-70b-instruct"
+] as const;
 export const DEFAULT_NVIDIA_EMBEDDING_MODELS = [
   "nvidia/nv-embedcode-7b-v1",
   "nvidia/nv-embed-v1",

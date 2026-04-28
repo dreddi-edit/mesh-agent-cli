@@ -13,7 +13,12 @@
  */
 
 import { DEFAULT_MODEL_ID } from "./model-catalog.js";
-import { isNvidiaHostedModel, nvidiaChatCompletion, type NvidiaChatCompletionResponse } from "./nvidia-services.js";
+import {
+  DEFAULT_NVIDIA_CHAT_MODELS,
+  isNvidiaHostedModel,
+  nvidiaChatCompletion,
+  type NvidiaChatCompletionResponse
+} from "./nvidia-services.js";
 
 export type TextBlock = { text: string };
 export type ImageBlock = {
@@ -113,14 +118,21 @@ export class BedrockLlmClient {
         : AbortSignal.timeout(60_000);
 
       if (isNvidiaHostedModel(activeModelId)) {
-        const openAiResponse = await this.fetchNvidiaResponse(
-          activeModelId,
-          messages,
-          tools,
-          systemPrompt,
-          combinedSignal,
-          maxTokensOverride
-        );
+        let openAiResponse: { response: Response; data: NvidiaChatCompletionResponse | null; rawText: string };
+        try {
+          openAiResponse = await this.fetchNvidiaResponse(
+            activeModelId,
+            messages,
+            tools,
+            systemPrompt,
+            combinedSignal,
+            maxTokensOverride
+          );
+        } catch (error) {
+          attempts.push(`${activeModelId} -> error: ${(error as Error).message.slice(0, 220)}`);
+          process.stderr.write(`[Mesh] Model ${activeModelId} failed (${(error as Error).message}), trying fallback...\n`);
+          continue;
+        }
 
         if (openAiResponse.response.ok) {
           return this.parseNvidiaResponse(openAiResponse.data);
@@ -303,8 +315,17 @@ export class BedrockLlmClient {
   }
 
   private candidateModelIds(modelIdOverride?: string): string[] {
+    const primary = modelIdOverride || this.options.modelId;
+    if (isNvidiaHostedModel(primary)) {
+      return Array.from(new Set([
+        primary,
+        ...DEFAULT_NVIDIA_CHAT_MODELS,
+        ...(this.options.fallbackModelIds ?? []),
+        DEFAULT_MODEL_ID
+      ].filter(Boolean)));
+    }
     return Array.from(new Set([
-      modelIdOverride || this.options.modelId,
+      primary,
       ...(this.options.fallbackModelIds ?? [])
     ].filter(Boolean)));
   }

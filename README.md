@@ -73,10 +73,24 @@ Mesh builds a persistent understanding of your repository: file capsules, symbol
 Common commands:
 
 - `/index` re-indexes the workspace.
+- `/company build` builds the durable Company Codebase Brain with cited repo knowledge, rules, risks, decisions, and verification memory.
+- `/company query <question>` asks the Company Brain with grounded citations and recommended files.
 - `/status` shows runtime, model, session, git, and index state.
 - `/capsule` inspects or manages compressed session memory.
 - `/distill` updates the project brain context.
 - `/twin` builds or reads the Codebase Digital Twin.
+
+### Issue-To-PR Autopilot
+
+Mesh can turn a GitHub issue, local issue snapshot, or manual ticket into a verified implementation workflow. The autopilot builds a repo-grounded plan from the Company Brain, creates an isolated timeline, applies a generated or supplied patch, runs verification, reviews the diff, writes a proof bundle, and can optionally create a PR branch/PR.
+
+Common commands:
+
+- `/autopilot plan <issueUrl|ticket text>` builds the implementation plan and patch prompt.
+- `/autopilot run <issueUrl|ticket text>` executes the patch workflow in an isolated timeline.
+- `/autopilot pr <issueUrl|ticket text>` verifies the change and attempts PR branch/PR creation.
+
+Artifacts are written to `.mesh/autopilot/` and `.mesh/company-brain/`.
 
 ### Safe Code Changes
 
@@ -206,6 +220,8 @@ Common top-level commands:
 - `/index` build workspace intelligence
 - `/preview` inspect local UI output
 - `/dashboard` open the local supervision view
+- `/company` build/query the durable Company Codebase Brain
+- `/autopilot` run issue-to-verified-PR workflows
 - `/intent`, `/fork`, `/ghost`, `/lab` run advanced engineering workflows
 - `/doctor` diagnose local environment issues
 - `/setup` configure model, cloud cache, theme, endpoint, and voice settings

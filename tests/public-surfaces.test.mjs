@@ -67,6 +67,8 @@ test("local tools expose moonshot public interfaces through the runtime registry
       "workspace.digital_twin",
       "workspace.predictive_repair",
       "workspace.engineering_memory",
+      "workspace.company_brain",
+      "workspace.issue_autopilot",
       "workspace.intent_compile",
       "workspace.cockpit_snapshot",
       "workspace.causal_intelligence",
