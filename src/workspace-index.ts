@@ -8,6 +8,11 @@ import ignore, { Ignore } from "ignore";
 import { MeshCoreAdapter, MeshCallSite, MeshSymbol } from "./mesh-core-adapter.js";
 import { CacheManager } from "./cache-manager.js";
 import { pipeline, env } from "@xenova/transformers";
+import {
+  DEFAULT_NVIDIA_EMBEDDING_MODELS,
+  isNvidiaHostedModel,
+  nvidiaEmbeddingWithFallbacks
+} from "./nvidia-services.js";
 
 // Optional: configure transformers env to avoid local caching issues
 env.allowLocalModels = false;
@@ -16,7 +21,7 @@ const execFileAsync = promisify(execFile);
 
 const INDEX_SCHEMA_VERSION = 1;
 const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
-const DEFAULT_EMBEDDING_MODEL = process.env.MESH_EMBEDDING_MODEL || "Xenova/nomic-embed-code";
+const DEFAULT_EMBEDDING_MODEL = process.env.MESH_EMBEDDING_MODEL || DEFAULT_NVIDIA_EMBEDDING_MODELS[0];
 const DEFAULT_SKIP_DIRS = [
   ".git",
   ".mesh",
@@ -819,6 +824,9 @@ function tokenize(value: string): string[] {
 
 let embeddingPipeline: any = null;
 async function getEmbeddingPipeline() {
+  if (isRemoteEmbeddingModel(DEFAULT_EMBEDDING_MODEL)) {
+    return null;
+  }
   if (!embeddingPipeline) {
     try {
       embeddingPipeline = await pipeline("feature-extraction", DEFAULT_EMBEDDING_MODEL, {
@@ -835,9 +843,23 @@ async function getEmbeddingPipeline() {
 
 async function vectorize(value: string): Promise<number[]> {
   if (!value || value.trim() === "") return [];
+  if (isRemoteEmbeddingModel(DEFAULT_EMBEDDING_MODEL)) {
+    const result = await nvidiaEmbeddingWithFallbacks(
+      value,
+      {
+        inputType: DEFAULT_EMBEDDING_MODEL.startsWith("nvidia/") ? "query" : undefined,
+        models: [DEFAULT_EMBEDDING_MODEL, ...DEFAULT_NVIDIA_EMBEDDING_MODELS]
+      }
+    );
+    return result.embedding;
+  }
   const extractor = await getEmbeddingPipeline();
   const output = await extractor(value, { pooling: "mean", normalize: true });
   return Array.from(output.data);
+}
+
+function isRemoteEmbeddingModel(modelId: string): boolean {
+  return isNvidiaHostedModel(modelId) || modelId === "snowflake/arctic-embed-l";
 }
 
 function cosine(left: number[], right: number[]): number {

@@ -68,6 +68,7 @@ import { CacheManager, CapsuleBatchRequest } from "./cache-manager.js";
 import { ToolBackend, ToolCallOpts, ToolDefinition } from "./tool-backend.js";
 import { AppConfig } from "./config.js";
 import { BedrockLlmClient } from "./llm-client.js";
+import { analyzeImageWithNvidia, DEFAULT_NVIDIA_VISION_MODELS, resolveNvidiaApiKey } from "./nvidia-services.js";
 import { WorkspaceIndex, CodeQueryMode } from "./workspace-index.js";
 import { TimelineManager } from "./timeline-manager.js";
 import { RuntimeObserver } from "./runtime-observer.js";
@@ -3170,7 +3171,8 @@ export class LocalToolBackend implements ToolBackend {
         ok: true,
         url,
         base64Image,
-        instruction: "Pass this base64 string to a vision model (e.g. Claude Sonnet 4.5 Vision) to evaluate the layout."
+        instruction: "Pass this base64 string to a vision model to evaluate the layout.",
+        visionAnalysis: await this.runVisionAnalysis(base64Image, url)
       };
     } catch (err) {
       const message = (err as any)?.stderr?.toString?.() || (err as Error).message || "";
@@ -3189,7 +3191,7 @@ export class LocalToolBackend implements ToolBackend {
   private async previewFrontend(args: Record<string, unknown>, onProgress?: (chunk: string) => void): Promise<unknown> {
     const url = String(args.url ?? "").trim();
     if (!url) throw new Error("frontend.preview requires url");
-    return captureFrontendPreview({
+    const preview = await captureFrontendPreview({
       url,
       width: typeof args.width === "number" ? args.width : Number(args.width || 1280),
       height: typeof args.height === "number" ? args.height : Number(args.height || 800),
@@ -3199,6 +3201,32 @@ export class LocalToolBackend implements ToolBackend {
       outputPath: typeof args.outputPath === "string" ? args.outputPath : undefined,
       onProgress
     });
+    const screenshot = await fs.readFile(preview.screenshotPath);
+    return {
+      ...preview,
+      visionAnalysis: await this.runVisionAnalysis(screenshot.toString("base64"), url)
+    };
+  }
+
+  private async runVisionAnalysis(imageBase64: string, url: string): Promise<string | undefined> {
+    if (!resolveNvidiaApiKey(this.config?.bedrock.bearerToken)) return undefined;
+    try {
+      return await analyzeImageWithNvidia(
+        imageBase64,
+        [
+          `Inspect this Mesh UI screenshot from ${url}.`,
+          "Return a compact engineering review with:",
+          "1. primary layout or rendering defects,",
+          "2. text overflow or clipping,",
+          "3. missing hierarchy or affordance issues,",
+          "4. likely next fix."
+        ].join("\n"),
+        process.env.MESH_VISION_MODEL || DEFAULT_NVIDIA_VISION_MODELS[0],
+        this.config?.bedrock.bearerToken
+      );
+    } catch (error) {
+      return `vision unavailable: ${(error as Error).message}`;
+    }
   }
 
   private async queryAst(args: Record<string, unknown>): Promise<unknown> {

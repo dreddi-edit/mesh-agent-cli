@@ -13,6 +13,7 @@
  */
 
 import { DEFAULT_MODEL_ID } from "./model-catalog.js";
+import { isNvidiaHostedModel, nvidiaChatCompletion, type NvidiaChatCompletionResponse } from "./nvidia-services.js";
 
 export type TextBlock = { text: string };
 export type ImageBlock = {
@@ -105,21 +106,43 @@ export class BedrockLlmClient {
     abortSignal?: AbortSignal,
     maxTokensOverride?: number
   ): Promise<LlmResponse> {
-    const body = this.buildBody(messages, tools, systemPrompt, maxTokensOverride);
-
-    const headers: Record<string, string> = {
-      "content-type": "application/json"
-    };
-    if (this.options.bearerToken) {
-      headers.authorization = `Bearer ${this.options.bearerToken}`;
-    }
-
-    const combinedSignal = abortSignal
-      ? AbortSignal.any([abortSignal, AbortSignal.timeout(60_000)])
-      : AbortSignal.timeout(60_000);
-
     const attempts: string[] = [];
     for (const activeModelId of this.candidateModelIds(modelIdOverride)) {
+      const combinedSignal = abortSignal
+        ? AbortSignal.any([abortSignal, AbortSignal.timeout(60_000)])
+        : AbortSignal.timeout(60_000);
+
+      if (isNvidiaHostedModel(activeModelId)) {
+        const openAiResponse = await this.fetchNvidiaResponse(
+          activeModelId,
+          messages,
+          tools,
+          systemPrompt,
+          combinedSignal,
+          maxTokensOverride
+        );
+
+        if (openAiResponse.response.ok) {
+          return this.parseNvidiaResponse(openAiResponse.data);
+        }
+
+        const hint = this.buildErrorHint(openAiResponse.response.status, openAiResponse.rawText, activeModelId);
+        attempts.push(`${activeModelId} -> ${openAiResponse.response.status}: ${openAiResponse.rawText.slice(0, 220)}${hint}`);
+        if (!this.shouldTryFallback(openAiResponse.response.status)) {
+          break;
+        }
+        process.stderr.write(`[Mesh] Model ${activeModelId} failed (${openAiResponse.response.status}), trying fallback...\n`);
+        continue;
+      }
+
+      const body = this.buildBody(messages, tools, systemPrompt, maxTokensOverride);
+      const headers: Record<string, string> = {
+        "content-type": "application/json"
+      };
+      if (this.options.bearerToken) {
+        headers.authorization = `Bearer ${this.options.bearerToken}`;
+      }
+
       const response = await this.fetchWithRetry(this.buildUrl(activeModelId), {
         method: "POST",
         headers,
@@ -152,6 +175,25 @@ export class BedrockLlmClient {
     abortSignal?: AbortSignal,
     maxTokensOverride?: number
   ): AsyncGenerator<{ kind: "text" | "tool_use" | "stop"; text?: string; toolUse?: any; usage?: ConverseUsage }> {
+    const primaryModel = modelIdOverride || this.options.modelId;
+    if (isNvidiaHostedModel(primaryModel)) {
+      const response = await this.converse(messages, tools, systemPrompt, modelIdOverride, abortSignal, maxTokensOverride);
+      if (response.kind === "text") {
+        if (response.text) {
+          yield { kind: "text", text: response.text };
+        }
+      } else {
+        if (response.text) {
+          yield { kind: "text", text: response.text };
+        }
+        for (const toolUse of response.toolUses) {
+          yield { kind: "tool_use", toolUse };
+        }
+      }
+      yield { kind: "stop", usage: response.usage };
+      return;
+    }
+
     const body = this.buildBody(messages, tools, systemPrompt, maxTokensOverride);
 
     const headers: Record<string, string> = {
@@ -235,6 +277,29 @@ export class BedrockLlmClient {
   private buildUrl(modelId: string): string {
     const base = this.options.endpointBase.replace(/\/+$/, "");
     return `${base}/model/${encodeURIComponent(modelId)}/converse`;
+  }
+
+  private async fetchNvidiaResponse(
+    modelId: string,
+    messages: ConverseMessage[],
+    tools: ToolSpec[],
+    systemPrompt: string | Array<{ text: string; cache_control?: any }>,
+    abortSignal?: AbortSignal,
+    maxTokensOverride?: number
+  ): Promise<{ response: Response; data: NvidiaChatCompletionResponse | null; rawText: string }> {
+    return nvidiaChatCompletion(
+      {
+        model: modelId,
+        messages: this.buildOpenAiMessages(messages, systemPrompt),
+        tools: tools.length > 0 ? this.buildOpenAiTools(tools) : undefined,
+        temperature: this.options.temperature,
+        maxTokens: maxTokensOverride ?? this.options.maxTokens
+      },
+      {
+        apiKey: this.options.bearerToken,
+        abortSignal
+      }
+    );
   }
 
   private candidateModelIds(modelIdOverride?: string): string[] {
@@ -358,6 +423,95 @@ export class BedrockLlmClient {
     return body;
   }
 
+  private buildOpenAiTools(tools: ToolSpec[]): Array<Record<string, unknown>> {
+    return tools.map((tool) => ({
+      type: "function",
+      function: {
+        name: tool.name,
+        description: tool.description ?? "",
+        parameters: tool.inputSchema ?? { type: "object", properties: {} }
+      }
+    }));
+  }
+
+  private buildOpenAiMessages(
+    messages: ConverseMessage[],
+    systemPrompt: string | Array<{ text: string; cache_control?: any }>
+  ): Array<Record<string, unknown>> {
+    const openAiMessages: Array<Record<string, unknown>> = [];
+    const systemText = typeof systemPrompt === "string"
+      ? systemPrompt
+      : systemPrompt.map((entry) => entry.text).filter(Boolean).join("\n\n");
+    if (systemText.trim()) {
+      openAiMessages.push({ role: "system", content: systemText });
+    }
+
+    for (const message of messages) {
+      const textParts: string[] = [];
+      const imageParts: Array<Record<string, unknown>> = [];
+      const assistantToolCalls: Array<Record<string, unknown>> = [];
+      const toolMessages: Array<Record<string, unknown>> = [];
+
+      for (const block of message.content) {
+        if ("text" in block && typeof block.text === "string") {
+          textParts.push(block.text);
+        } else if ("image" in block) {
+          imageParts.push({
+            type: "image_url",
+            image_url: {
+              url: `data:image/${block.image.format};base64,${block.image.source.bytes}`
+            }
+          });
+        } else if ("toolUse" in block) {
+          assistantToolCalls.push({
+            id: block.toolUse.toolUseId,
+            type: "function",
+            function: {
+              name: block.toolUse.name,
+              arguments: JSON.stringify(block.toolUse.input ?? {})
+            }
+          });
+        } else if ("toolResult" in block) {
+          const toolText = block.toolResult.content
+            .map((item) => ("text" in item ? item.text : JSON.stringify("json" in item ? item.json : item.image)))
+            .join("\n")
+            .trim();
+          toolMessages.push({
+            role: "tool",
+            tool_call_id: block.toolResult.toolUseId,
+            content: toolText || (block.toolResult.status ?? "ok")
+          });
+        }
+      }
+
+      if (assistantToolCalls.length > 0) {
+        openAiMessages.push({
+          role: "assistant",
+          content: textParts.join("\n").trim() || null,
+          tool_calls: assistantToolCalls
+        });
+      } else if (imageParts.length > 0) {
+        const contentParts = [
+          ...textParts.map((text) => ({ type: "text", text })),
+          ...imageParts
+        ];
+        openAiMessages.push({
+          role: message.role,
+          content: contentParts
+        });
+      } else if (textParts.length > 0) {
+        openAiMessages.push({
+          role: message.role,
+          content: textParts.join("\n").trim()
+        });
+      }
+
+      openAiMessages.push(...toolMessages);
+    }
+
+    return openAiMessages;
+  }
+
   private parseResponse(data: ConverseResponseShape): LlmResponse {
     const content = data.output?.message?.content ?? [];
     const stopReason = data.stopReason ?? "end_turn";
@@ -385,6 +539,54 @@ export class BedrockLlmClient {
     }
 
     return { kind: "text", text, stopReason, usage };
+  }
+
+  private parseNvidiaResponse(data: NvidiaChatCompletionResponse | null): LlmResponse {
+    const choice = data?.choices?.[0];
+    const usage: ConverseUsage | undefined = data?.usage
+      ? {
+          inputTokens: data.usage.prompt_tokens,
+          outputTokens: data.usage.completion_tokens,
+          totalTokens: data.usage.total_tokens
+        }
+      : undefined;
+
+    const content = choice?.message?.content;
+    const text = typeof content === "string"
+      ? content.trim()
+      : Array.isArray(content)
+        ? content.map((item) => item?.text ?? "").join("\n").trim()
+        : "";
+
+    const toolCalls = choice?.message?.tool_calls ?? [];
+    if (toolCalls.length > 0) {
+      return {
+        kind: "tool_use",
+        text: text || undefined,
+        stopReason: choice?.finish_reason ?? "tool_use",
+        usage,
+        toolUses: toolCalls.map((toolCall, index) => {
+          let input: Record<string, unknown> = {};
+          try {
+            input = JSON.parse(toolCall.function?.arguments ?? "{}") as Record<string, unknown>;
+          } catch {
+            input = {};
+          }
+          return {
+            toolUseId: toolCall.id || `tool_call_${index + 1}`,
+            name: toolCall.function?.name || "unknown_tool",
+            input
+          };
+        })
+      };
+    }
+
+    return {
+      kind: "text",
+      text,
+      stopReason: choice?.finish_reason ?? "end_turn",
+      usage
+    };
   }
 }
 

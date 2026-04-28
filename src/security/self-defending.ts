@@ -3,6 +3,13 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { runCritic } from "../agents/critic.js";
 import { appendJsonl, clampNumber, collectWorkspaceFiles, lineNumberAt, readJson, toPosix, writeJson } from "../moonshots/common.js";
+import {
+  classifySafetyWithNvidia,
+  DEFAULT_NVIDIA_PII_MODELS,
+  DEFAULT_NVIDIA_SAFETY_MODELS,
+  detectPiiWithNvidia,
+  resolveNvidiaApiKey
+} from "../nvidia-services.js";
 import { TimelineManager } from "../timeline-manager.js";
 
 type FindingKind = "redos" | "command_injection" | "path_traversal" | "sqli";
@@ -21,6 +28,11 @@ export interface SelfDefenseFinding {
   exploitInputPreview?: string;
   measuredMs?: number;
   recommendation: string;
+  aiSafety?: {
+    guard?: string;
+    secondaryGuard?: string;
+    piiReview?: string;
+  };
 }
 
 interface SelfDefenseCandidate {
@@ -75,6 +87,7 @@ export class SelfDefendingCodeEngine {
     const confirm = action === "probe" || args.confirm === true;
     const files = await this.targetFiles(args, maxFiles);
     const findings = await this.scanFiles(files, confirm);
+    await this.annotateFindings(findings);
 
     const result = {
       ok: true,
@@ -101,6 +114,7 @@ export class SelfDefendingCodeEngine {
     const maxFiles = clampNumber(args.maxFiles, policy.probeBudgetPerRun, 1, 5000);
     const files = await this.targetFiles(args, maxFiles);
     const findings = await this.scanFiles(files, true);
+    await this.annotateFindings(findings);
     const attempts: PatchAttempt[] = [];
     const timelineManager = new TimelineManager(this.workspaceRoot);
 
@@ -140,6 +154,7 @@ export class SelfDefendingCodeEngine {
     const maxFiles = clampNumber(args.maxFiles, policy.probeBudgetPerRun, 1, 1000);
     const files = await this.targetFiles(args, maxFiles);
     const findings = await this.scanFiles(files, true);
+    await this.annotateFindings(findings);
     const statePath = path.join(this.workspaceRoot, ".mesh", "security", "companions.json");
     const previous = await readJson<{ files?: Record<string, unknown> }>(statePath, { files: {} });
     const nextFiles = { ...(previous.files ?? {}) } as Record<string, unknown>;
@@ -264,6 +279,34 @@ export class SelfDefendingCodeEngine {
       await this.notify(attempt);
     }
     return attempt;
+  }
+
+  private async annotateFindings(findings: SelfDefenseFinding[]): Promise<void> {
+    const apiKey = resolveNvidiaApiKey();
+    if (!apiKey || findings.length === 0) return;
+
+    const targets = findings
+      .filter((finding) => finding.status === "confirmed" || finding.status === "timeout")
+      .slice(0, 8);
+
+    await Promise.all(targets.map(async (finding) => {
+      const artifact = [
+        `file: ${finding.file}:${finding.line}`,
+        `kind: ${finding.kind}`,
+        `pattern: ${finding.pattern}`,
+        `flags: ${finding.flags}`,
+        `evidence: ${finding.evidence.join(" | ")}`,
+        finding.exploitInputPreview ? `exploit: ${finding.exploitInputPreview}` : ""
+      ].filter(Boolean).join("\n");
+
+      const [guard, secondaryGuard, piiReview] = await Promise.all([
+        classifySafetyWithNvidia(artifact, process.env.MESH_SAFETY_MODEL || DEFAULT_NVIDIA_SAFETY_MODELS[0], apiKey).catch(() => undefined),
+        classifySafetyWithNvidia(artifact, process.env.MESH_SAFETY_MODEL_SECONDARY || DEFAULT_NVIDIA_SAFETY_MODELS[1], apiKey).catch(() => undefined),
+        detectPiiWithNvidia(artifact, process.env.MESH_PII_MODEL || DEFAULT_NVIDIA_PII_MODELS[0], apiKey).catch(() => undefined)
+      ]);
+
+      finding.aiSafety = { guard, secondaryGuard, piiReview };
+    }));
   }
 
   private async scanFiles(files: string[], confirm: boolean): Promise<SelfDefenseFinding[]> {
