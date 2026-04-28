@@ -70,7 +70,16 @@ export class MeshPortal {
   }
 
   async applyGhostStyles(styles: Record<string, string>): Promise<void> {
-    const json = JSON.stringify(styles);
+    // Pass styles via a binding call rather than string-interpolating into JS,
+    // preventing injection if a style value contains quote/script characters.
+    const sanitized: Record<string, string> = {};
+    for (const [k, v] of Object.entries(styles)) {
+      // CSS property names: letters, digits, hyphens only
+      if (!/^[a-zA-Z0-9-]+$/.test(k)) continue;
+      // CSS values: strip anything that could break out of a string context
+      sanitized[k] = v.replace(/[\\"'`\r\n<>]/g, "");
+    }
+    const json = JSON.stringify(sanitized);
     await this.evaluate(`window.__mesh_apply_ghost(${json})`);
   }
 

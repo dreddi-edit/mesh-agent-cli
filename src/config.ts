@@ -195,8 +195,8 @@ export async function loadUserSettings(): Promise<UserSettings> {
 
 export async function saveUserSettings(settings: UserSettings): Promise<void> {
   const dir = path.dirname(SETTINGS_PATH);
-  await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(SETTINGS_PATH, JSON.stringify(settings, null, 2), "utf-8");
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  await fs.writeFile(SETTINGS_PATH, JSON.stringify(settings, null, 2), { encoding: "utf-8", mode: 0o600 });
 }
 
 export async function loadConfig(): Promise<AppConfig> {
@@ -228,9 +228,23 @@ export async function loadConfig(): Promise<AppConfig> {
     throw new Error("Missing required env var in mcp mode: MESH_MCP_COMMAND");
   }
 
+  const rawEndpoint = localSettings.customEndpoint || userSettings.customEndpoint || optionalString("BEDROCK_ENDPOINT", DEFAULT_ENDPOINT_BASE);
+  const endpointBase = (() => {
+    try {
+      const u = new URL(rawEndpoint);
+      if (u.protocol !== "https:" && u.hostname !== "127.0.0.1" && u.hostname !== "localhost") {
+        throw new Error(`BEDROCK_ENDPOINT must use HTTPS (got ${rawEndpoint})`);
+      }
+      return rawEndpoint;
+    } catch (e) {
+      if ((e as Error).message.startsWith("BEDROCK_ENDPOINT")) throw e;
+      throw new Error(`Invalid BEDROCK_ENDPOINT URL: ${rawEndpoint}`);
+    }
+  })();
+
   return {
     bedrock: {
-      endpointBase: localSettings.customEndpoint || userSettings.customEndpoint || optionalString("BEDROCK_ENDPOINT", DEFAULT_ENDPOINT_BASE),
+      endpointBase,
       bearerToken: localSettings.customApiKey || userSettings.customApiKey || resolveBearerToken(),
       modelId: configuredModelId,
       fallbackModelIds: envFallbackModelIds.length > 0

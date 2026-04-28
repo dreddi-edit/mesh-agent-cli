@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { AgentLoop, type HeadlessTurnResult, type RunHooks } from "./agent-loop.js";
+import { AuthManager } from "./auth.js";
 import { CompositeToolBackend } from "./composite-backend.js";
 import { loadConfig, type AppConfig } from "./config.js";
 import { LocalToolBackend } from "./local-tools.js";
@@ -10,6 +11,8 @@ import type { ToolBackend } from "./tool-backend.js";
 export interface MeshRuntimeOptions {
   workspaceRoot: string;
   includeWorkspaceMcp?: boolean;
+  /** Skip authentication. Only set true in trusted server-side contexts where auth is handled externally. */
+  skipAuth?: boolean;
 }
 
 export interface MeshRuntimeStatus {
@@ -51,6 +54,11 @@ export class MeshRuntime {
 }
 
 export async function createMeshRuntime(options: MeshRuntimeOptions): Promise<MeshRuntime> {
+  if (!options.skipAuth) {
+    const auth = new AuthManager();
+    await auth.ensureAuthenticated();
+  }
+
   const config = await loadConfig();
   config.agent.workspaceRoot = path.resolve(options.workspaceRoot);
 

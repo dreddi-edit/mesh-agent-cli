@@ -31,12 +31,26 @@ export type AuthResult =
   | { ok: true; user: MeshUser }
   | { ok: false; reason: string };
 
+function isJwtShape(token: string): boolean {
+  const parts = token.split(".");
+  if (parts.length !== 3) return false;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    // Reject tokens that are already expired
+    if (typeof payload.exp === "number" && payload.exp * 1000 < Date.now()) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function isSessionShape(obj: unknown): obj is Omit<Session, "refresh_token"> & { refresh_token?: string } {
   return (
-    typeof obj === "object" && 
-    obj !== null && 
-    "access_token" in obj && 
-    typeof (obj as any).access_token === "string"
+    typeof obj === "object" &&
+    obj !== null &&
+    "access_token" in obj &&
+    typeof (obj as any).access_token === "string" &&
+    isJwtShape((obj as any).access_token)
   );
 }
 

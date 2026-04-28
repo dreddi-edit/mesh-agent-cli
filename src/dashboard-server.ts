@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import crypto from "node:crypto";
 import http from "node:http";
 import path from "node:path";
 import { DEFAULT_MODEL_ID } from "./model-catalog.js";
@@ -87,20 +88,39 @@ function getActionBackend(): LocalToolBackend {
 
 async function main(): Promise<void> {
   await fs.mkdir(dashboardDir, { recursive: true });
+
+  // Per-process secret — injected into the HTML page and required on every API call.
+  // Prevents any local process or curl call from accessing workspace data without
+  // having loaded the dashboard page first.
+  const SESSION_TOKEN = crypto.randomBytes(32).toString("hex");
+
   const closeBackend = () => {
     void actionBackend?.close().catch(() => undefined);
   };
   process.once("SIGINT", closeBackend);
   process.once("SIGTERM", closeBackend);
+
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url || "/", "http://127.0.0.1");
+
       if (url.pathname === "/health") {
         return json(res, { ok: true, version: DASHBOARD_SERVER_VERSION });
       }
+
+      // All API routes require the session token
+      if (url.pathname.startsWith("/api/")) {
+        const provided = req.headers["x-dashboard-token"];
+        if (provided !== SESSION_TOKEN) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ ok: false, error: "Unauthorized" }));
+        }
+      }
+
       if (url.pathname === "/api/state") {
         return json(res, await buildState());
       }
+
       if (url.pathname === "/api/actions" && req.method === "POST") {
         const contentType = req.headers["content-type"] || "";
         if (!contentType.includes("application/json")) {
@@ -108,27 +128,34 @@ async function main(): Promise<void> {
           return res.end(JSON.stringify({ ok: false, error: "Unsupported Media Type: Must be application/json" }));
         }
 
+        // Origin must be present and match the host (prevents CSRF from non-browser clients too,
+        // since they'd need the session token anyway — belt and suspenders)
         const origin = req.headers["origin"];
         const host = req.headers["host"];
-        if (origin) {
-          try {
-            const originUrl = new URL(origin);
-            if (originUrl.host !== host) {
-              res.writeHead(403, { "Content-Type": "application/json" });
-              return res.end(JSON.stringify({ ok: false, error: "Cross-Origin Request Blocked" }));
-            }
-          } catch {
-            res.writeHead(400, { "Content-Type": "application/json" });
-            return res.end(JSON.stringify({ ok: false, error: "Invalid Origin" }));
+        if (!origin) {
+          res.writeHead(403, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ ok: false, error: "Origin header required" }));
+        }
+        try {
+          const originUrl = new URL(origin);
+          if (originUrl.host !== host) {
+            res.writeHead(403, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ ok: false, error: "Cross-Origin Request Blocked" }));
           }
+        } catch {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ ok: false, error: "Invalid Origin" }));
         }
 
         const body = await readRequestJson(req);
         return json(res, await enqueueAction(body));
       }
+
       if (url.pathname === "/") {
-        return html(res, renderHtml());
+        const nonce = crypto.randomBytes(16).toString("base64");
+        return html(res, renderHtml(SESSION_TOKEN, nonce), nonce);
       }
+
       res.writeHead(404);
       res.end("Not found");
     } catch (error) {
@@ -144,12 +171,12 @@ async function main(): Promise<void> {
   });
 }
 
-function html(res: http.ServerResponse, body: string): void {
+function html(res: http.ServerResponse, body: string, nonce: string): void {
   res.writeHead(200, {
     "Content-Type": "text/html; charset=utf-8",
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
-    "Content-Security-Policy": "default-src 'self' 'unsafe-inline'; img-src 'self' data:;"
+    "Content-Security-Policy": `default-src 'self'; script-src 'nonce-${nonce}'; style-src 'self' 'nonce-${nonce}' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:;`
   });
   res.end(body);
 }
@@ -583,7 +610,7 @@ async function readJson(filePath: string, fallback: any): Promise<any> {
   }
 }
 
-function renderHtml(): string {
+function renderHtml(sessionToken: string, nonce: string): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -592,7 +619,7 @@ function renderHtml(): string {
 <title>Mesh</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet"/>
-<style>
+<style nonce="${nonce}">
 :root{
   --bg:#f7f8fa;
   --surface:#ffffff;
@@ -931,9 +958,12 @@ body{font:13px/1.5 var(--sans);color:var(--text);background:var(--bg);}
 </div>
 <div id="toast"></div>
 
-<script>
+<script nonce="${nonce}">
 (function(){
 'use strict';
+
+// ── auth token (injected server-side, required on all API calls) ────────────
+var DASHBOARD_TOKEN='${sessionToken}';
 
 // ── state ──────────────────────────────────────────
 let state=null, selFile=null, graphMode='focus';
@@ -1292,7 +1322,7 @@ async function runAction(action,btn){
   btn.disabled=true; btn.classList.add('spinning'); btn.textContent='···';
   toast('Running '+action+'…');
   try{
-    var resp=await fetch('/api/actions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action})});
+    var resp=await fetch('/api/actions',{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Token':DASHBOARD_TOKEN},body:JSON.stringify({action:action})});
     var data=await resp.json();
     if(data.ok){toast((data.request&&data.request.summary)||action+' complete');}
     else{toast(data.error||action+' failed',true);}
@@ -1320,7 +1350,7 @@ function setGraphMode(m){
 // ── main refresh ─────────────────────────────────────
 async function refresh(){
   try{
-    var resp=await fetch('/api/state',{cache:'no-store'});
+    var resp=await fetch('/api/state',{cache:'no-store',headers:{'X-Dashboard-Token':DASHBOARD_TOKEN}});
     state=await resp.json();
     if(!selFile){selFile=state.groupedFiles.source[0]||state.groupedFiles.tests[0]||null;}
     $('ws-path').textContent=state.workspaceRoot.split('/').filter(Boolean).pop()||state.workspaceRoot;

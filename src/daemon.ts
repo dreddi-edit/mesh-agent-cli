@@ -121,6 +121,9 @@ async function runDaemonServer(): Promise<void> {
     void tick();
   }, 15 * 60 * 1000);
 
+  // Restrict socket to owner only — prevents other local processes from sending stop/status
+  await fs.chmod(DAEMON_SOCKET_PATH, 0o700).catch(() => undefined);
+
   const server = net.createServer((socket) => {
     let body = "";
     socket.on("data", (chunk) => {
