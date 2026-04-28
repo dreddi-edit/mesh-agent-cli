@@ -10,6 +10,7 @@ import { McpClient } from "./mcp-client.js";
 import { ToolBackend } from "./tool-backend.js";
 import { CompositeToolBackend } from "./composite-backend.js";
 import { runDaemonCli } from "./daemon.js";
+import { buildSessionManager, type SessionManager } from "./session-manager.js";
 
 async function readPackageVersion(): Promise<string> {
   try {
@@ -74,22 +75,32 @@ async function main(): Promise<void> {
 
   let backend: ToolBackend | null = null;
   let shuttingDown = false;
+  const sessionManager: SessionManager = buildSessionManager(config.agent.workspaceRoot);
+  sessionManager.start();
+
   const closeBackend = async () => {
     if (!backend || shuttingDown) {
       return;
     }
     shuttingDown = true;
+    await sessionManager.stop();
     await backend.close().catch(() => undefined);
   };
   const installSignalHandlers = () => {
     const handleSignal = (signal: NodeJS.Signals) => {
-      void closeBackend().finally(() => {
+      shuttingDown = true;
+      const flush = async () => {
+        await sessionManager.stop();
+        await backend?.close().catch(() => undefined);
+      };
+      flush().finally(() => {
         process.exitCode = process.exitCode || 130;
         process.stderr.write(`\nReceived ${signal}, shutting down Mesh cleanly.\n`);
+        process.exit(0);
       });
     };
-    process.once("SIGINT", handleSignal);
-    process.once("SIGTERM", handleSignal);
+    process.on("SIGINT", handleSignal);
+    process.on("SIGTERM", handleSignal);
   };
 
   try {

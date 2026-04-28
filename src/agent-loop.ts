@@ -36,6 +36,7 @@ import {
 import { ContextAssembler, ContextBudgetReport } from "./context-assembler.js";
 import { ContextArtifactStore } from "./context-artifacts.js";
 import { PersistedSessionCapsule, SessionCapsuleStore } from "./session-capsule-store.js";
+import { buildSessionManager, type SessionManager, type SerializedTurn } from "./session-manager.js";
 import { MeshPortal } from "./mesh-portal.js";
 import { ToolBackend, ToolDefinition } from "./tool-backend.js";
 import { VoiceDependencyStatus, VoiceManager } from "./voice-manager.js";
@@ -510,10 +511,12 @@ export class AgentLoop {
   private portal: MeshPortal;
   private headlessInitialized = false;
   private streamingUnavailable = false;
+  private sessionManager: SessionManager;
 
   constructor(
     private readonly config: AppConfig,
-    private readonly backend: ToolBackend
+    private readonly backend: ToolBackend,
+    sessionManager?: SessionManager
   ) {
     this.sessionStore = new SessionCapsuleStore(config.agent.workspaceRoot);
     this.artifactStore = new ContextArtifactStore(config.agent.workspaceRoot);
@@ -528,6 +531,7 @@ export class AgentLoop {
       temperature: config.bedrock.temperature,
       maxTokens: config.bedrock.maxTokens
     });
+    this.sessionManager = sessionManager ?? buildSessionManager(config.agent.workspaceRoot);
 
     const colorStr = config.agent.themeColor || "cyan";
     const colorFn = pc[colorStr as keyof typeof pc];
@@ -1010,6 +1014,39 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     this.printBanner();
     await this.printStatus();
 
+    // Resume interrupted session if one exists
+    if (this.sessionManager.hasInterruptedSession()) {
+      const interrupted = this.sessionManager.getInterruptedSession();
+      if (interrupted && interrupted.length > 0) {
+        output.write(pc.yellow("\n[Session] Found interrupted session from previous run.\n"));
+        const resumeConfirm = new Confirm({
+          name: "resume",
+          message: "Resume previous session?",
+          initial: true,
+          stdin: input,
+          stdout: output
+        });
+        const shouldResume = await resumeConfirm.run() as boolean;
+        if (shouldResume) {
+          for (const turn of interrupted) {
+            if (turn.role === "user") {
+              this.transcript.push({ role: "user", content: [{ text: turn.content }] });
+            } else {
+              const content: ContentBlock[] = [{ text: turn.content }];
+              if (turn.toolCalls?.length) {
+                for (const tc of turn.toolCalls) {
+                  content.push({ toolUse: { toolUseId: tc.id, name: tc.name, input: tc.input } });
+                }
+              }
+              this.transcript.push({ role: "assistant", content });
+            }
+          }
+          output.write(pc.green(`[Session] Resumed ${interrupted.length} turns.\n`));
+        }
+        this.sessionManager.clearInterruptedSession();
+      }
+    }
+
     let lastSigInt = 0;
 
     while (true) {
@@ -1286,6 +1323,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     const preTurnLength = this.transcript.length;
     this.currentTurnRouteContext = await this.buildTurnRouteContext(userInput).catch(() => null);
     this.transcript.push({ role: "user", content: [{ text: userInput }] });
+    this.sessionManager.addMessage("user", userInput);
 
     let lastAssistantText = "";
     this.abortController = new AbortController();
@@ -1397,6 +1435,7 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
 
         if (response.kind === "text") {
           this.transcript.push({ role: "assistant", content: [{ text: response.text }] });
+          this.sessionManager.addMessage("assistant", response.text || "");
           return response.text || lastAssistantText || "(no answer)";
         }
 
@@ -1409,6 +1448,11 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
           assistantContent.push({ toolUse: { toolUseId: tu.toolUseId, name: tu.name, input: tu.input } });
         }
         this.transcript.push({ role: "assistant", content: assistantContent });
+        this.sessionManager.addMessage(
+          "assistant",
+          response.text || "",
+          response.toolUses.map((tu) => ({ id: tu.toolUseId, name: tu.name, input: tu.input }))
+        );
 
         // Sequential approval pass (TTY prompts can't be parallel).
         const approved = new Map<string, boolean>();
