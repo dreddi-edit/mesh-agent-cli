@@ -1,6 +1,6 @@
 {
   "name": "mesh-core",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Core routing and compression engine for Mesh",
   "main": "src/server.js",
   "type": "module",

@@ -17,21 +17,21 @@ export interface ModelCatalogEntry {
 
 export const MODEL_CATALOG: ModelCatalogEntry[] = [
   {
-    label: "Claude Sonnet 4.6",
+    label: "Claude 4.6 Sonnet",
     value: DEFAULT_MODEL_ID,
     aliases: ["sonnet4.6", "sonnet-4.6", "sonnet46"],
     note: "default",
     pricing: { inputPer1k: 0.003, outputPer1k: 0.015 }
   },
   {
-    label: "Claude Opus 4.6",
+    label: "Claude 4.6 Opus",
     value: OPUS_MODEL_ID,
     aliases: ["opus4.6", "opus-4.6", "opus46"],
     note: "powerful",
     pricing: { inputPer1k: 0.015, outputPer1k: 0.075 }
   },
   {
-    label: "Claude Haiku 4.5",
+    label: "Claude 4.5 Haiku",
     value: HAIKU_MODEL_ID,
     aliases: ["haiku4.5", "haiku-4.5", "haiku45"],
     note: "modern fast",
