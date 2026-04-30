@@ -746,12 +746,15 @@ function syncGraphViewport(force){
 function initGraph3D(){
   if(graphInited)return;graphInited=true;
   var wrap=$('graph-wrap'),canvas=$('graph-canvas');
-  var w=wrap.clientWidth||800,h=wrap.clientHeight||500;
+  if(!wrap||!canvas){toast('Graph container not found',true);return;}
+  var w=Math.max(1,wrap.clientWidth||0),h=Math.max(1,wrap.clientHeight||0);
+  if(w<50||h<50){toast('Graph container too small: '+w+'x'+h,true);return;}
   scene3=new THREE.Scene();
   scene3.fog=new THREE.FogExp2(0x0a0e12,0.003);
   camera3=new THREE.PerspectiveCamera(55,w/h,1,2000);
   camera3.position.set(0,80,220);
-  renderer3=new THREE.WebGLRenderer({canvas:canvas,antialias:true,alpha:false});
+  try{renderer3=new THREE.WebGLRenderer({canvas:canvas,antialias:true,alpha:false});}catch(e){toast('WebGL not available: '+String(e),true);return;}
+  if(!renderer3){toast('Failed to create WebGL renderer',true);return;}
   renderer3.setPixelRatio(Math.min(window.devicePixelRatio,2));
   renderer3.setSize(w,h);
   renderer3.setClearColor(0x0a0e12,1);
@@ -789,6 +792,7 @@ function initGraph3D(){
 function animate3D(){
   graphAnimId=requestAnimationFrame(animate3D);
   syncGraphViewport(false);
+  if(!renderer3||!camera3||!scene3)return;
   // Update camera orbit
   var cx=orbitState.target.x+orbitState.dist*Math.sin(orbitState.phi)*Math.sin(orbitState.theta);
   var cy=orbitState.target.y+orbitState.dist*Math.cos(orbitState.phi);
@@ -864,7 +868,7 @@ function runForceStep(){
 }
 
 function renderGraph(){
-  if(!state)return;
+  if(!state||typeof THREE==='undefined')return;
   initGraph3D();
   var g=state.dependencyGraph||{nodes:[],links:[],externalPackages:[],details:{}};
   var nodes=g.nodes||[],links=g.links||[];
@@ -890,6 +894,7 @@ function renderGraph(){
   var gkey=graphMode+'|'+(selFile||'')+'|'+showNodes.map(function(n){return n.id;}).join('|')+'#'+showLinks.length;
   if(gkey===lastGraphKey)return;lastGraphKey=gkey;
   // Clear old
+  if(!graphGroup||!linkGroup)return;
   while(graphGroup.children.length)graphGroup.remove(graphGroup.children[0]);
   while(linkGroup.children.length)linkGroup.remove(linkGroup.children[0]);
   nodeMeshes=[];simNodes=[];simLinks=[];
