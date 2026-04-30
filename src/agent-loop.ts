@@ -3631,6 +3631,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     }
 
     let lastGhostText = "";
+    let completing = false;
     this.ghostTextListener = (_: any, key: any) => {
       if (!this.useAnsi || !key) return;
       if (key.ctrl && key.name === "o") {
@@ -3638,27 +3639,35 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
         output.write(pc.dim(`\ntool output: ${this.toolEventsExpanded ? "expanded" : "collapsed"}\n`));
         return;
       }
-      if (key.name === "return" || key.name === "enter") return;
-
-      // Handle Tab or Right arrow to complete the ghost text
-      if (key.name === "tab" || (key.name === "right" && lastGhostText)) {
-        if (lastGhostText) {
-          // Clear ghost text
-          output.write(" ".repeat(lastGhostText.length) + "\u001b[" + lastGhostText.length + "D");
-          rl.write(lastGhostText);
-          lastGhostText = "";
-          return;
-        }
-      }
-
       if (key.name === "return" || key.name === "enter") {
         if (lastGhostText) {
           output.write(" ".repeat(lastGhostText.length) + "\u001b[" + lastGhostText.length + "D");
           lastGhostText = "";
         }
+        return;
+      }
+
+      // While completing via rl.write, suppress all ghost recalculation
+      if (completing) return;
+
+      // Handle Tab or Right arrow to complete the ghost text
+      if (key.name === "tab" || (key.name === "right" && lastGhostText)) {
+        if (lastGhostText) {
+          // Clear ghost text visually
+          output.write(" ".repeat(lastGhostText.length) + "\u001b[" + lastGhostText.length + "D");
+          const textToWrite = lastGhostText;
+          lastGhostText = "";
+          // Suppress ghost recalculation during programmatic write
+          completing = true;
+          rl.write(textToWrite);
+          // Re-enable after all synthetic keypresses have been processed
+          setTimeout(() => { completing = false; }, 20);
+          return;
+        }
       }
 
       setTimeout(() => {
+        if (completing) return;
         const line = (rl as any).line || "";
         if (line.startsWith("/") && !line.includes(" ")) {
           const commands = this.getSlashCommands().flatMap(c => [c.name, ...(c.aliases || [])]);
@@ -3666,6 +3675,9 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
           if (match) {
             const hint = match.slice(line.length);
             if (hint !== lastGhostText) {
+              if (lastGhostText) {
+                output.write(" ".repeat(lastGhostText.length) + "\u001b[" + lastGhostText.length + "D");
+              }
               output.write(pc.dim(hint) + "\u001b[" + hint.length + "D");
               lastGhostText = hint;
             }
