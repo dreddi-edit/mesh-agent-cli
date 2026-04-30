@@ -3653,14 +3653,15 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       // Handle Tab or Right arrow to complete the ghost text
       if (key.name === "tab" || (key.name === "right" && lastGhostText)) {
         if (lastGhostText) {
-          // Clear ghost text visually
-          output.write(" ".repeat(lastGhostText.length) + "\u001b[" + lastGhostText.length + "D");
           const textToWrite = lastGhostText;
           lastGhostText = "";
-          // Suppress ghost recalculation during programmatic write
           completing = true;
-          rl.write(textToWrite);
-          // Re-enable after all synthetic keypresses have been processed
+          // Directly set readline's line buffer and refresh — avoids cursor desync
+          // between raw output.write (ghost rendering) and readline's internal state.
+          const rlAny = rl as any;
+          rlAny.line = (rlAny.line || "") + textToWrite;
+          rlAny.cursor = rlAny.line.length;
+          rlAny._refreshLine();
           setTimeout(() => { completing = false; }, 20);
           return;
         }
