@@ -49,7 +49,10 @@ try {
   let lastError = null;
   for (let attempt = 1; attempt <= 6; attempt++) {
     try {
-      run("npm", ["install", "--global", "--no-audit", "--no-fund", spec], { timeoutMs: installTimeoutMs });
+      if (attempt > 1) {
+        run("npm", ["cache", "clean", "--force"], { timeoutMs: 30000, capture: true });
+      }
+      run("npm", ["install", "--global", "--no-audit", "--no-fund", "--prefer-online", spec], { timeoutMs: installTimeoutMs });
       installSuccess = true;
       break;
     } catch (err) {
