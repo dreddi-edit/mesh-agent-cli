@@ -3920,9 +3920,13 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
           // Directly set readline's line buffer and refresh — avoids cursor desync
           // between raw output.write (ghost rendering) and readline's internal state.
           const rlAny = rl as any;
-          rlAny.line = (rlAny.line || "") + textToWrite;
-          rlAny.cursor = rlAny.line.length;
-          rlAny._refreshLine();
+          if (typeof rlAny._refreshLine === "function") {
+            rlAny.line = (rlAny.line || "") + textToWrite;
+            rlAny.cursor = rlAny.line.length;
+            rlAny._refreshLine();
+          } else {
+            rl.write(textToWrite);
+          }
           setTimeout(() => { completing = false; }, 20);
           return;
         }
