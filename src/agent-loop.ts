@@ -2067,6 +2067,26 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     );
   }
 
+  private async printStatusLine(): Promise<void> {
+    const model = this.config.bedrock.modelId.split(".").pop()?.split(":")[0] || "unknown";
+    const historyLen = this.turnContextReports.length;
+    const tokens = this.sessionTokens.inputTokens + this.sessionTokens.outputTokens;
+    const tkStr = tokens > 1000 ? `${(tokens / 1000).toFixed(1)}k` : `${tokens}`;
+    let contextSizeStr = "0k";
+    
+    const lastReport = this.turnContextReports[this.turnContextReports.length - 1];
+    if (lastReport) {
+      const totalCtx = lastReport.totalTokens;
+      contextSizeStr = totalCtx > 1000 ? `${(totalCtx / 1000).toFixed(1)}k` : `${totalCtx}`;
+    }
+
+    output.write(
+      pc.dim(
+        `[Mesh] Model: ${pc.cyan(model)} | Turns: ${pc.cyan(historyLen)} | Context: ${pc.cyan(contextSizeStr)} | Usage: ${pc.yellow(tkStr)} tk`
+      ) + "\n"
+    );
+  }
+
   private async printStatus(): Promise<void> {
     const status = await this.backend.callTool("workspace.get_index_status", {}) as IndexStatus;
     const transcriptChars = this.estimateTranscriptChars();
