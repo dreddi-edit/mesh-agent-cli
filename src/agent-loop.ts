@@ -39,6 +39,7 @@ import { PersistedSessionCapsule, SessionCapsuleStore } from "./session-capsule-
 import { buildSessionManager, type SessionManager, type SerializedTurn } from "./session-manager.js";
 import { MeshPortal } from "./mesh-portal.js";
 import { MeshDoctorEngine } from "./doctor.js";
+import { AuthManager } from "./auth.js";
 import { ToolBackend, ToolDefinition } from "./tool-backend.js";
 import { VoiceDependencyStatus, VoiceManager } from "./voice-manager.js";
 
