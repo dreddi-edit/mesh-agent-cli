@@ -59,7 +59,10 @@ export interface NvidiaChatCompletionResponse {
 }
 
 export function isNvidiaHostedModel(modelId: string): boolean {
-  return /^[a-z0-9][a-z0-9-]*\/[a-z0-9][a-z0-9._-]*$/i.test(modelId.trim());
+  const trimmed = modelId.trim();
+  // Exclude Bedrock cross-region inference prefixes
+  if (trimmed.startsWith("us.anthropic.") || trimmed.startsWith("eu.anthropic.")) return false;
+  return /^[a-z0-9][a-z0-9-]*\/[a-z0-9][a-z0-9._-]*$/i.test(trimmed);
 }
 
 export function resolveNvidiaEndpoint(): string {

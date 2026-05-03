@@ -306,6 +306,8 @@ export class BedrockLlmClient {
     const isGoogle = isGoogleHostedModel(modelId);
     const provider = isGoogle ? "google" : "nvidia";
     
+    const nvidiaKey = process.env.NVIDIA_API_KEY || process.env.NVAPI_KEY;
+
     return nvidiaChatCompletion(
       {
         model: isGoogle ? modelId.replace(/^(google\/|xai\/)/, "") : modelId,
@@ -315,8 +317,8 @@ export class BedrockLlmClient {
         maxTokens: maxTokensOverride ?? this.options.maxTokens
       },
       {
-        apiKey: this.options.bearerToken,
-        baseUrl: this.options.endpointBase,
+        apiKey: nvidiaKey || this.options.bearerToken,
+        baseUrl: nvidiaKey ? undefined : this.options.endpointBase,
         abortSignal,
         extraHeaders: {
           "x-mesh-provider": provider,
@@ -328,22 +330,24 @@ export class BedrockLlmClient {
 
   private candidateModelIds(modelIdOverride?: string): string[] {
     const primary = modelIdOverride || this.options.modelId;
-    if (isNvidiaHostedModel(primary) || isGoogleHostedModel(primary)) {
-      return Array.from(new Set([
-        primary,
-        ...DEFAULT_NVIDIA_CHAT_MODELS,
-        ...(this.options.fallbackModelIds ?? []),
-        DEFAULT_MODEL_ID
-      ].filter(Boolean)));
+    const candidates = new Set<string>();
+    candidates.add(primary);
+
+    if (this.options.fallbackModelIds) {
+      for (const m of this.options.fallbackModelIds) candidates.add(m);
     }
-    return Array.from(new Set([
-      primary,
-      ...(this.options.fallbackModelIds ?? [])
-    ].filter(Boolean)));
+    candidates.add(DEFAULT_MODEL_ID);
+
+    // If we have an NVIDIA key, always add NVIDIA models as deep fallbacks to rescue 401s
+    if (process.env.NVIDIA_API_KEY || process.env.NVAPI_KEY) {
+      for (const m of DEFAULT_NVIDIA_CHAT_MODELS) candidates.add(m);
+    }
+
+    return Array.from(candidates).filter(Boolean);
   }
 
   private shouldTryFallback(status: number): boolean {
-    return status === 404 || status === 429 || status >= 500;
+    return status === 401 || status === 404 || status === 429 || status >= 500;
   }
 
   private isRetryableStatus(status: number): boolean {

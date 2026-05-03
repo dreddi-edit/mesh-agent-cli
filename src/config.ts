@@ -18,7 +18,8 @@ const DEFAULT_ENDPOINT_BASE = "https://mesh-llm.edgar-baumann.workers.dev";
 
 const LEGACY_DEFAULT_MODEL_IDS = new Set([
   "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-  "us.anthropic.claude-3-5-sonnet-20240620-v1:0"
+  "us.anthropic.claude-3-5-sonnet-20240620-v1:0",
+  "us.anthropic.claude-sonnet-4-6"
 ]);
 
 export function shortPathLabel(fullPath: string): string {
@@ -244,7 +245,12 @@ export async function loadConfig(): Promise<AppConfig> {
   return {
     bedrock: {
       endpointBase,
-      bearerToken: localSettings.customApiKey || userSettings.customApiKey || resolveBearerToken(),
+      bearerToken:
+        localSettings.customApiKey ||
+        userSettings.customApiKey ||
+        resolveBearerToken() ||
+        process.env.NVIDIA_API_KEY ||
+        process.env.NVAPI_KEY,
       modelId: configuredModelId,
       fallbackModelIds: envFallbackModelIds.length > 0
         ? envFallbackModelIds
