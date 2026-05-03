@@ -34,33 +34,34 @@ mesh init
 
 Mesh is built around autonomous workflows and safety. Here are the features that make Mesh fundamentally different:
 
-### 1. The Ghost Engineer (Timelines)
+### 1. High-Density AI Brain (`.mesh/`)
+Mesh refactors your project metadata into a high-density, token-optimized data format. It strips whitespaces and uses compact, structural notation (e.g., adjacency dependency graphs) to minimize token consumption and maximize LLM reasoning precision.
+
+### 2. Zero-Config NVIDIA RAG
+High-precision semantic search is enabled by default. Mesh uses **NVIDIA nv-embedcode** models for deep code indexing. Requests are securely proxied through the Mesh LLM Gateway, providing everyone with elite retrieval performance without needing a personal API key.
+
+### 3. The Ghost Engineer (Timelines)
 Mesh doesn't blindly edit your active files. It creates an invisible "Ghost Timeline" (an isolated git worktree), writes the code there, runs your tests (`npm test`, `tsc`), fixes any errors autonomously, and only promotes the code to your main branch when it's 100% green. 
 
-### 2. Issue Autopilot (`/autopilot`)
+### 4. Issue Autopilot (`/autopilot`)
 From ticket to verified Pull Request in one command. Feed Mesh a GitHub/Linear URL. It reads the issue, finds the relevant files, writes the fix in a Ghost Timeline, verifies it, and prepares the PR.
 
-### 3. Cross-Model Tribunal (`/tribunal`)
+### 5. Cross-Model Tribunal (`/tribunal`)
 For hard architectural decisions or complex bugs. Mesh summons three distinct AI personas (Correctness, Performance, Security). They debate the problem, critique each other's solutions, and synthesize a dominant, deeply vetted architecture plan.
 
-### 4. Cognitive Session Resurrection (`/resurrect`)
+### 6. Cognitive Session Resurrection (`/resurrect`)
 Stop losing context over the weekend. `mesh /resurrect capture` saves your exact mental state: open files, the goal, failed approaches, and open questions. On Monday, run `/resurrect` and pick up exactly where your brain left off.
-
-### 5. Semantic Contract Sheriff (`/sheriff`)
-Protects against behavioral drift. The Sheriff fingerprints the *semantic meaning* of your modules. If a refactor keeps the tests green but accidentally changes the module's core purpose, the Sheriff throws a critical alert.
-
-### 6. Causal Autopsy (`/causal`)
-When a test fails, Mesh doesn't just read the stack trace. It reconstructs the causal chain by looking at the error, recent git commits, and config changes to find the *actual* root cause.
 
 ## Golden Path Commands
 
-Inside an interactive `mesh` session, you can use conversational prompts or specific slash commands:
+Inside an interactive `mesh` session:
 
 - `/start` - Initial repo briefing and health check.
-- `/change <prompt>` - Scope a narrow edit, apply a surgical patch, run verification, and get a structured risk report.
-- `/index` - Build the persistent local code-intelligence index.
-- `/company query <question>` - Ask the codebase with grounded citations and recommended files.
-- `/doctor` - Run system health checks (Auth, API connectivity, environment).
+- `/change <prompt>` - Scope a narrow edit, apply a surgical patch, and get a structured risk report.
+- `/index` - Build the high-density local code-intelligence brain.
+- `/company query <question>` - Query the codebase brain with NVIDIA-powered semantic search.
+- `/doctor` - Run system diagnostics (Auth, NVIDIA RAG connectivity, environment).
+- `/model` - Switch between Claude 4.6 Sonnet (default), Opus, or specialized NVIDIA models.
 
 ## Privacy & Security
 
