@@ -399,19 +399,32 @@ export class MeshDoctorEngine {
         };
       }
 
+      const header = JSON.parse(Buffer.from(parts[0], "base64").toString());
       const payload = JSON.parse(Buffer.from(parts[1], "base64").toString());
       const exp = payload.exp ? new Date(payload.exp * 1000) : null;
       const isExpired = exp ? exp < new Date() : false;
 
+      const details = [
+        `User ID: ${payload.sub || "unknown"}`,
+        `Expires: ${exp ? exp.toLocaleString() : "never"}`,
+        `Algorithm: ${header.alg || "unknown"}`
+      ];
+
+      let status: "pass" | "warn" | "fail" = isExpired ? "fail" : "pass";
+      let message = isExpired ? "Your session token has expired." : "Authentication token is valid.";
+
+      if (!isExpired && header.alg !== "HS256") {
+        status = "warn";
+        message = `Token uses ${header.alg} algorithm.`;
+        details.push("⚠️  The default Mesh proxy currently only supports HS256.");
+      }
+
       return {
         id: "auth",
         title: "Authentication",
-        status: isExpired ? "fail" : "pass",
-        message: isExpired ? "Your session token has expired." : "Authentication token is valid.",
-        details: [
-          `User ID: ${payload.sub || "unknown"}`,
-          `Expires: ${exp ? exp.toLocaleString() : "never"}`
-        ]
+        status,
+        message,
+        details
       };
     } catch {
       return {
@@ -466,6 +479,9 @@ export class MeshDoctorEngine {
         const err = await bedrockRes.text();
         details.push(`❌ Bedrock (Claude): Failed (${bedrockRes.status}) - ${err.slice(0, 100)}`);
         status = "warn";
+        if (bedrockRes.status === 401 && err.includes("Invalid JWT")) {
+          details.push("💡 Hint: Your token algorithm might mismatch the worker's expected HS256 secret.");
+        }
       }
     } catch (err) {
       details.push(`❌ Bedrock (Claude): Error - ${(err as Error).message}`);
@@ -493,6 +509,9 @@ export class MeshDoctorEngine {
         const err = await nvidiaRes.text();
         details.push(`❌ NVIDIA (Minimax/Llama): Failed (${nvidiaRes.status}) - ${err.slice(0, 100)}`);
         status = "warn";
+        if (nvidiaRes.status === 401 && err.includes("Invalid JWT")) {
+          details.push("💡 Hint: Your token algorithm might mismatch the worker's expected HS256 secret.");
+        }
       }
     } catch (err) {
       details.push(`❌ NVIDIA (Minimax/Llama): Error - ${(err as Error).message}`);

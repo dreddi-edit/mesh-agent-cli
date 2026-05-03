@@ -42,9 +42,14 @@ const OPENAI_EMBED_PATH = "/embeddings";
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
+    const url = new URL(req.url);
     const brainResponse = await handleBrainRequest(req);
     if (brainResponse) {
       return brainResponse;
+    }
+
+    if (url.pathname === "/brain/health" && req.method === "GET") {
+      return json({ ok: true, status: "healthy" });
     }
 
     if (req.method === "OPTIONS") {
@@ -62,14 +67,20 @@ export default {
 
     const token = authHeader.split(" ")[1];
     const payload = await verifySupabaseJwt(token, env.SUPABASE_JWT_SECRET);
-    if (!payload || !payload.sub) {
+    if (!payload || (payload._error !== "unsupported_algorithm" && !payload.sub)) {
       return json({ error: "unauthorized", hint: "Invalid JWT" }, 401);
+    }
+
+    if (payload._error === "unsupported_algorithm") {
+      return json({ 
+        error: "unauthorized", 
+        hint: `Unsupported JWT algorithm: ${payload.alg}. The worker currently only supports HS256.` 
+      }, 401);
     }
 
     const userId = payload.sub;
     const plan = payload.app_metadata?.plan || "free";
 
-    const url = new URL(req.url);
     const converseMatch = CONVERSE_PATH_RE.exec(url.pathname);
     const isOpenAiChat = url.pathname === OPENAI_CHAT_PATH;
     const isOpenAiEmbed = url.pathname === OPENAI_EMBED_PATH;
@@ -198,6 +209,12 @@ async function verifySupabaseJwt(token: string, secret: string): Promise<any> {
   if (!headerB64 || !payloadB64 || !signatureB64) return null;
 
   try {
+    const header = JSON.parse(atob(headerB64.replace(/-/g, "+").replace(/_/g, "/")));
+    if (header.alg !== "HS256") {
+      console.error(`Unsupported JWT algorithm: ${header.alg}. Worker only supports HS256.`);
+      return { _error: "unsupported_algorithm", alg: header.alg };
+    }
+
     const encoder = new TextEncoder();
     const data = encoder.encode(`${headerB64}.${payloadB64}`);
     
