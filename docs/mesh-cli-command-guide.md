@@ -1,6 +1,6 @@
 # Mesh CLI Command Guide
 
-Stand: 0.2.92
+Stand: 0.3.10
 
 Diese Datei erklärt die Slash-Commands aus `/help`, was Mesh CLI grundsätzlich kann, wie die Funktionen intern umgesetzt sind, und welche Teile noch experimentell oder nicht vollständig production-level sind.
 
@@ -39,6 +39,7 @@ Der praktische Vorteil: weniger blindes Editieren, mehr reproduzierbare Evidenz,
 | Command | Was er macht | Wie es funktioniert | Code proof |
 |---|---|---|---|
 | `/help`, `/commands` | Zeigt die Slash-Command-Liste. | Liest die statische Command-Registry und rendert Usage/Description. | `src/agent-loop.ts#getSlashCommands`, `printHelp` |
+| `/start` | Führt den First-User Golden Path aus. | Läuft Doctor, optional sichere Fixes, Index, Status und Repo-Briefing. | `src/agent-loop.ts#runStart`, `MeshDoctorEngine` |
 | `/status` | Zeigt Runtime-, Session-, Modell-, Token-, Git- und Indexstatus. | Kombiniert lokale Agent-State-Daten mit Backend-Tools wie Index/Git/Sync. | `src/agent-loop.ts#printStatus`, `workspace.get_index_status`, `workspace.git_status` |
 | `/capsule`, `/memory` | Verwaltet die Session Capsule. | Zeigt, komprimiert, leert oder exportiert die gespeicherte Session-Zusammenfassung. | `src/agent-loop.ts#handleCapsuleCommand`, `src/session-capsule-store.ts` |
 | `/index` | Re-indexiert den Workspace. | Läuft über WorkspaceIndex und erzeugt File-Capsules plus Repo-Intelligence. | `src/agent-loop.ts#runIndexing`, `src/workspace-index.ts`, `src/cache-manager.ts` |
@@ -48,6 +49,7 @@ Der praktische Vorteil: weniger blindes Editieren, mehr reproduzierbare Evidenz,
 | `/repair` | Zeigt Predictive Repair Queue. | Sammelt Diagnostics und schlägt reparierbare Fehler/Tasks vor. | `workspace.predictive_repair`, `src/local-tools.ts` |
 | `/daemon` | Kontrolliert den Mesh Background Daemon. | Delegiert start/status/digest/stop an das Daemon-Tool. | `workspace.daemon`, `src/daemon.ts`, `src/daemon-protocol.ts` |
 | `/issues` | Issue-to-PR Pipeline für GitHub/Linear/Jira. | Scannt Issues und erzeugt PR-orientierte Arbeitsentwürfe. | `workspace.issue_pipeline`, `src/integrations/issues/*` |
+| `/change` | Führt eine kleine, verifizierte Codeänderung aus. | Scopet wahrscheinliche Dateien, instruiert den Agent auf minimalen Patch und führt erkannte Verification aus. | `src/agent-loop.ts#runChange`, `workspace.ask_codebase` |
 | `/chatops` | Slack/Discord Co-Engineer Flow. | Nimmt ChatOps-Kontext, erstellt Investigation/Approval-Status und PR-Draft. | `workspace.chatops`, `src/integrations/chatops/manager.ts` |
 | `/production` | Zeigt Produktionssignale und Top-Regressions. | Liest/refreshes `.mesh/production-signals.json` aus Telemetry-Connectors. | `workspace.production_status`, `src/integrations/telemetry/*` |
 | `/replay` | Replay einer Production Trace. | Rekonstruiert Trace/Sentry Event und prüft Divergenz über Timeline/Runtime-Daten. | `runtime.replay_trace`, `src/runtime/replay.ts` |

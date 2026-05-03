@@ -6,8 +6,11 @@
 
 - Added `npm run verify:release` as the required publish gate.
 - Added `npm run smoke:release` for isolated tarball install checks.
+- Added `npm run smoke:published` for isolated global-prefix verification of the published package.
 - Added `npm run publish:dry-run` for npm release rehearsal.
 - Added `/doctor` checks for workspace writability, Mesh state path, release guardrails, and network timeouts.
+- Added `mesh init` and `/start` for the first-user golden path.
+- Added `/change <small goal>` for narrow verified code changes.
 - Added Go-Live, Privacy, and Support documentation under `docs/`.
 
 ### Changed
@@ -16,6 +19,7 @@
 - Background resolver is opt-in via `MESH_ENABLE_BACKGROUND_RESOLVER=1`.
 - Watchers are no longer recursive across the full repo and can be disabled with `MESH_DISABLE_WATCHERS=1`.
 - Test runner disables watchers by default for deterministic CI/local runs.
+- `/doctor fix` applies safe local setup repairs while leaving shell, Git, and auth changes manual.
 
 ### Fixed
 

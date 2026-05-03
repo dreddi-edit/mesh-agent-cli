@@ -29,7 +29,10 @@ Then verify:
 ```bash
 npm view @edgarelmo/mesh-agent-cli version
 npx -p @edgarelmo/mesh-agent-cli mesh --version
+npm run smoke:published
 ```
+
+`npm run smoke:published` installs the published package into an isolated temporary global prefix, then verifies `mesh --version` and `mesh --help` without touching the user's real global npm prefix.
 
 ## Rollback
 
@@ -46,5 +49,5 @@ If a bad release exposes a severe issue, publish a patch release with the fix an
 
 - Create a Git tag matching the published version.
 - Record the published package integrity from npm output.
-- Run one clean `npx` install from the published package.
+- Run one clean published install smoke from the published package.
 - Update the private-alpha user list with the exact version they should install.

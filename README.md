@@ -50,17 +50,17 @@ Add `$(npm config get prefix)/bin` to your shell `PATH` if the binary exists but
 
 ```bash
 cd path/to/your/project
-mesh
+mesh init
 ```
 
-Recommended first-run path:
+`mesh init` runs the first-user golden path: diagnostics with safe local fixes, workspace indexing, status, and a repo briefing.
+
+Inside an interactive `mesh` session, the equivalent path is:
 
 ```text
-/doctor
-/index
-/status
+/start
 explain the main runtime path with citations
-find the failing test and propose the smallest fix
+/change find the failing test and patch the smallest fix
 ```
 
 Then ask for real engineering work:
@@ -82,9 +82,10 @@ Before onboarding a new user or workspace, run:
 npm run verify:release
 mesh --version
 mesh --help
+mesh init
 ```
 
-Inside the target repo, run `/doctor` first. It checks local tooling, workspace write access, state/index paths, model endpoint/auth, provider health, and whether costly or experimental background features are enabled.
+Inside the target repo, run `mesh init` or `/start` first. `/doctor fix` applies safe local repairs such as creating Mesh state directories and workspace config; destructive or user-shell changes remain manual.
 
 The full pre-release checklist lives in [docs/go-live.md](docs/go-live.md). Privacy and support guidance live in [docs/privacy.md](docs/privacy.md) and [docs/support.md](docs/support.md).
 
@@ -103,6 +104,7 @@ Mesh builds a persistent understanding of your repository: file capsules, symbol
 
 Common commands:
 
+- `/start` runs the first-user path: doctor, index, status, and repo briefing.
 - `/index` re-indexes the workspace.
 - `/company build` builds the durable Company Codebase Brain with cited repo knowledge, rules, risks, decisions, and verification memory.
 - `/company query <question>` asks the Company Brain with grounded citations and recommended files.
@@ -129,6 +131,7 @@ Mesh can edit real files, but it is designed around verification. Risky changes 
 
 Common capabilities:
 
+- `/change <small goal>` scopes one narrow edit, applies the smallest safe patch, runs detected verification when available, and summarizes files, verification, risk, and next action.
 - isolated timeline creation and verification
 - patch validation and surgical edits
 - command safety checks for destructive shell patterns

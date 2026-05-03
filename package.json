@@ -5,6 +5,9 @@
   "type": "module",
   "description": "Mesh terminal agent CLI. Zero-config: ships with a shared Mesh LLM proxy so no AWS credentials are needed.",
   "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/dreddi-edit/mesh-agent-cli.git"
@@ -21,6 +24,7 @@
     "test": "node scripts/run-tests.cjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "smoke:release": "node scripts/release-smoke.cjs",
+    "smoke:published": "node scripts/published-install-smoke.cjs",
     "verify:release": "npm run typecheck && npm run build && npm run test && npm run smoke:release",
     "publish:dry-run": "npm publish --dry-run --access public",
     "eval": "tsx scripts/run-eval.ts",

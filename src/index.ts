@@ -29,6 +29,8 @@ function printHelp(): void {
       "",
       "Usage:",
       "  mesh                         start interactive agent",
+      "  mesh init                    run first-run setup and repo briefing",
+      "  mesh doctor [fix]            run diagnostics and optional safe fixes",
       "  mesh \"<task>\"                 run one task",
       "  mesh daemon <start|status|digest|stop>",
       "  mesh logout",
@@ -137,6 +139,15 @@ async function main(): Promise<void> {
     installSignalHandlers();
 
     const agent = new AgentLoop(config, backend);
+    if (firstArg === "init") {
+      await agent.runInit(args.slice(1));
+      return;
+    }
+    if (firstArg === "doctor") {
+      await agent.runDoctorCli(args.slice(1));
+      return;
+    }
+
     const prompt = process.argv.slice(2).join(" ");
     await agent.runCli(prompt);
   } finally {

@@ -74,7 +74,7 @@ try {
   if (!/^\d+\.\d+\.\d+/.test(version)) {
     throw new Error(`Unexpected mesh --version output: ${version}`);
   }
-  if (!help.includes("Mesh CLI") || !help.includes("Usage:")) {
+  if (!help.includes("Mesh CLI") || !help.includes("Usage:") || !help.includes("mesh init") || !help.includes("mesh doctor")) {
     throw new Error("mesh --help output is missing expected CLI help text.");
   }
 

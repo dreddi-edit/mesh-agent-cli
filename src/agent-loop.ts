@@ -1245,6 +1245,19 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     }
   }
 
+  public async runInit(args: string[] = []): Promise<void> {
+    this.llm.logEndpoint();
+    await this.checkInit();
+    this.sessionCapsule = await this.sessionStore.load();
+    output.write(this.themeColor(`\n${pc.bold("Mesh First-Run Setup")}\n`));
+    await this.runStart(args.includes("--no-fix") ? [] : ["fix"]);
+  }
+
+  public async runDoctorCli(args: string[] = []): Promise<void> {
+    this.llm.logEndpoint();
+    await this.runDoctor(args);
+  }
+
   public async runHeadlessTurn(userInput: string, hooks?: RunHooks): Promise<HeadlessTurnResult> {
     await this.initializeHeadlessSession();
     const trimmed = userInput.trim();
@@ -2481,6 +2494,89 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     }
   }
 
+  private async getWorkspaceIndexStatus(): Promise<any | null> {
+    try {
+      return await this.backend.callTool("workspace.get_index_status", {}) as any;
+    } catch {
+      return null;
+    }
+  }
+
+  private async runStart(args: string[] = []): Promise<void> {
+    const wantsFix = args.includes("fix") || args.includes("--fix");
+    const forceIndex = args.includes("reindex") || args.includes("--reindex");
+
+    output.write(this.themeColor(`\n${pc.bold("Mesh Start")}\n`));
+    await this.runDoctor(wantsFix ? ["brief", "fix"] : ["brief"]);
+
+    const beforeStatus = await this.getWorkspaceIndexStatus();
+    const beforePercent = Number.parseFloat(String(beforeStatus?.percent ?? "0"));
+    if (forceIndex || !Number.isFinite(beforePercent) || beforePercent < 100) {
+      await this.runIndexing();
+    } else {
+      output.write(pc.green(`Workspace index already fresh enough (${beforeStatus?.percent ?? "100"}%).\n`));
+    }
+
+    await this.printStatus();
+    await this.printFirstRunRepoSummary();
+  }
+
+  private async printFirstRunRepoSummary(): Promise<void> {
+    const spinner = ora({ text: "Building first repo briefing...", color: "cyan" }).start();
+    try {
+      const result: any = await this.backend.callTool("workspace.ask_codebase", {
+        query: "main runtime path architecture entrypoints tests verification",
+        mode: "runtime-path",
+        limit: 5
+      });
+      spinner.succeed(pc.cyan("First repo briefing ready."));
+      const matches = Array.isArray(result.results) ? result.results.slice(0, 5) : [];
+      if (matches.length === 0) {
+        output.write(pc.yellow("\nNo strong codebase matches yet. Ask a normal repo question or run /index --rebuild after adding files.\n"));
+      } else {
+        output.write([
+          "",
+          pc.bold("Best starting points"),
+          ...matches.map((entry: any, index: number) => {
+            const file = entry.file ?? entry.path ?? "unknown";
+            const purpose = previewText(String(entry.purpose ?? entry.snippet ?? ""), 110);
+            return `${index + 1}. ${pc.cyan(file)}${purpose ? pc.dim(` - ${purpose}`) : ""}`;
+          }),
+          ""
+        ].join("\n"));
+      }
+
+      const verify = await this.detectVerificationCommand();
+      output.write([
+        pc.bold("Recommended next commands"),
+        `${pc.magenta("/change")} fix the smallest failing test or implement a tiny improvement`,
+        `${pc.magenta("mesh \"explain the main runtime path with citations\"")}`,
+        verify ? `${pc.magenta(verify)} ${pc.dim("(detected verification command)")}` : pc.dim("No package verification command detected yet."),
+        ""
+      ].join("\n"));
+    } catch (error) {
+      spinner.fail(pc.red(`First repo briefing failed: ${(error as Error).message}`));
+      output.write(pc.dim("You can still ask a normal repo question, for example: explain the main runtime path with citations\n"));
+    }
+  }
+
+  private async detectVerificationCommand(): Promise<string | null> {
+    const packagePath = path.join(this.config.agent.workspaceRoot, "package.json");
+    try {
+      const raw = await fs.readFile(packagePath, "utf8");
+      const parsed = JSON.parse(raw) as { scripts?: Record<string, string> };
+      const scripts = parsed.scripts ?? {};
+      const usableTest = typeof scripts.test === "string" && !/no test specified|exit 1/i.test(scripts.test);
+      if (usableTest) return "npm test";
+      if (typeof scripts.typecheck === "string") return "npm run typecheck";
+      if (typeof scripts.build === "string") return "npm run build";
+      if (typeof scripts.lint === "string") return "npm run lint";
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
   private async distillProjectBrain(): Promise<void> {
     const spinner = ora({ text: "Distilling Session into Project Brain...", color: "magenta" }).start();
     try {
@@ -2819,6 +2915,118 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       ].join("\n"));
     } catch (error) {
       spinner.fail(pc.red(`Issue Autopilot failed: ${(error as Error).message}`));
+    }
+  }
+
+  private async runChange(args: string[], rl: readline.Interface): Promise<void> {
+    const goal = args.join(" ").trim();
+    if (!goal) {
+      output.write(pc.yellow("\nUsage: /change <small goal>\n"));
+      output.write(pc.dim("Example: /change fix the failing auth test\n"));
+      return;
+    }
+
+    const verifyCommand = await this.detectVerificationCommand();
+    const impactSpinner = ora({ text: "Scoping narrow change...", color: "yellow" }).start();
+    try {
+      const impact: any = await this.backend.callTool("workspace.ask_codebase", {
+        query: goal,
+        mode: "edit-impact",
+        limit: 6
+      });
+      const likelyFiles = Array.isArray(impact.results)
+        ? impact.results.slice(0, 6).map((entry: any) => entry.file ?? entry.path).filter(Boolean)
+        : [];
+      impactSpinner.succeed(pc.yellow("Change scope prepared."));
+      if (likelyFiles.length > 0) {
+        output.write([
+          "",
+          pc.bold("Likely files"),
+          ...likelyFiles.map((file: string) => `${pc.yellow("•")} ${file}`),
+          ""
+        ].join("\n"));
+      }
+    } catch (error) {
+      impactSpinner.warn(pc.yellow(`Scope lookup skipped: ${(error as Error).message}`));
+    }
+
+    const changePrompt = [
+      "Execute Mesh /change for this narrow goal:",
+      goal,
+      "",
+      "Hard constraints:",
+      "- Make the smallest safe code change that satisfies the goal.",
+      "- Prefer reading indexed/capsule context before raw files.",
+      "- Inspect impact before editing shared symbols.",
+      "- Do not publish, tag, push, create a PR, or run destructive commands.",
+      "- If the change is risky or multi-file, create a timeline first and verify there before touching the main workspace.",
+      "- After editing, run the detected verification command if it is available.",
+      verifyCommand ? `- Detected verification command: ${verifyCommand}` : "- No verification command was detected; explain what verification was skipped and why.",
+      "- Finish with exactly: changed files, verification result, residual risk, next action."
+    ].join("\n");
+
+    const spinner = this.useAnsi ? ora({ text: "Applying narrow change...", color: "cyan", stream: output }).start() : undefined;
+    let streamed = false;
+    try {
+      this.resetToolSummary();
+      const answer = await this.runSingleTurn(changePrompt, {
+        onToolStart: (wireName, inputValue, step, maxSteps) => {
+          if (spinner) {
+            spinner.text = `${pc.dim(`[${step + 1}/${maxSteps}]`)} ${pc.cyan(wireName)} ${pc.dim(formatArgsPreview(inputValue))}`;
+          }
+          this.renderToolEvent("start", wireName, formatArgsPreview(inputValue));
+        },
+        onToolEnd: (wireName, ok, resultPreview) => {
+          if (spinner) spinner.text = ok ? `done ${pc.cyan(wireName)}` : `failed ${pc.cyan(wireName)}`;
+          this.renderToolEvent(ok ? "success" : "error", wireName, resultPreview);
+        },
+        onCommandChunk: (chunk) => {
+          if (spinner) {
+            spinner.stop();
+            spinner.clear();
+          }
+          output.write(chunk);
+        },
+        onDelta: (delta) => {
+          if (spinner) {
+            spinner.stop();
+            spinner.clear();
+          }
+          if (!streamed) {
+            streamed = true;
+            output.write("\n" + this.themeColor(pc.bold("change")) + pc.dim(" › ") + "\n");
+          }
+          output.write(delta);
+        },
+        askPermission: async (message) => {
+          if (spinner) spinner.stop();
+          const confirm = new Confirm({
+            name: "approve",
+            message,
+            initial: false,
+            stdin: input,
+            stdout: output
+          });
+          const approved = Boolean(await confirm.run().catch(() => false));
+          if (spinner) spinner.start();
+          return approved;
+        }
+      });
+      if (!streamed && answer) {
+        this.renderAssistantTurn(answer);
+      } else if (streamed) {
+        output.write("\n");
+      }
+      this.printToolSummary();
+      void rl;
+    } catch (error) {
+      if (spinner) spinner.fail(pc.red(`Change failed: ${(error as Error).message}`));
+      else output.write(pc.red(`\nChange failed: ${(error as Error).message}\n`));
+    } finally {
+      if (spinner) {
+        spinner.stop();
+        spinner.clear();
+      }
     }
   }
 
@@ -3824,9 +4032,9 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     }
 
     const groups: Array<{ title: string; names: string[] }> = [
-      { title: "Start Here", names: ["/status", "/index", "/doctor", "/dashboard"] },
+      { title: "Start Here", names: ["/start", "/status", "/index", "/doctor", "/dashboard"] },
       { title: "Ask About This Repo", names: ["/company", "/twin", "/repair", "/causal", "/lab", "/learn"] },
-      { title: "Build And Change", names: ["/autopilot", "/intent", "/fork", "/ghost", "/fix", "/sheriff"] },
+      { title: "Build And Change", names: ["/change", "/autopilot", "/intent", "/fork", "/ghost", "/fix", "/sheriff"] },
       { title: "UI And Browser", names: ["/inspect", "/stop-inspect", "/preview"] },
       { title: "Session And Settings", names: ["/model", "/capsule", "/compact", "/approvals", "/steps", "/setup", "/cost", "/undo", "/clear", "/exit"] },
       { title: "Integrations And Advanced", names: ["/distill", "/synthesize", "/issues", "/chatops", "/production", "/replay", "/bisect", "/whatif", "/audit", "/brain", "/daemon", "/tribunal", "/resurrect", "/hologram", "/entangle", "/sync", "/voice"] }
@@ -3852,6 +4060,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
 
   private commandExamples(commandName: string): string[] {
     const examples: Record<string, string[]> = {
+      "/start": ["/start", "/start fix", "/start reindex"],
       "/status": ["/status"],
       "/index": ["/index"],
       "/dashboard": ["/dashboard"],
@@ -3859,6 +4068,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       "/repair": ["/repair", "/repair status", "/repair clear"],
       "/company": ["/company build", "/company query auth flow", "/company record API clients must validate env tokens"],
       "/autopilot": ["/autopilot plan https://github.com/org/repo/issues/123", "/autopilot run fix the failing auth test", "/autopilot pr https://github.com/org/repo/issues/123"],
+      "/change": ["/change fix the failing auth test", "/change add validation for empty project names"],
       "/causal": ["/causal", "/causal query why is auth risky?"],
       "/lab": ["/lab", "/lab status"],
       "/inspect": ["/inspect", "/inspect http://localhost:5173"],
@@ -3868,7 +4078,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       "/ghost": ["/ghost learn", "/ghost predict add billing settings"],
       "/fork": ["/fork plan migrate dashboard to React"],
       "/sheriff": ["/sheriff scan", "/sheriff verify"],
-      "/doctor": ["/doctor", "/doctor full", "/doctor voice"]
+      "/doctor": ["/doctor", "/doctor fix", "/doctor full", "/doctor voice"]
     };
     return examples[commandName] ?? [this.getSlashCommands().find((command) => command.name === commandName)?.usage ?? commandName];
   }
@@ -3876,6 +4086,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
   private getSlashCommands(): SlashCommand[] {
     return [
       { name: "/help", aliases: ["/commands"], usage: "/help [command]", description: "show practical command groups and examples" },
+      { name: "/start", usage: "/start [fix|reindex]", description: "run the first-user golden path: doctor, index, status, repo briefing" },
       { name: "/status", usage: "/status", description: "show runtime, session, and index state" },
       { name: "/capsule", aliases: ["/memory"], usage: "/capsule [show|compact|clear|export [path]|stats|path]", description: "inspect or manage session capsule" },
       { name: "/index", usage: "/index", description: "re-index workspace and generate file capsules" },
@@ -3887,6 +4098,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       { name: "/daemon", usage: "/daemon [start|status|digest|stop]", description: "control Mesh background daemon mode" },
       { name: "/issues", usage: "/issues [scan|status] [provider]", description: "run issue-to-PR pipeline for GitHub/Linear/Jira tickets" },
       { name: "/autopilot", usage: "/autopilot [status|plan|run|pr] <issueUrl|manual title>", description: "turn an issue into a verified timeline patch, proof bundle, and optional PR" },
+      { name: "/change", usage: "/change <small goal>", description: "make one narrow code change, run detected verification, and summarize the diff" },
       { name: "/chatops", usage: "/chatops [investigate|approve|status] [platform] [message|threadId]", description: "run Slack/Discord co-engineer investigation and approval flow" },
       { name: "/production", usage: "/production [refresh|status|audit|gate|review] [intent]", description: "show telemetry or run the production readiness gate" },
       { name: "/replay", usage: "/replay <traceId|sentryEventId> [commitRange]", description: "replay a production trace and detect divergence/introducing commit" },
@@ -3916,7 +4128,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       { name: "/undo", usage: "/undo", description: "revert the last file change made by the agent" },
       { name: "/steps", usage: "/steps [<n>|reset]", description: "set max tool steps for this session" },
 
-      { name: "/doctor", usage: "/doctor [brief|full|voice [fix]]", description: "show runtime diagnostics" },
+      { name: "/doctor", usage: "/doctor [brief|full|fix|voice [fix]]", description: "show runtime diagnostics and optional safe auto-fixes" },
       { name: "/compact", usage: "/compact", description: "compress transcript into session capsule" },
       { name: "/clear", usage: "/clear", description: "clear terminal UI" },
       { name: "/voice", usage: "/voice [on|off|setup]", description: "toggle or configure Speech-to-Speech mode" },
@@ -3940,9 +4152,9 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     const inputCmd = rawCmd.toLowerCase();
 
     const commandList = [
-      "/help", "/status", "/index", "/dashboard", "/sync", "/setup", "/clear",
+      "/help", "/start", "/status", "/index", "/dashboard", "/sync", "/setup", "/clear",
       "/model", "/cost", "/compact", "/capsule", "/memory", "/approvals", "/steps", "/undo",
-      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/company", "/company-brain", "/twin", "/repair", "/daemon", "/issues", "/autopilot", "/chatops", "/production", "/replay", "/bisect", "/whatif", "/audit", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/stop-inspect", "/preview", "/fix",
+      "/doctor", "/exit", "/quit", "/reset", "/debug", "/commands", "/voice", "/distill", "/synthesize", "/company", "/company-brain", "/twin", "/repair", "/daemon", "/issues", "/autopilot", "/change", "/chatops", "/production", "/replay", "/bisect", "/whatif", "/audit", "/brain", "/learn", "/intent", "/causal", "/lab", "/fork", "/ghost", "/hologram", "/entangle", "/inspect", "/stop-inspect", "/preview", "/fix",
       "/tribunal", "/resurrect", "/sheriff"
     ];
     // Priority 1: Exact match
@@ -3988,6 +4200,9 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       case "/commands":
         this.printHelp(args);
         return { wasHandled: true, shouldExit: false };
+      case "/start":
+        await this.runStart(args);
+        return { wasHandled: true, shouldExit: false };
       case "/status":
         await this.printStatus();
         return { wasHandled: true, shouldExit: false };
@@ -4018,6 +4233,9 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
         return { wasHandled: true, shouldExit: false };
       case "/autopilot":
         await this.runIssueAutopilot(args);
+        return { wasHandled: true, shouldExit: false };
+      case "/change":
+        await this.runChange(args, rl);
         return { wasHandled: true, shouldExit: false };
       case "/chatops":
         await this.runChatops(args);
@@ -4332,6 +4550,8 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     const capsuleChoices = ["show", "compact", "clear", "export", "stats", "path"];
     const approvalsChoices = ["status", "on", "off"];
     const doctorChoices = ["brief", "full", "voice", "fix"];
+    const startChoices = ["fix", "reindex"];
+    const changeChoices = ["fix", "add", "remove", "refactor", "validate"];
     const setupChoices = ["noninteractive", "model=", "cloud=", "theme=", "key=", "endpoint=", "voice_lang=", "voice_speed=", "voice_voice="];
     const voiceChoices = ["on", "off", "setup"];
     const twinChoices = ["build", "read", "status"];
@@ -4356,6 +4576,12 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
         break;
       case "/doctor":
         pool = doctorChoices;
+        break;
+      case "/start":
+        pool = startChoices;
+        break;
+      case "/change":
+        pool = changeChoices;
         break;
       case "/setup":
         pool = setupChoices;
@@ -4611,17 +4837,43 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     
     try {
       const doctor = new MeshDoctorEngine(this.config);
-      const report = await doctor.run();
+      let report = await doctor.run();
+      let fixResults: Awaited<ReturnType<MeshDoctorEngine["autoFix"]>> = [];
+      if (wantsFix) {
+        spinner.text = "Applying safe doctor fixes...";
+        fixResults = await doctor.autoFix();
+        report = await doctor.run();
+      }
       spinner.stop();
+
+      if (fixResults.length > 0) {
+        output.write(pc.bold("\nApplied safe fixes\n"));
+        for (const fix of fixResults) {
+          const icon = fix.ok ? pc.green("✔") : pc.red("✘");
+          output.write(`${icon} ${fix.message}\n`);
+          for (const detail of fix.details ?? []) {
+            output.write(`   ${pc.dim(detail)}\n`);
+          }
+        }
+        output.write("\n");
+      }
 
       for (const check of report.checks) {
         const icon = check.status === "pass" ? pc.green("✔") : check.status === "warn" ? pc.yellow("⚠") : pc.red("✘");
         const titleColor = check.status === "pass" ? pc.white : check.status === "warn" ? pc.yellow : pc.red;
         
         output.write(`${icon} ${pc.bold(titleColor(check.title.padEnd(25)))} ${check.message}\n`);
-        if (check.details && check.details.length > 0) {
+        if ((isFull || mode === "brief" || check.status !== "pass") && check.details && check.details.length > 0) {
           for (const detail of check.details) {
             output.write(`   ${pc.dim(detail)}\n`);
+          }
+        }
+        const actionableFixes = (check.fixes ?? []).filter((fix) => !fix.automatic || check.status !== "pass");
+        if (actionableFixes.length > 0 && check.status !== "pass") {
+          for (const fix of actionableFixes) {
+            const label = fix.automatic ? "auto" : "manual";
+            output.write(`   ${pc.dim(`fix (${label}): ${fix.title} - ${fix.description}`)}\n`);
+            if (fix.command) output.write(`   ${pc.dim(`command: ${fix.command}`)}\n`);
           }
         }
         output.write("\n");

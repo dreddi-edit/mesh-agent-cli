@@ -19,24 +19,27 @@ If a network-isolated machine cannot install dependencies during smoke, pre-warm
 In the user's target repository:
 
 ```text
-/doctor
-/index
-/status
+mesh init
+```
+
+or inside an existing Mesh session:
+
+```text
+/start
 explain the main runtime path with citations
 ```
 
-Treat `/doctor` failures as blockers for a first user session. Warnings are acceptable only if they are intentional, for example telemetry contribution or embeddings enabled for a controlled pilot.
+Treat `/doctor` failures as blockers for a first user session. `/doctor fix` may apply safe local repairs such as creating `.mesh/`, state directories, and workspace config. Warnings are acceptable only if they are intentional, for example telemetry contribution or embeddings enabled for a controlled pilot.
 
 ## Golden Path
 
 The first supported workflow should stay narrow:
 
 1. Install Mesh.
-2. Run `/doctor`.
-3. Run `/index`.
-4. Ask a repo-understanding question with citations.
-5. Ask for a small code change.
-6. Run verification through the repo's existing test/build command.
+2. Run `mesh init` or `/start`.
+3. Ask a repo-understanding question with citations.
+4. Run `/change <small goal>` for one narrow code change.
+5. Run verification through the repo's existing test/build command if Mesh did not detect one.
 7. Inspect the produced `.mesh/` artifacts.
 
 Do not lead with experimental moonshot workflows for first-time users.
@@ -79,6 +82,7 @@ Before a public beta, require:
 
 - `npm run verify:release` green on the release machine.
 - Fresh install verified via `npm install -g` or the published package.
+- `npm run smoke:published` green after the package is published.
 - Five external repositories dogfooded, including at least one monorepo and one repo with no existing tests.
 - A documented rollback path for the npm release.
 - Hosted proxy quotas, rate limits, and error dashboards enabled.
