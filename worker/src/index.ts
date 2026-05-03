@@ -66,6 +66,7 @@ export default {
     }
 
     const userId = payload.sub;
+    const plan = payload.app_metadata?.plan || "free";
 
     const url = new URL(req.url);
     const converseMatch = CONVERSE_PATH_RE.exec(url.pathname);
@@ -79,12 +80,22 @@ export default {
       );
     }
 
-    // Rate limit per Supabase User ID.
-    const limit = Number(env.RATE_LIMIT_PER_MIN || "30");
-    const rateHit = await checkRateLimit(env.RATE_LIMIT, userId, limit);
+    // Tiered Rate Limits (Requests per minute & per day)
+    let rpmLimit = 10;
+    let rpdLimit = 100; // Requests per day
+
+    if (plan === "alpha" || plan === "pro") {
+      rpmLimit = 60;
+      rpdLimit = 1000;
+    } else if (plan === "unlimited" || plan === "admin") {
+      rpmLimit = 500;
+      rpdLimit = 10000;
+    }
+
+    const rateHit = await checkTieredRateLimit(env.RATE_LIMIT, userId, rpmLimit, rpdLimit);
     if (!rateHit.ok) {
       return json(
-        { error: "rate_limited", retryAfterSeconds: rateHit.retryAfter },
+        { error: "rate_limited", reason: rateHit.reason, retryAfterSeconds: rateHit.retryAfter },
         429,
         { "retry-after": String(rateHit.retryAfter) }
       );
@@ -224,6 +235,28 @@ async function checkRateLimit(
 
 function json(body: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
   return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "content-type": "application/json",
+      "access-control-allow-origin": "*",
+      ...extraHeaders
+    }
+  });
+}
+
+function corsPreflight(): Response {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "access-control-allow-origin": "*",
+      "access-control-allow-methods": "POST, OPTIONS",
+      "access-control-allow-headers": "content-type, authorization",
+      "access-control-max-age": "86400"
+    }
+  });
+}
+
+ponse(JSON.stringify(body), {
     status,
     headers: {
       "content-type": "application/json",
