@@ -32,36 +32,36 @@ mesh init
 
 ## Core Capabilities
 
-Mesh is built around autonomous workflows and safety. Here are the features that make Mesh fundamentally different:
+Mesh is built around autonomous workflows and engineering safety. Unlike standard chat assistants, Mesh operates as a peer with full workspace context:
 
-### 1. High-Density AI Brain (`.mesh/`)
-Mesh refactors your project metadata into a high-density, token-optimized data format. It strips whitespaces and uses compact, structural notation (e.g., adjacency dependency graphs) to minimize token consumption and maximize LLM reasoning precision.
+### 1. The Ghost Engineer (Timelines)
+Mesh doesn't blindly edit your source files. It creates an invisible "Ghost Timeline" (isolated git worktree) to apply changes. It runs your local tests, linters, and type-checks autonomously, and only promotes the code to your main branch when the build is 100% green.
 
-### 2. Zero-Config NVIDIA RAG
-High-precision semantic search is enabled by default. Mesh uses **NVIDIA nv-embedcode** models for deep code indexing. Requests are securely proxied through the Mesh LLM Gateway, providing everyone with elite retrieval performance without needing a personal API key.
+### 2. Deep Code Intelligence
+Mesh maintains a **High-Density AI Brain** of your repository. 
+- **Semantic RAG:** Uses NVIDIA **nv-embedcode** models for high-precision code retrieval.
+- **Token-Optimized:** Project metadata is refactored into compact, whitespace-free data structures to maximize LLM reasoning accuracy.
+- **Zero-Config:** All intelligence features are securely proxied through the Mesh LLM Gateway — elite performance for every user without personal API keys.
 
-### 3. The Ghost Engineer (Timelines)
-Mesh doesn't blindly edit your active files. It creates an invisible "Ghost Timeline" (an isolated git worktree), writes the code there, runs your tests (`npm test`, `tsc`), fixes any errors autonomously, and only promotes the code to your main branch when it's 100% green. 
+### 3. Issue Autopilot (`/autopilot`)
+Go from ticket to verified PR in one command. Mesh reads issue descriptions (GitHub/Linear/Jira), identifies relevant modules, drafts the solution in a Ghost Timeline, and verifies the fix before preparing the final PR.
 
-### 4. Issue Autopilot (`/autopilot`)
-From ticket to verified Pull Request in one command. Feed Mesh a GitHub/Linear URL. It reads the issue, finds the relevant files, writes the fix in a Ghost Timeline, verifies it, and prepares the PR.
+### 4. Cross-Model Tribunal (`/tribunal`)
+For complex architectural decisions, Mesh summons three distinct AI specialist personas. They debate the implementation, critique edge cases, and synthesize a deeply vetted technical plan.
 
-### 5. Cross-Model Tribunal (`/tribunal`)
-For hard architectural decisions or complex bugs. Mesh summons three distinct AI personas (Correctness, Performance, Security). They debate the problem, critique each other's solutions, and synthesize a dominant, deeply vetted architecture plan.
-
-### 6. Cognitive Session Resurrection (`/resurrect`)
-Stop losing context over the weekend. `mesh /resurrect capture` saves your exact mental state: open files, the goal, failed approaches, and open questions. On Monday, run `/resurrect` and pick up exactly where your brain left off.
+### 5. Cognitive Session Resurrection (`/resurrect`)
+Preserve your mental model across sessions. `/resurrect capture` saves open files, current intent, and failed attempts. Start your next session by restoring the exact context where you left off.
 
 ## Golden Path Commands
 
-Inside an interactive `mesh` session:
+Mesh supports both conversational prompts and specialized slash commands:
 
-- `/start` - Initial repo briefing and health check.
-- `/change <prompt>` - Scope a narrow edit, apply a surgical patch, and get a structured risk report.
-- `/index` - Build the high-density local code-intelligence brain.
-- `/company query <question>` - Query the codebase brain with NVIDIA-powered semantic search.
-- `/doctor` - Run system diagnostics (Auth, NVIDIA RAG connectivity, environment).
-- `/model` - Switch between Claude 4.6 Sonnet (default), Opus, or specialized NVIDIA models.
+- `/start` - Initial repo briefing and workspace health check.
+- `/change <prompt>` - Scope a narrow edit, apply a surgical patch, and get a verification report.
+- `/index` - Synchronize the local high-density intelligence brain.
+- `/company query` - Search the codebase brain with semantic NVIDIA-powered RAG.
+- `/doctor` - Run system diagnostics (Auth, Gateway connectivity, environment).
+- `/model` - Switch between Claude 4.6 Sonnet (default), specialized NVIDIA, or Google models.
 
 ## Privacy & Security
 
