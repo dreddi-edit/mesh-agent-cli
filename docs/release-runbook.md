@@ -14,7 +14,7 @@ This runbook is for publishing `@edgarelmo/mesh-agent-cli`.
 
 For private alpha fixes, use patch versions. For public beta readiness, use a minor version and write a dedicated changelog entry.
 
-Recommended next private-alpha version after `0.3.9`: `0.3.10`.
+Current private-alpha release candidate: `0.3.10`.
 
 ## Publish
 

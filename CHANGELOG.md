@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.9 - Private Alpha Readiness
+## 0.3.10 - Private Alpha Readiness
 
 ### Added
 
