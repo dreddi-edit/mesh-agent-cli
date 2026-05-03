@@ -11,10 +11,20 @@ cd worker
 npm install
 npx wrangler login                         # first time only
 npx wrangler secret put BEDROCK_API_KEY    # paste the AWS Bedrock API key
+npx wrangler secret put NVIDIA_API_KEY     # paste the NVIDIA API key
+npx wrangler secret put GOOGLE_API_KEY     # paste the Google API key (Gemini)
 npx wrangler deploy
 ```
 
 The worker is live at `https://mesh-llm.<your-account>.workers.dev`.
+
+## Supported Backends
+
+1. **AWS Bedrock**: Native Converse API protocol.
+2. **NVIDIA**: OpenAI-compatible API protocol.
+3. **Google Gemini**: OpenAI-compatible API protocol (v1beta).
+
+The worker automatically routes requests based on the model ID or the `x-mesh-provider` header.
 
 ## Optional: KV-based rate limiting
 

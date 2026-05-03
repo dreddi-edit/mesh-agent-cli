@@ -11,7 +11,7 @@ export interface ModelCatalogEntry {
   value: string;
   aliases: string[];
   note: string;
-  provider?: "bedrock" | "nvidia";
+  provider?: "bedrock" | "nvidia" | "google";
   pricing: { inputPer1k: number; outputPer1k: number };
 }
 
@@ -84,5 +84,53 @@ export const MODEL_CATALOG: ModelCatalogEntry[] = [
     note: "nvidia high-throughput",
     provider: "nvidia",
     pricing: { inputPer1k: 0, outputPer1k: 0 }
+  },
+  {
+    label: "Gemini 3.1 Pro",
+    value: "google/gemini-3.1-pro",
+    aliases: ["gemini-pro", "gemini-3.1-pro", "3.1-pro"],
+    note: "google latest powerful",
+    provider: "google",
+    pricing: { inputPer1k: 0.0035, outputPer1k: 0.0105 }
+  },
+  {
+    label: "Gemini 3 Flash",
+    value: "google/gemini-3-flash",
+    aliases: ["gemini-flash", "gemini-3-flash", "3-flash"],
+    note: "google latest fast",
+    provider: "google",
+    pricing: { inputPer1k: 0.000075, outputPer1k: 0.0003 }
+  },
+  {
+    label: "Gemini 2.5 Pro",
+    value: "google/gemini-2.5-pro",
+    aliases: ["gemini-2.5-pro", "2.5-pro"],
+    note: "google powerful stable",
+    provider: "google",
+    pricing: { inputPer1k: 0.0035, outputPer1k: 0.0105 }
+  },
+  {
+    label: "GLM 5.1",
+    value: "z-ai/glm-5.1",
+    aliases: ["glm5.1", "glm-5.1"],
+    note: "nvidia agentic excellence",
+    provider: "nvidia",
+    pricing: { inputPer1k: 0.0014, outputPer1k: 0.0044 }
+  },
+  {
+    label: "Grok 4.20 Reasoning",
+    value: "xai/grok-4.20-reasoning",
+    aliases: ["grok-reasoning", "grok-4.2-reasoning"],
+    note: "gcp xai preview reasoning",
+    provider: "google",
+    pricing: { inputPer1k: 0.005, outputPer1k: 0.015 }
+  },
+  {
+    label: "Grok 4.20",
+    value: "xai/grok-4.20-non-reasoning",
+    aliases: ["grok", "grok-4.2"],
+    note: "gcp xai preview fast",
+    provider: "google",
+    pricing: { inputPer1k: 0.002, outputPer1k: 0.006 }
   }
 ];

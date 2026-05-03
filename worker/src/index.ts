@@ -23,6 +23,7 @@ import { handleBrainRequest } from "./brain";
 export interface Env {
   BEDROCK_API_KEY: string;
   NVIDIA_API_KEY?: string;
+  GOOGLE_API_KEY?: string;
   SUPABASE_JWT_SECRET: string;
   BEDROCK_REGION?: string;
   ALLOWED_MODELS?: string;
@@ -101,21 +102,48 @@ export default {
       );
     }
 
-    // Handle OpenAI-compatible NVIDIA requests
+    // Handle OpenAI-compatible requests (NVIDIA or Google/GCP)
     if (isOpenAiChat || isOpenAiEmbed) {
-      if (!env.NVIDIA_API_KEY) {
-        return json({ error: "server_misconfigured_no_nvidia_key" }, 500);
+      const provider = req.headers.get("x-mesh-provider") || "nvidia";
+      let target = "";
+      let apiKey = "";
+
+      if (provider === "google") {
+        const modelId = req.headers.get("x-mesh-model-id") || "";
+        if (modelId.startsWith("xai/")) {
+          // Vertex AI OpenMaaS (Grok)
+          const gcpProject = "mesh-494913"; // Hardcoded for now or from env
+          const location = "us-central1";
+          const shortModelId = modelId.replace(/^xai\//, "");
+          target = `https://${location}-aiplatform.googleapis.com/v1/projects/${gcpProject}/locations/${location}/publishers/xai/models/${shortModelId}:streamRawPredict`;
+          
+          // For Vertex AI, we need an OAuth token. 
+          // In a real worker, we'd use a Service Account JSON from env.BEDROCK_API_KEY (reused) or similar.
+          // For now, we assume the client passes the token in Authorization if it's Vertex.
+          apiKey = env.GOOGLE_API_KEY || ""; 
+        } else {
+          // Google AI Studio (Gemini)
+          target = `https://generativelanguage.googleapis.com/v1beta/openai${url.pathname}`;
+          apiKey = env.GOOGLE_API_KEY || "";
+        }
+      } else {
+        if (!env.NVIDIA_API_KEY) {
+          return json({ error: "server_misconfigured_no_nvidia_key" }, 500);
+        }
+        target = `https://integrate.api.nvidia.com/v1${url.pathname}`;
+        apiKey = env.NVIDIA_API_KEY;
       }
       
-      const target = `https://integrate.api.nvidia.com/v1${url.pathname}`;
       const bodyText = await req.text();
+
+      const headers: Record<string, string> = {
+        "content-type": "application/json",
+        "authorization": `Bearer ${apiKey}`
+      };
 
       const upstream = await fetch(target, {
         method: "POST",
-        headers: {
-          "authorization": `Bearer ${env.NVIDIA_API_KEY}`,
-          "content-type": "application/json"
-        },
+        headers,
         body: bodyText
       });
 
@@ -215,48 +243,46 @@ function isModelAllowed(modelId: string, allowlist?: string): boolean {
   return allowed.includes(modelId);
 }
 
-async function checkRateLimit(
+async function checkTieredRateLimit(
   kv: KVNamespace | undefined,
   id: string,
-  limitPerMinute: number
-): Promise<{ ok: true } | { ok: false; retryAfter: number }> {
+  limitPerMinute: number,
+  limitPerDay: number
+): Promise<{ ok: true } | { ok: false; reason: string; retryAfter: number }> {
   if (!kv) {
     return { ok: true };
   }
-  const bucket = Math.floor(Date.now() / 60_000);
-  const key = `rl:${id}:${bucket}`;
-  const current = Number((await kv.get(key)) || "0");
-  if (current >= limitPerMinute) {
-    return { ok: false, retryAfter: 60 - (Math.floor(Date.now() / 1000) % 60) };
+
+  const now = Date.now();
+  const minuteBucket = Math.floor(now / 60_000);
+  const dayBucket = Math.floor(now / 86_400_000);
+
+  const rpmKey = `rl:${id}:rpm:${minuteBucket}`;
+  const rpdKey = `rl:${id}:rpd:${dayBucket}`;
+
+  const [rpmCount, rpdCount] = await Promise.all([
+    kv.get(rpmKey).then((v) => Number(v || "0")),
+    kv.get(rpdKey).then((v) => Number(v || "0"))
+  ]);
+
+  if (rpmCount >= limitPerMinute) {
+    return { ok: false, reason: "rate_limit_minute", retryAfter: 60 - (Math.floor(now / 1000) % 60) };
   }
-  await kv.put(key, String(current + 1), { expirationTtl: 120 });
+
+  if (rpdCount >= limitPerDay) {
+    return { ok: false, reason: "rate_limit_day", retryAfter: 3600 }; // Wait an hour
+  }
+
+  await Promise.all([
+    kv.put(rpmKey, String(rpmCount + 1), { expirationTtl: 120 }),
+    kv.put(rpdKey, String(rpdCount + 1), { expirationTtl: 172800 }) // 2 days
+  ]);
+
   return { ok: true };
 }
 
 function json(body: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
   return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      "content-type": "application/json",
-      "access-control-allow-origin": "*",
-      ...extraHeaders
-    }
-  });
-}
-
-function corsPreflight(): Response {
-  return new Response(null, {
-    status: 204,
-    headers: {
-      "access-control-allow-origin": "*",
-      "access-control-allow-methods": "POST, OPTIONS",
-      "access-control-allow-headers": "content-type, authorization",
-      "access-control-max-age": "86400"
-    }
-  });
-}
-
-ponse(JSON.stringify(body), {
     status,
     headers: {
       "content-type": "application/json",

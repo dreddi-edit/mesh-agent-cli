@@ -119,7 +119,7 @@ export function resolvePiiModels(): string[] {
 
 export async function nvidiaChatCompletion(
   request: NvidiaChatCompletionRequest,
-  options: { apiKey?: string; abortSignal?: AbortSignal; baseUrl?: string } = {}
+  options: { apiKey?: string; abortSignal?: AbortSignal; baseUrl?: string; extraHeaders?: Record<string, string> } = {}
 ): Promise<{ response: Response; data: NvidiaChatCompletionResponse | null; rawText: string }> {
   const apiKey = resolveNvidiaApiKey(options.apiKey);
   if (!apiKey) {
@@ -131,7 +131,8 @@ export async function nvidiaChatCompletion(
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${apiKey}`
+      authorization: `Bearer ${apiKey}`,
+      ...(options.extraHeaders || {})
     },
     body: JSON.stringify({
       model: request.model,

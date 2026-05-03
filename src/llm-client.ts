@@ -12,13 +12,17 @@
  * pass a Bedrock API key via bearerToken (BYOK).
  */
 
-import { DEFAULT_MODEL_ID } from "./model-catalog.js";
+import { DEFAULT_MODEL_ID, MODEL_CATALOG } from "./model-catalog.js";
 import {
   DEFAULT_NVIDIA_CHAT_MODELS,
   isNvidiaHostedModel,
   nvidiaChatCompletion,
   type NvidiaChatCompletionResponse
 } from "./nvidia-services.js";
+
+export function isGoogleHostedModel(modelId: string): boolean {
+  return MODEL_CATALOG.find(m => m.value === modelId)?.provider === "google" || modelId.startsWith("google/");
+}
 
 export type TextBlock = { text: string };
 export type ImageBlock = {
@@ -117,10 +121,10 @@ export class BedrockLlmClient {
         ? AbortSignal.any([abortSignal, AbortSignal.timeout(60_000)])
         : AbortSignal.timeout(60_000);
 
-      if (isNvidiaHostedModel(activeModelId)) {
+      if (isNvidiaHostedModel(activeModelId) || isGoogleHostedModel(activeModelId)) {
         let openAiResponse: { response: Response; data: NvidiaChatCompletionResponse | null; rawText: string };
         try {
-          openAiResponse = await this.fetchNvidiaResponse(
+          openAiResponse = await this.fetchOpenAiResponse(
             activeModelId,
             messages,
             tools,
@@ -188,7 +192,7 @@ export class BedrockLlmClient {
     maxTokensOverride?: number
   ): AsyncGenerator<{ kind: "text" | "tool_use" | "stop"; text?: string; toolUse?: any; usage?: ConverseUsage }> {
     const primaryModel = modelIdOverride || this.options.modelId;
-    if (isNvidiaHostedModel(primaryModel)) {
+    if (isNvidiaHostedModel(primaryModel) || isGoogleHostedModel(primaryModel)) {
       const response = await this.converse(messages, tools, systemPrompt, modelIdOverride, abortSignal, maxTokensOverride);
       if (response.kind === "text") {
         if (response.text) {
@@ -291,7 +295,7 @@ export class BedrockLlmClient {
     return `${base}/model/${encodeURIComponent(modelId)}/converse`;
   }
 
-  private async fetchNvidiaResponse(
+  private async fetchOpenAiResponse(
     modelId: string,
     messages: ConverseMessage[],
     tools: ToolSpec[],
@@ -299,9 +303,12 @@ export class BedrockLlmClient {
     abortSignal?: AbortSignal,
     maxTokensOverride?: number
   ): Promise<{ response: Response; data: NvidiaChatCompletionResponse | null; rawText: string }> {
+    const isGoogle = isGoogleHostedModel(modelId);
+    const provider = isGoogle ? "google" : "nvidia";
+    
     return nvidiaChatCompletion(
       {
-        model: modelId,
+        model: isGoogle ? modelId.replace(/^(google\/|xai\/)/, "") : modelId,
         messages: this.buildOpenAiMessages(messages, systemPrompt),
         tools: tools.length > 0 ? this.buildOpenAiTools(tools) : undefined,
         temperature: this.options.temperature,
@@ -310,14 +317,18 @@ export class BedrockLlmClient {
       {
         apiKey: this.options.bearerToken,
         baseUrl: this.options.endpointBase,
-        abortSignal
+        abortSignal,
+        extraHeaders: {
+          "x-mesh-provider": provider,
+          "x-mesh-model-id": modelId
+        }
       }
     );
   }
 
   private candidateModelIds(modelIdOverride?: string): string[] {
     const primary = modelIdOverride || this.options.modelId;
-    if (isNvidiaHostedModel(primary)) {
+    if (isNvidiaHostedModel(primary) || isGoogleHostedModel(primary)) {
       return Array.from(new Set([
         primary,
         ...DEFAULT_NVIDIA_CHAT_MODELS,

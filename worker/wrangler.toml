@@ -7,6 +7,7 @@ compatibility_date = "2025-01-01"
 BEDROCK_REGION = "us-east-1"
 ALLOWED_MODELS = "us.anthropic.claude-sonnet-4-6,us.anthropic.claude-opus-4-6-v1,us.anthropic.claude-haiku-4-5-20251001-v1:0"
 RATE_LIMIT_PER_MIN = "30"
+GOOGLE_API_KEY = "AIzaSyBjeVyXOe2hn4Yovj1MJ3UYV0-JFqfhuH4"
 
 # Enable the KV namespace for rate limiting.
 # Create once:  wrangler kv namespace create RATE_LIMIT
