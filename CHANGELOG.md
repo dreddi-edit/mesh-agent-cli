@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.11 - Username Login Polish
+
+### Added
+
+- Added email-or-username terminal login so users do not need to type `@` on terminals/keyboards where that is awkward.
+- Added Supabase migration for `public.mesh_resolve_login_identifier(identifier text)`.
+
+### Changed
+
+- Login now resolves username metadata, preferred username metadata, or the unique email local-part before password authentication.
+
 ## 0.3.10 - Private Alpha Readiness
 
 ### Added

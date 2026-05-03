@@ -19,6 +19,7 @@ const SESSION_DIR = path.join(os.homedir(), ".config", "mesh");
 const SESSION_FILE = path.join(SESSION_DIR, "session.json");
 const KEYCHAIN_SERVICE = "mesh-agent-cli";
 const KEYCHAIN_ACCOUNT = "refresh-token";
+const USERNAME_EMAIL_DOMAIN = process.env.MESH_USERNAME_EMAIL_DOMAIN?.trim();
 
 interface KeytarLike {
   getPassword(service: string, account: string): Promise<string | null>;
@@ -57,6 +58,14 @@ function isSessionShape(obj: unknown): obj is Omit<Session, "refresh_token"> & {
     typeof (obj as any).access_token === "string" &&
     isJwtShape((obj as any).access_token)
   );
+}
+
+function normalizeLoginIdentifier(value: string): string {
+  return value
+    .trim()
+    .replace(/\s+at\s+|[\(\[]\s*at\s*[\)\]]|_at_|\*at\*/i, "@")
+    .replace(/\s+/g, "")
+    .toLowerCase();
 }
 
 async function loadKeytar(): Promise<KeytarLike | null> {
@@ -132,21 +141,27 @@ export class AuthManager {
     let user: MeshUser | null = null;
 
     while (!user) {
-      const { email, password } = await prompt<{email: string, password: string}>([
-        { type: "input", name: "email", message: pc.dim("email: ") },
+      const { identifier, password } = await prompt<{identifier: string, password: string}>([
+        { type: "input", name: "identifier", message: pc.dim("email or username: ") },
         { type: "password", name: "password", message: pc.dim("password: ") }
       ]);
 
-      const emailTrimmed = email?.trim() || "";
+      const identifierTrimmed = normalizeLoginIdentifier(identifier || "");
       const passwordTrimmed = password?.trim() || "";
       
-      if (!emailTrimmed || !passwordTrimmed) {
-        process.stdout.write(pc.red(`\n  ✗ Email and password are required.\n\n`));
+      if (!identifierTrimmed || !passwordTrimmed) {
+        process.stdout.write(pc.red(`\n  ✗ Email/username and password are required.\n\n`));
+        continue;
+      }
+
+      const email = await this.resolveLoginEmail(identifierTrimmed);
+      if (!email) {
+        process.stdout.write(pc.red(`\n  ✗ Username not found or ambiguous. Try your full email address.\n\n`));
         continue;
       }
 
       const { data, error } = await this.supabase.auth.signInWithPassword({ 
-        email: emailTrimmed, 
+        email, 
         password: passwordTrimmed 
       });
 
@@ -194,6 +209,27 @@ export class AuthManager {
 
   getAccessToken(): string | undefined {
     return this.session?.access_token;
+  }
+
+  private async resolveLoginEmail(identifier: string): Promise<string | null> {
+    if (identifier.includes("@")) {
+      return identifier;
+    }
+
+    try {
+      const { data, error } = await this.supabase.rpc("mesh_resolve_login_identifier", { identifier });
+      if (!error && typeof data === "string" && data.includes("@")) {
+        return data.trim().toLowerCase();
+      }
+    } catch {
+      // Fall back below.
+    }
+
+    if (USERNAME_EMAIL_DOMAIN) {
+      return `${identifier}@${USERNAME_EMAIL_DOMAIN}`.toLowerCase();
+    }
+
+    return null;
   }
 
   private async getKeychainRefreshToken(): Promise<string | null> {

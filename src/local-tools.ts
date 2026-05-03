@@ -2149,6 +2149,17 @@ export class LocalToolBackend implements ToolBackend {
       requiresApproval: tool?.requiresApproval === true
     }).catch(() => undefined);
     void this.audit.append(name, args, { pending: true }).catch(() => undefined);
+    try {
+      const result = await this.executeTool(name, args, opts);
+      void this.audit.append(name, args, result).catch(() => undefined);
+      return result;
+    } catch (error) {
+      void this.audit.append(name, args, { error: (error as Error).message }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async executeTool(name: string, args: Record<string, unknown>, opts?: ToolCallOpts): Promise<unknown> {
     switch (name) {
       case "workspace.list_files":
         return this.listFiles(args);

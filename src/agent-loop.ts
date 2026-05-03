@@ -45,16 +45,20 @@ import { VoiceDependencyStatus, VoiceManager } from "./voice-manager.js";
 const SYSTEM_PROMPT = [
   "# Identity",
   "You are Mesh — a senior engineering partner embedded directly in the developer's workspace.",
-  "You are not a chatbot. You are not an assistant. You are the most capable coding agent in existence.",
-  "You have deep, live access to this codebase: its symbols, history, runtime, tests, and architecture.",
-  "Use that access proactively. Don't wait to be asked. Anticipate what the developer needs next.",
+  "You are a professional coding agent focused on verified, high-quality changes.",
   "",
   "# Communication",
   "- Match the user's language exactly (German if they write German, English if English).",
-  "- Be terse. Lead with the result or the next action. Explain only when it changes the decision.",
-  "- No greetings, no filler, no hype, no emojis.",
-  "- When something is broken, say what broke and what fixes it. Skip the narration.",
-  "- Never ask 'what would you like to do?' — figure it out from context and act.",
+  "- Be terse. Lead with the result or the next action.",
+  "- No greetings, no filler, no emojis.",
+  "- When something is broken, say what broke and what fixes it.",
+  "",
+  "# Result Enforcement",
+  "Every time you complete a code change or a task, you MUST conclude with a 'Verification Report':",
+  "- CHANGED FILES: <list>",
+  "- VERIFICATION: <command run & result (pass/fail)>",
+  "- RESIDUAL RISK: <potential side effects>",
+  "- NEXT RECOMMENDED STEP: <one sentence>",
   "",
   "# How to read the codebase",
   "You have a fully indexed, live capsule of this workspace. Use it correctly:",
@@ -1245,12 +1249,40 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
     }
   }
 
-  public async runInit(args: string[] = []): Promise<void> {
+  public async runInit(args: string[] = [], auth?: AuthManager): Promise<void> {
     this.llm.logEndpoint();
     await this.checkInit();
     this.sessionCapsule = await this.sessionStore.load();
-    output.write(this.themeColor(`\n${pc.bold("Mesh First-Run Setup")}\n`));
-    await this.runStart(args.includes("--no-fix") ? [] : ["fix"]);
+    
+    output.write(this.themeColor(`\n${pc.bold("Mesh Agent - Private Alpha")}\n`));
+    output.write(pc.dim("Thank you for participating in the early access program.\n\n"));
+
+    // 4. Telemetry Prompt (Privacy First)
+    if (this.config.telemetry.contribute === undefined) {
+      const confirm = new Confirm({
+        name: "telemetry",
+        message: "Can we collect anonymous telemetry to help improve Mesh?",
+        initial: true
+      });
+      const optIn = Boolean(await confirm.run().catch(() => false));
+      // Save to user settings or .mesh/config
+      const current = await loadUserSettings();
+      await saveUserSettings({ ...current, telemetry: optIn });
+      this.config.telemetry.contribute = optIn;
+      output.write(pc.dim(optIn ? "Telemetry enabled. Thank you!\n" : "Telemetry disabled.\n"));
+    }
+
+    output.write(this.themeColor(`${pc.bold("\nFirst-Run System Check")}\n`));
+    await this.runDoctor(["fix"]);
+
+    // If we have an auth manager, we might want to login now
+    if (auth && !await auth.restoreAuthenticated()) {
+      output.write(pc.yellow("\n[Mesh] Initial setup complete. Login is required for model access.\n"));
+      await auth.ensureAuthenticated();
+      this.config.bedrock.bearerToken ||= auth.getAccessToken();
+    }
+
+    output.write(pc.green(pc.bold("\n✓ All set! Start by asking: \"What can you do here?\"\n\n")));
   }
 
   public async runDoctorCli(args: string[] = []): Promise<void> {
@@ -4010,8 +4042,10 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
 
   private printHelp(args: string[] = []): void {
     const commands = this.getSlashCommands();
+    const showAll = args.includes("--all") || args.includes("advanced");
     const requested = args[0]?.toLowerCase().replace(/^([^/])/, "/$1");
-    if (requested) {
+    
+    if (requested && !["/all", "advanced"].includes(requested)) {
       const command = commands.find((item) => item.name === requested || item.aliases?.includes(requested));
       if (!command) {
         output.write(pc.yellow(`\nNo command named ${requested}. Run /help for the command groups.\n`));
@@ -4031,29 +4065,33 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
       return;
     }
 
-    const groups: Array<{ title: string; names: string[] }> = [
-      { title: "Start Here", names: ["/start", "/status", "/index", "/doctor", "/dashboard"] },
-      { title: "Ask About This Repo", names: ["/company", "/twin", "/repair", "/causal", "/lab", "/learn"] },
-      { title: "Build And Change", names: ["/change", "/autopilot", "/intent", "/fork", "/ghost", "/fix", "/sheriff"] },
-      { title: "UI And Browser", names: ["/inspect", "/stop-inspect", "/preview"] },
+    const groups: Array<{ title: string; names: string[]; advanced?: boolean }> = [
+      { title: "Core Commands", names: ["/start", "/status", "/index", "/doctor", "/change", "/autopilot", "/dashboard"] },
+      { title: "Ask About This Repo", names: ["/company", "/twin", "/repair", "/causal", "/lab", "/learn"], advanced: true },
+      { title: "UI And Browser", names: ["/inspect", "/stop-inspect", "/preview"], advanced: true },
       { title: "Session And Settings", names: ["/model", "/capsule", "/compact", "/approvals", "/steps", "/setup", "/cost", "/undo", "/clear", "/exit"] },
-      { title: "Integrations And Advanced", names: ["/distill", "/synthesize", "/issues", "/chatops", "/production", "/replay", "/bisect", "/whatif", "/audit", "/brain", "/daemon", "/tribunal", "/resurrect", "/hologram", "/entangle", "/sync", "/voice"] }
+      { title: "Advanced Capabilities", names: ["/distill", "/synthesize", "/issues", "/chatops", "/production", "/replay", "/bisect", "/whatif", "/audit", "/brain", "/daemon", "/tribunal", "/resurrect", "/hologram", "/entangle", "/sync", "/voice", "/sheriff"], advanced: true }
     ];
+    
     const byName = new Map(commands.map((command) => [command.name, command]));
     output.write(
       [
         "",
-        `${this.themeColor(pc.bold("Mesh Commands"))}`,
-        `${pc.dim("Run /help <command> for examples. Most commands are local analysis helpers; normal questions do not need a slash command.")}`,
+        `${this.themeColor(pc.bold("Mesh CLI - Private Alpha"))}`,
+        `${pc.dim("Run /help <command> for examples. Normal questions do not need a slash command.")}`,
+        !showAll ? pc.dim("Only core commands are shown. Run /help --all to see advanced capabilities.") : "",
         "",
-        ...groups.flatMap((group) => [
-          this.themeColor(pc.bold(group.title)),
-          ...group.names
-            .map((name) => byName.get(name))
-            .filter((command): command is SlashCommand => Boolean(command))
-            .map((command) => `${pc.magenta(command.name.padEnd(15, " "))}${command.description}  ${pc.dim(command.usage)}`),
-          ""
-        ])
+        ...groups.flatMap((group) => {
+          if (group.advanced && !showAll) return [];
+          return [
+            this.themeColor(pc.bold(group.title)),
+            ...group.names
+              .map((name) => byName.get(name))
+              .filter((command): command is SlashCommand => Boolean(command))
+              .map((command) => `${pc.magenta(command.name.padEnd(15, " "))}${command.description}`),
+            ""
+          ];
+        })
       ].join("\n") + "\n"
     );
   }

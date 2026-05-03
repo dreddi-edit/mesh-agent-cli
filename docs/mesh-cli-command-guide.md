@@ -1,6 +1,6 @@
 # Mesh CLI Command Guide
 
-Stand: 0.3.10
+Stand: 0.3.11
 
 Diese Datei erklärt die Slash-Commands aus `/help`, was Mesh CLI grundsätzlich kann, wie die Funktionen intern umgesetzt sind, und welche Teile noch experimentell oder nicht vollständig production-level sind.
 

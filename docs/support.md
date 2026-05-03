@@ -22,6 +22,7 @@ Do not ask for full source archives by default. Prefer targeted snippets, error 
 
 - Install failure: npm, native dependency, PATH, Node version, keytar.
 - First-run failure: auth, endpoint, missing token, config parsing.
+- Login failure: confirm whether the user used email or username; username login requires the Supabase `mesh_resolve_login_identifier` migration.
 - Workspace failure: permissions, Git unavailable, state path not writable.
 - Model failure: provider status, quota/rate limit, fallback model behavior.
 - Tool failure: command safety block, timeout, file read/write validation.

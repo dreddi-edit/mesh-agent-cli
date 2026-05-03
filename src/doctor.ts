@@ -48,7 +48,8 @@ export class MeshDoctorEngine {
       this.checkReleaseGuardrails(),
       this.checkProxyConnectivity(),
       this.checkAuthentication(),
-      this.checkProviderHealth()
+      this.checkProviderHealth(),
+      this.checkKeytarHealth()
     ]);
 
     const ok = checks.every(c => c.status !== "fail");
@@ -57,6 +58,36 @@ export class MeshDoctorEngine {
       timestamp: new Date().toISOString(),
       checks
     };
+  }
+
+  private async checkKeytarHealth(): Promise<DoctorCheck> {
+    const details: string[] = [];
+    try {
+      // @ts-ignore
+      await import("keytar");
+      details.push("Native keychain (keytar) is available.");
+      return {
+        id: "keytar",
+        title: "Native Keychain",
+        status: "pass",
+        message: "Secure OS credential storage is active.",
+        details
+      };
+    } catch {
+      return {
+        id: "keytar",
+        title: "Native Keychain",
+        status: "warn",
+        message: "Native keychain unavailable; using file-based fallback.",
+        details: ["Mesh will store sessions in ~/.config/mesh/session.json (chmod 0600).", "This is normal on some Linux distros or CI environments."],
+        fixes: [{
+          id: "install_keytar_manual",
+          title: "Install native build tools",
+          description: "To use the system keychain, Mesh needs to compile keytar. Ensure python, make, and g++ are installed.",
+          automatic: false
+        }]
+      };
+    }
   }
 
   async autoFix(): Promise<DoctorFixResult[]> {

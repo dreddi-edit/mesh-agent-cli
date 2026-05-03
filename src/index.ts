@@ -43,9 +43,50 @@ function printHelp(): void {
   );
 }
 
+async function checkForUpdates(currentVersion: string): Promise<void> {
+  const cacheDir = path.join(os.homedir(), ".config", "mesh");
+  const cacheFile = path.join(cacheDir, "update-check.json");
+  const now = Date.now();
+
+  try {
+    const raw = await fs.readFile(cacheFile, "utf8");
+    const cache = JSON.parse(raw);
+    if (cache.lastCheck && now - cache.lastCheck < 24 * 60 * 60 * 1000) {
+      return;
+    }
+  } catch {
+    // No cache or invalid
+  }
+
+  try {
+    const res = await fetch("https://registry.npmjs.org/@edgarelmo/mesh-agent-cli/latest", {
+      signal: AbortSignal.timeout(1500)
+    });
+    if (res.ok) {
+      const data = await res.json() as { version: string };
+      if (data.version && data.version !== currentVersion) {
+        process.stdout.write(
+          [
+            "",
+            pc.yellow(pc.bold("  Update Available!")),
+            `  Mesh version ${pc.green(data.version)} is out. (Current: ${currentVersion})`,
+            `  Run ${pc.cyan("npm install -g @edgarelmo/mesh-agent-cli")} to update.`,
+            ""
+          ].join("\n") + "\n"
+        );
+      }
+      await fs.mkdir(cacheDir, { recursive: true });
+      await fs.writeFile(cacheFile, JSON.stringify({ lastCheck: now, latestVersion: data.version }));
+    }
+  } catch {
+    // Silent fail if offline or timeout
+  }
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const firstArg = args[0];
+  const currentVersion = await readPackageVersion();
 
   if (firstArg === "--help" || firstArg === "-h" || firstArg === "help") {
     printHelp();
@@ -53,9 +94,12 @@ async function main(): Promise<void> {
   }
 
   if (firstArg === "--version" || firstArg === "-v" || firstArg === "version") {
-    process.stdout.write(`${await readPackageVersion()}\n`);
+    process.stdout.write(`${currentVersion}\n`);
     return;
   }
+
+  // Background update check
+  void checkForUpdates(currentVersion).catch(() => null);
 
   if (firstArg === "support") {
     process.stdout.write(formatSupportInfo(await collectSupportInfo(await readPackageVersion())));
@@ -85,6 +129,18 @@ async function main(): Promise<void> {
     try {
       const agent = new AgentLoop(config, backend);
       await agent.runDoctorCli(args.slice(1));
+    } finally {
+      await backend.close().catch(() => undefined);
+    }
+    return;
+  }
+
+  if (firstArg === "init") {
+    const localBackend = new LocalToolBackend(config.agent.workspaceRoot, config);
+    const backend = new CompositeToolBackend([localBackend]);
+    try {
+      const agent = new AgentLoop(config, backend);
+      await agent.runInit(args.slice(1), auth);
     } finally {
       await backend.close().catch(() => undefined);
     }

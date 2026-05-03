@@ -97,10 +97,7 @@ export interface UserSettings {
   modelId: string;
   themeColor: string;
   enableCloudCache: boolean;
-  telemetry?: {
-    mode?: string;
-    meshBrainEndpoint?: string;
-  };
+  telemetry?: boolean;
   customApiKey?: string;
   customEndpoint?: string;
   voice: VoiceSettings;
@@ -179,6 +176,7 @@ export async function loadUserSettings(): Promise<UserSettings> {
       themeColor: parsed.themeColor || "cyan",
       enableCloudCache:
         typeof parsed.enableCloudCache === "boolean" ? parsed.enableCloudCache : true,
+      telemetry: parsed.telemetry,
       customApiKey: parsed.customApiKey,
       customEndpoint: parsed.customEndpoint,
       voice: normalizeVoiceSettings(parsed.voice)
@@ -270,9 +268,11 @@ export async function loadConfig(): Promise<AppConfig> {
       key: process.env.SUPABASE_KEY?.trim() || undefined
     },
     telemetry: {
-      contribute: String(localSettings.telemetry?.mode ?? "").trim().toLowerCase() === "contribute",
+      contribute:
+        userSettings.telemetry === true ||
+        process.env.MESH_TELEMETRY === "1" ||
+        process.env.MESH_TELEMETRY === "true",
       meshBrainEndpoint:
-        localSettings.telemetry?.meshBrainEndpoint?.trim() ||
         process.env.MESH_BRAIN_ENDPOINT?.trim() ||
         undefined
     }

@@ -84,11 +84,20 @@ export class AuditLogger {
 }
 
 function stableJson(value: unknown): string {
-  try {
-    return JSON.stringify(value, Object.keys((value as any) ?? {}).sort());
-  } catch {
-    return String(value);
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
   }
+  if (Array.isArray(value)) {
+    return "[" + value.map(stableJson).join(",") + "]";
+  }
+  const keys = Object.keys(value as Record<string, unknown>).sort();
+  return (
+    "{" +
+    keys
+      .map((k) => JSON.stringify(k) + ":" + stableJson((value as Record<string, unknown>)[k]))
+      .join(",") +
+    "}"
+  );
 }
 
 function sha256(value: string): string {
