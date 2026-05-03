@@ -30,7 +30,7 @@ mesh init
 
 *Note for Mac/Linux Users: You can log in using your full email or just your username (the part before the `@`) if typing special characters in the terminal is awkward.*
 
-## The "Killer Features" (Moonshots)
+## Core Capabilities
 
 Mesh is built around autonomous workflows and safety. Here are the features that make Mesh fundamentally different:
 
