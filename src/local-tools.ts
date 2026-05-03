@@ -4634,15 +4634,15 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
       const errorSignature = normalizeErrorSignature(commandOutput || lastCommand?.command || "timeline-promote");
       const diffPattern = normalizeDiffPattern(String(summary.diffPreview ?? ""));
       const contribution = await this.meshBrain.contribute({
-        workspaceFingerprint: this.workspaceFingerprint(),
-        errorSignature,
-        diffPattern,
-        verificationResult: {
-          verdict: timeline.verdict ?? "unknown",
-          command: lastCommand?.command,
-          exitCode: lastCommand?.exitCode,
-          tsc: /\btsc\b/.test(lastCommand?.command ?? "") ? (lastCommand?.ok ? "pass" : "fail") : "unknown",
-          lint: /\blint\b/.test(lastCommand?.command ?? "") ? (lastCommand?.ok ? "pass" : "fail") : "unknown"
+        f: this.workspaceFingerprint(),
+        e: errorSignature,
+        d: diffPattern,
+        v: {
+          r: timeline.verdict ?? "unknown",
+          c: lastCommand?.command,
+          x: lastCommand?.exitCode,
+          t: /\btsc\b/.test(lastCommand?.command ?? "") ? (lastCommand?.ok ? "pass" : "fail") : "unknown",
+          l: /\blint\b/.test(lastCommand?.command ?? "") ? (lastCommand?.ok ? "pass" : "fail") : "unknown"
         }
       });
       return { ...result, meshBrain: contribution, critic, redTeam };

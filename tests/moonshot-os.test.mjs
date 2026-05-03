@@ -63,8 +63,8 @@ test("moonshot os tools build twin, memory, repair, intent, and cockpit state", 
 
     const twin = await backend.callTool("workspace.digital_twin", { action: "build" });
     assert.equal(twin.ok, true);
-    assert.ok(twin.twin.routes.some((route) => route.route.includes("/api/users")));
-    assert.ok(twin.twin.symbols.some((symbol) => symbol.name === "getUser"));
+    assert.ok(twin.twin.routes.some((r) => r.r.includes("/api/users")));
+    assert.ok(twin.twin.symbols.some((s) => s.n === "getUser"));
 
     const memory = await backend.callTool("workspace.engineering_memory", {
       action: "record",
