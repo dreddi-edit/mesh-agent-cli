@@ -44,7 +44,26 @@ try {
   mkdirSync(prefix, { recursive: true });
   console.log(`[published-smoke] temp: ${tmp}`);
   console.log(`[published-smoke] installing ${spec} into isolated global prefix`);
-  run("npm", ["install", "--global", "--no-audit", "--no-fund", spec], { timeoutMs: installTimeoutMs });
+  
+  let installSuccess = false;
+  let lastError = null;
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    try {
+      run("npm", ["install", "--global", "--no-audit", "--no-fund", spec], { timeoutMs: installTimeoutMs });
+      installSuccess = true;
+      break;
+    } catch (err) {
+      lastError = err;
+      if (attempt < 6) {
+        console.log(`[published-smoke] install failed (attempt ${attempt}/6), waiting 10s for npm registry propagation...`);
+        spawnSync("node", ["-e", "setTimeout(()=>{}, 10000)"]);
+      }
+    }
+  }
+  
+  if (!installSuccess) {
+    throw lastError;
+  }
 
   const binDir = process.platform === "win32" ? prefix : path.join(prefix, "bin");
   const meshBin = path.join(binDir, process.platform === "win32" ? "mesh.cmd" : "mesh");
