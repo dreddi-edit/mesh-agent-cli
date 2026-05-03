@@ -10,6 +10,12 @@ mesh-core/lib
 
 .gemini/
 
+# Keys and Secrets
+vertex-key.json
+*-key.json
+*.key
+*.pem
+
 # AI Tool Configurations
 .agents/
 .claude/
