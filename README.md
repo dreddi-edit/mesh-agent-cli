@@ -82,6 +82,7 @@ Before onboarding a new user or workspace, run:
 npm run verify:release
 mesh --version
 mesh --help
+mesh support
 mesh init
 ```
 
@@ -92,6 +93,7 @@ The full pre-release checklist lives in [docs/go-live.md](docs/go-live.md). Priv
 Default behavior is conservative:
 
 - Source files stay local unless a model/tool call needs context for the task.
+- If the OS keychain is unavailable, Mesh falls back to a `0600` session file under `~/.config/mesh/` instead of failing startup.
 - Mesh Brain telemetry contribution is opt-in and disabled by default.
 - Background resolver and embeddings are opt-in to avoid surprise CPU, model downloads, or provider costs.
 - Tests run with file watchers disabled to avoid OS watcher-limit flakiness.

@@ -5,7 +5,6 @@ import pkg from "enquirer";
 const { prompt } = pkg;
 import { createClient, SupabaseClient, Session } from "@supabase/supabase-js";
 import pc from "picocolors";
-import keytar from "keytar";
 import "dotenv/config";
 
 // These are the public Mesh auth endpoints. The anon key is a Supabase public
@@ -20,6 +19,12 @@ const SESSION_DIR = path.join(os.homedir(), ".config", "mesh");
 const SESSION_FILE = path.join(SESSION_DIR, "session.json");
 const KEYCHAIN_SERVICE = "mesh-agent-cli";
 const KEYCHAIN_ACCOUNT = "refresh-token";
+
+interface KeytarLike {
+  getPassword(service: string, account: string): Promise<string | null>;
+  setPassword(service: string, account: string, password: string): Promise<void>;
+  deletePassword(service: string, account: string): Promise<boolean>;
+}
 
 export interface MeshUser {
   email: string;
@@ -54,17 +59,26 @@ function isSessionShape(obj: unknown): obj is Omit<Session, "refresh_token"> & {
   );
 }
 
+async function loadKeytar(): Promise<KeytarLike | null> {
+  try {
+    const mod = await import("keytar");
+    return (mod.default ?? mod) as KeytarLike;
+  } catch {
+    return null;
+  }
+}
+
 export class AuthManager {
   private readonly supabase: SupabaseClient;
   private session: Session | null = null;
+  private keytarUnavailable = false;
 
   constructor() {
     this.supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   }
 
-  /** Restore a persisted session, or prompt login if none / expired. */
-  async ensureAuthenticated(): Promise<MeshUser> {
-    // 1. Try to restore a saved session
+  /** Restore a persisted session without prompting. Useful for doctor/support flows. */
+  async restoreAuthenticated(): Promise<MeshUser | null> {
     try {
       const raw = await fs.readFile(SESSION_FILE, "utf-8");
       const stored: unknown = JSON.parse(raw);
@@ -73,8 +87,9 @@ export class AuthManager {
         throw new Error("Invalid session shape");
       }
       
-      // Try to get refresh token from keychain
-      const keychainToken = await keytar.getPassword(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+      // Try to get refresh token from OS keychain. Fall back to the 0600
+      // session file if native keytar is unavailable on the user's machine.
+      const keychainToken = await this.getKeychainRefreshToken();
       const fallbackToken = stored.refresh_token ?? undefined;
       const refreshToken = keychainToken || fallbackToken;
       
@@ -92,10 +107,16 @@ export class AuthManager {
         }
       }
     } catch {
-      // No session file or invalid — fall through to login
+      // No session file or invalid.
     }
+    return null;
+  }
 
-    // 2. Interactive login
+  /** Restore a persisted session, or prompt login if none / expired. */
+  async ensureAuthenticated(): Promise<MeshUser> {
+    const restored = await this.restoreAuthenticated();
+    if (restored) return restored;
+
     return this.promptLogin();
   }
 
@@ -147,7 +168,7 @@ export class AuthManager {
     await this.supabase.auth.signOut();
     try {
       await fs.unlink(SESSION_FILE);
-      await keytar.deletePassword(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+      await this.deleteKeychainRefreshToken();
     } catch {
       // Already gone
     }
@@ -158,19 +179,61 @@ export class AuthManager {
     // 0o700 is strict: rwx for owner, nothing for group/others
     await fs.mkdir(SESSION_DIR, { recursive: true, mode: 0o700 });
     
-    // Store refresh token in keychain
+    let storedInKeychain = false;
     if (session.refresh_token) {
-      await keytar.setPassword(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, session.refresh_token);
+      storedInKeychain = await this.setKeychainRefreshToken(session.refresh_token);
     }
 
-    // Explicitly destructure to omit refresh_token instead of using `any`
     const { refresh_token: _ignored, ...safeSession } = session;
+    const persistedSession = storedInKeychain || !session.refresh_token
+      ? safeSession
+      : { ...safeSession, refresh_token: session.refresh_token };
     
-    await fs.writeFile(SESSION_FILE, JSON.stringify(safeSession), { mode: 0o600 });
+    await fs.writeFile(SESSION_FILE, JSON.stringify(persistedSession), { mode: 0o600 });
   }
 
   getAccessToken(): string | undefined {
     return this.session?.access_token;
   }
-}
 
+  private async getKeychainRefreshToken(): Promise<string | null> {
+    const keytar = await loadKeytar();
+    if (!keytar) {
+      this.keytarUnavailable = true;
+      return null;
+    }
+    try {
+      return await keytar.getPassword(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+    } catch {
+      this.keytarUnavailable = true;
+      return null;
+    }
+  }
+
+  private async setKeychainRefreshToken(refreshToken: string): Promise<boolean> {
+    const keytar = await loadKeytar();
+    if (!keytar) {
+      this.noteKeytarFallback();
+      return false;
+    }
+    try {
+      await keytar.setPassword(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, refreshToken);
+      return true;
+    } catch {
+      this.noteKeytarFallback();
+      return false;
+    }
+  }
+
+  private async deleteKeychainRefreshToken(): Promise<void> {
+    const keytar = await loadKeytar();
+    if (!keytar) return;
+    await keytar.deletePassword(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).catch(() => false);
+  }
+
+  private noteKeytarFallback(): void {
+    if (this.keytarUnavailable) return;
+    this.keytarUnavailable = true;
+    process.stderr.write(pc.dim("[Mesh] OS keychain unavailable; storing session fallback in ~/.config/mesh/session.json with 0600 permissions.\n"));
+  }
+}

@@ -11,6 +11,7 @@ import { ToolBackend } from "./tool-backend.js";
 import { CompositeToolBackend } from "./composite-backend.js";
 import { runDaemonCli } from "./daemon.js";
 import { buildSessionManager, type SessionManager } from "./session-manager.js";
+import { collectSupportInfo, formatSupportInfo } from "./support.js";
 
 async function readPackageVersion(): Promise<string> {
   try {
@@ -31,6 +32,7 @@ function printHelp(): void {
       "  mesh                         start interactive agent",
       "  mesh init                    run first-run setup and repo briefing",
       "  mesh doctor [fix]            run diagnostics and optional safe fixes",
+      "  mesh support                 print bug-report support info",
       "  mesh \"<task>\"                 run one task",
       "  mesh daemon <start|status|digest|stop>",
       "  mesh logout",
@@ -55,6 +57,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (firstArg === "support") {
+    process.stdout.write(formatSupportInfo(await collectSupportInfo(await readPackageVersion())));
+    return;
+  }
+
   const config = await loadConfig();
   const auth = new AuthManager();
 
@@ -67,6 +74,20 @@ async function main(): Promise<void> {
   if (firstArg === "daemon") {
     const code = await runDaemonCli(args.slice(1));
     process.exitCode = code;
+    return;
+  }
+
+  if (firstArg === "doctor") {
+    await auth.restoreAuthenticated().catch(() => null);
+    config.bedrock.bearerToken ||= auth.getAccessToken();
+    const localBackend = new LocalToolBackend(config.agent.workspaceRoot, config);
+    const backend = new CompositeToolBackend([localBackend]);
+    try {
+      const agent = new AgentLoop(config, backend);
+      await agent.runDoctorCli(args.slice(1));
+    } finally {
+      await backend.close().catch(() => undefined);
+    }
     return;
   }
 
@@ -143,11 +164,6 @@ async function main(): Promise<void> {
       await agent.runInit(args.slice(1));
       return;
     }
-    if (firstArg === "doctor") {
-      await agent.runDoctorCli(args.slice(1));
-      return;
-    }
-
     const prompt = process.argv.slice(2).join(" ");
     await agent.runCli(prompt);
   } finally {

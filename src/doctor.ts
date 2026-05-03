@@ -310,6 +310,14 @@ export class MeshDoctorEngine {
           message: `Proxy is reachable (Latency: ${latency}ms).`,
           details: [`Endpoint: ${endpoint}`]
         };
+      } else if (res && [401, 403, 404, 405].includes(res.status)) {
+        return {
+          id: "proxy_conn",
+          title: "Proxy Connectivity",
+          status: "warn",
+          message: `Proxy is reachable, but health endpoint returned ${res.status}.`,
+          details: [`Endpoint: ${endpoint}`, "This is acceptable if provider checks pass after authentication."]
+        };
       } else {
         return {
           id: "proxy_conn",

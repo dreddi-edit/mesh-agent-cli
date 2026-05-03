@@ -31,6 +31,8 @@ explain the main runtime path with citations
 
 Treat `/doctor` failures as blockers for a first user session. `/doctor fix` may apply safe local repairs such as creating `.mesh/`, state directories, and workspace config. Warnings are acceptable only if they are intentional, for example telemetry contribution or embeddings enabled for a controlled pilot.
 
+If a user reports install or startup issues, collect `mesh support` and `mesh doctor full` before asking for repo-specific files.
+
 ## Golden Path
 
 The first supported workflow should stay narrow:
@@ -83,6 +85,7 @@ Before a public beta, require:
 - `npm run verify:release` green on the release machine.
 - Fresh install verified via `npm install -g` or the published package.
 - `npm run smoke:published` green after the package is published.
+- `mesh support` works without authentication.
 - Five external repositories dogfooded, including at least one monorepo and one repo with no existing tests.
 - A documented rollback path for the npm release.
 - Hosted proxy quotas, rate limits, and error dashboards enabled.

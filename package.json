@@ -52,13 +52,15 @@
     "enquirer": "^2.4.1",
     "glob": "^13.0.6",
     "ignore": "^7.0.5",
-    "keytar": "^7.9.0",
     "marked": "^11.0.1",
     "marked-terminal": "^6.2.0",
     "ora": "^7.0.1",
     "picocolors": "^1.0.0",
     "ts-morph": "^24.0.0",
     "z3-solver": "^4.13.0"
+  },
+  "optionalDependencies": {
+    "keytar": "^7.9.0"
   },
   "devDependencies": {
     "@types/marked-terminal": "^6.1.0",

@@ -7,10 +7,11 @@ Use this runbook for private alpha users.
 Ask users for:
 
 - Mesh version: `mesh --version`
+- Support snapshot: `mesh support`
 - Install path: `which mesh`
 - Node version: `node --version`
 - OS and shell
-- Output of `/doctor`
+- Output of `mesh doctor full`
 - The command or prompt that failed
 - The relevant error text
 - Whether `.mesh/` may be shared
@@ -28,7 +29,7 @@ Do not ask for full source archives by default. Prefer targeted snippets, error 
 
 ## First Response
 
-1. Ask the user to run `/doctor`.
+1. Ask the user to run `mesh support` and `mesh doctor full`.
 2. Confirm whether the failure reproduces on `mesh --help` or only inside a workspace.
 3. If install-related, run the release smoke locally before debugging further.
 4. If model-related, check proxy health, quota, and fallback model logs.

@@ -50,13 +50,22 @@ try {
   const meshBin = path.join(binDir, process.platform === "win32" ? "mesh.cmd" : "mesh");
   const version = run(meshBin, ["--version"], { capture: true }).stdout.trim();
   const help = run(meshBin, ["--help"], { capture: true }).stdout;
+  const support = run(meshBin, ["support"], { capture: true }).stdout;
 
   if (packageVersion && version !== packageVersion) {
     throw new Error(`Expected mesh --version=${packageVersion}, got ${version}`);
   }
-  if (!help.includes("mesh init") || !help.includes("mesh doctor")) {
+  if (!help.includes("mesh init") || !help.includes("mesh doctor") || !help.includes("mesh support")) {
     throw new Error("mesh --help is missing first-run commands.");
   }
+  if (!support.includes("Mesh Support Info") || !support.includes("mesh:")) {
+    throw new Error("mesh support output is missing expected support info.");
+  }
+
+  const workspace = path.join(tmp, "workspace");
+  mkdirSync(workspace, { recursive: true });
+  run("git", ["init"], { cwd: workspace, capture: true });
+  run(meshBin, ["doctor", "brief"], { cwd: workspace, timeoutMs: 30000 });
 
   console.log(`[published-smoke] ok: ${spec} installed and mesh --version=${version}`);
 } catch (error) {

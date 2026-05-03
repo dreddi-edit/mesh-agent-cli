@@ -11,6 +11,7 @@
 - Added `/doctor` checks for workspace writability, Mesh state path, release guardrails, and network timeouts.
 - Added `mesh init` and `/start` for the first-user golden path.
 - Added `/change <small goal>` for narrow verified code changes.
+- Added `mesh support` for auth-free bug report diagnostics.
 - Added Go-Live, Privacy, and Support documentation under `docs/`.
 
 ### Changed
@@ -20,6 +21,7 @@
 - Watchers are no longer recursive across the full repo and can be disabled with `MESH_DISABLE_WATCHERS=1`.
 - Test runner disables watchers by default for deterministic CI/local runs.
 - `/doctor fix` applies safe local setup repairs while leaving shell, Git, and auth changes manual.
+- Authentication no longer hard-fails when the OS keychain native module is unavailable; Mesh falls back to a `0600` session file.
 
 ### Fixed
 
