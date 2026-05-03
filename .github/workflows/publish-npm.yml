@@ -12,6 +12,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    env:
+      HAS_HOMEBREW_TOKEN: ${{ secrets.HOMEBREW_GITHUB_TOKEN != '' }}
 
     steps:
       - name: Checkout
@@ -29,11 +31,13 @@ jobs:
       - name: Install
         run: npm install
 
-      - name: Build
-        run: npm run build
+      - name: Validate npm auth
+        run: npm whoami
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN || secrets.NPM }}
 
-      - name: Verify build
-        run: ls -R dist/
+      - name: Verify release
+        run: npm run verify:release
 
       - name: Align package scope (if needed)
         run: |
@@ -67,14 +71,24 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN || secrets.NPM }}
 
-      - name: Update Homebrew Tap
+      - name: Verify published install
         if: steps.version_check.outputs.exists == 'false'
+        run: |
+          sleep 10
+          npm run smoke:published
+
+      - name: Update Homebrew Tap
+        if: steps.version_check.outputs.exists == 'false' && env.HAS_HOMEBREW_TOKEN == 'true'
         run: |
           # The package might take a few seconds to become available on NPM
           sleep 10 
           ./scripts/update-brew.sh
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_GITHUB_TOKEN }}
+
+      - name: Skip Homebrew Tap
+        if: steps.version_check.outputs.exists == 'false' && env.HAS_HOMEBREW_TOKEN != 'true'
+        run: echo "HOMEBREW_GITHUB_TOKEN is not configured; npm release succeeded, Homebrew update skipped."
 
       - name: Already published
         if: steps.version_check.outputs.exists == 'true'
