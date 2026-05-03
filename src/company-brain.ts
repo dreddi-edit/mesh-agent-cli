@@ -11,16 +11,16 @@ type ToolCaller = (name: string, args: Record<string, unknown>) => Promise<unkno
 type BrainAction = "build" | "query" | "status" | "record" | "ingest" | "export";
 
 interface CompanyBrainDocument {
-  id: string;
-  kind: "source" | "test" | "config" | "doc" | "memory" | "runtime" | "issue" | "symbol" | "route";
-  file?: string;
-  title: string;
-  lineStart?: number;
-  lineEnd?: number;
-  text: string;
-  keywords: string[];
-  domain?: string;
-  score?: number;
+  i: string; // id
+  k: "source" | "test" | "config" | "doc" | "memory" | "runtime" | "issue" | "symbol" | "route"; // kind
+  f?: string; // file
+  t: string; // title
+  s?: number; // lineStart
+  e?: number; // lineEnd
+  x: string; // text
+  w: string[]; // keywords
+  d?: string; // domain
+  z?: number; // score (was score)
 }
 
 interface CompanyBrainEvent {
@@ -199,17 +199,17 @@ export class CompanyBrainEngine {
       builtAt: state.builtAt,
       answer: buildGroundedAnswer(question, matches, rules),
       citations: matches.map((doc) => ({
-        id: doc.id,
-        kind: doc.kind,
-        file: doc.file,
-        lineStart: doc.lineStart,
-        lineEnd: doc.lineEnd,
-        title: doc.title,
-        score: Number((doc.score ?? 0).toFixed(3)),
-        snippet: doc.text.slice(0, 600)
+        id: doc.i,
+        kind: doc.k,
+        file: doc.f,
+        lineStart: doc.s,
+        lineEnd: doc.e,
+        title: doc.t,
+        score: Number((doc.z ?? 0).toFixed(3)),
+        snippet: doc.x.slice(0, 600)
       })),
       memoryRules: rules,
-      recommendedFiles: unique(matches.map((doc) => doc.file).filter((file): file is string => Boolean(file)), 12),
+      recommendedFiles: unique(matches.map((doc) => doc.f).filter((file): file is string => Boolean(file)), 12),
       path: relativeArtifact(this.brainPath())
     };
   }
@@ -367,29 +367,29 @@ function extractFileDocuments(file: string, raw: string): CompanyBrainDocument[]
   const symbols = symbolHints(safe);
   if (symbols.length > 0) {
     docs.push({
-      id: docId(file, "symbols", 1),
-      kind: "symbol",
-      file,
-      title: `Symbols in ${file}`,
-      lineStart: 1,
-      lineEnd: Math.min(lines.length, 200),
-      text: symbols.slice(0, 80).join("\n"),
-      keywords: keywords(`${file} ${symbols.join(" ")}`),
-      domain
+      i: docId(file, "symbols", 1),
+      k: "symbol",
+      f: file,
+      t: `Symbols in ${file}`,
+      s: 1,
+      e: Math.min(lines.length, 200),
+      x: symbols.slice(0, 80).join("\n"),
+      w: keywords(`${file} ${symbols.join(" ")}`),
+      d: domain
     });
   }
   const routes = routeHints(safe);
   if (routes.length > 0) {
     docs.push({
-      id: docId(file, "routes", 1),
-      kind: "route",
-      file,
-      title: `Routes in ${file}`,
-      lineStart: 1,
-      lineEnd: Math.min(lines.length, 200),
-      text: routes.slice(0, 80).join("\n"),
-      keywords: keywords(`${file} ${routes.join(" ")}`),
-      domain
+      i: docId(file, "routes", 1),
+      k: "route",
+      f: file,
+      t: `Routes in ${file}`,
+      s: 1,
+      e: Math.min(lines.length, 200),
+      x: routes.slice(0, 80).join("\n"),
+      w: keywords(`${file} ${routes.join(" ")}`),
+      d: domain
     });
   }
   const chunkSize = kind === "doc" ? 90 : 70;
@@ -398,15 +398,15 @@ function extractFileDocuments(file: string, raw: string): CompanyBrainDocument[]
     const text = slice.join("\n").trim();
     if (!text) continue;
     docs.push({
-      id: docId(file, kind, start + 1),
-      kind,
-      file,
-      title: `${file}:${start + 1}`,
-      lineStart: start + 1,
-      lineEnd: Math.min(lines.length, start + slice.length),
-      text: text.slice(0, 2400),
-      keywords: keywords(`${file}\n${text}`),
-      domain
+      i: docId(file, kind, start + 1),
+      k: kind,
+      f: file,
+      t: `${file}:${start + 1}`,
+      s: start + 1,
+      e: Math.min(lines.length, start + slice.length),
+      x: text.slice(0, 2400),
+      w: keywords(`${file}\n${text}`),
+      d: domain
     });
   }
   return docs;
@@ -423,11 +423,11 @@ function memoryDocuments(memory: Record<string, any>): CompanyBrainDocument[] {
     const text = stringArray(values, 200).join("\n");
     if (!text.trim()) continue;
     docs.push({
-      id: docId(`memory:${key}`, "memory", 1),
-      kind: "memory",
-      title: `Engineering memory: ${key}`,
-      text,
-      keywords: keywords(text)
+      i: docId(`memory:${key}`, "memory", 1),
+      k: "memory",
+      t: `Engineering memory: ${key}`,
+      x: text,
+      w: keywords(text)
     });
   }
   return docs;
@@ -438,12 +438,12 @@ function digitalTwinDocuments(twin: Record<string, any>): CompanyBrainDocument[]
   const routes = Array.isArray(twin?.routes) ? twin.routes : [];
   if (routes.length > 0) {
     const text = routes.slice(0, 250).map((entry: any) => `${entry.file ?? ""} ${entry.method ?? ""} ${entry.path ?? entry.route ?? ""}`).join("\n");
-    docs.push({ id: "digital-twin-routes", kind: "route", title: "Digital Twin Routes", text, keywords: keywords(text) });
+    docs.push({ i: "digital-twin-routes", k: "route", t: "Digital Twin Routes", x: text, w: keywords(text) });
   }
   const risks = Array.isArray(twin?.riskHotspots) ? twin.riskHotspots : [];
   if (risks.length > 0) {
     const text = risks.slice(0, 200).map((entry: any) => `${entry.file}: ${(entry.risks ?? []).join(", ")}`).join("\n");
-    docs.push({ id: "digital-twin-risks", kind: "runtime", title: "Digital Twin Risk Hotspots", text, keywords: keywords(text) });
+    docs.push({ i: "digital-twin-risks", k: "runtime", t: "Digital Twin Risk Hotspots", x: text, w: keywords(text) });
   }
   return docs;
 }
@@ -453,11 +453,11 @@ function issueDocuments(issues: any[]): CompanyBrainDocument[] {
   return issues.slice(0, 200).map((issue, index) => {
     const text = `${issue.provider ?? "issue"} ${issue.id ?? index}: ${issue.title ?? ""}\n${issue.body ?? ""}`;
     return {
-      id: `issue-${issue.provider ?? "local"}-${issue.id ?? index}`,
-      kind: "issue" as const,
-      title: String(issue.title ?? `Issue ${index + 1}`),
-      text: redactSecrets(text).slice(0, 2000),
-      keywords: keywords(text)
+      i: `issue-${issue.provider ?? "local"}-${issue.id ?? index}`,
+      k: "issue" as const,
+      t: String(issue.title ?? `Issue ${index + 1}`),
+      x: redactSecrets(text).slice(0, 2000),
+      w: keywords(text)
     };
   });
 }
@@ -465,15 +465,15 @@ function issueDocuments(issues: any[]): CompanyBrainDocument[] {
 function eventDocument(event: CompanyBrainEvent): CompanyBrainDocument {
   const text = `${event.kind}: ${event.title}\n${event.body}\n${event.files.join("\n")}`;
   return {
-    id: event.id,
-    kind: "memory",
-    title: event.title,
-    text,
-    keywords: keywords(text)
+    i: event.id,
+    k: "memory",
+    t: event.title,
+    x: text,
+    w: keywords(text)
   };
 }
 
-function classifyFile(file: string): CompanyBrainDocument["kind"] {
+function classifyFile(file: string): CompanyBrainDocument["k"] {
   if (/(\.test|\.spec)\.(ts|tsx|js|jsx|mjs|cjs)$|(^|\/)(test|tests|__tests__)\//.test(file)) return "test";
   if (/\.(md|mdx)$/.test(file)) return "doc";
   if (/(^|\/)(package\.json|tsconfig\.json|.*config.*|Dockerfile|\.github\/workflows|.*\.ya?ml|.*\.toml)$/.test(file)) return "config";
@@ -516,9 +516,9 @@ function summarizeDomains(files: string[], risks: any[]): Array<{ name: string; 
 
 function scoreDocuments(query: string, docs: CompanyBrainDocument[]): CompanyBrainDocument[] {
   return docs
-    .map((doc) => ({ ...doc, score: lexicalScore(query, `${doc.title}\n${doc.file ?? ""}\n${doc.text}\n${doc.keywords.join(" ")}`) }))
-    .filter((doc) => (doc.score ?? 0) > 0)
-    .sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
+    .map((doc) => ({ ...doc, z: lexicalScore(query, `${doc.t}\n${doc.f ?? ""}\n${doc.x}\n${doc.w.join(" ")}`) }))
+    .filter((doc) => (doc.z ?? 0) > 0)
+    .sort((left, right) => (right.z ?? 0) - (left.z ?? 0));
 }
 
 function lexicalScore(query: string, text: string): number {
@@ -539,8 +539,8 @@ function buildGroundedAnswer(query: string, matches: CompanyBrainDocument[], rul
   if (matches.length === 0 && rules.length === 0) {
     return `No strong Company Brain matches for "${query}". Rebuild the brain after indexing or ask a narrower question.`;
   }
-  const topFiles = unique(matches.map((doc) => doc.file).filter((file): file is string => Boolean(file)), 5);
-  const topKinds = unique(matches.map((doc) => doc.kind), 5);
+  const topFiles = unique(matches.map((doc) => doc.f).filter((file): file is string => Boolean(file)), 5);
+  const topKinds = unique(matches.map((doc) => doc.k), 5);
   return [
     `Company Brain found ${matches.length} grounded match(es) for "${query}".`,
     topFiles.length > 0 ? `Most relevant files: ${topFiles.join(", ")}.` : "",

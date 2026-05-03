@@ -22,9 +22,9 @@ const execFileAsync = promisify(execFile);
 
 const INDEX_SCHEMA_VERSION = 1;
 const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
-const EMBEDDINGS_ENABLED = /^(1|true|yes)$/i.test(process.env.MESH_ENABLE_EMBEDDINGS ?? "");
-const EMBEDDING_TIMEOUT_MS = parseIntegerInRange(process.env.MESH_EMBEDDING_TIMEOUT_MS, 8000, 500, 60000);
-const DEFAULT_EMBEDDING_MODEL = process.env.MESH_EMBEDDING_MODEL || "Xenova/all-MiniLM-L6-v2";
+const EMBEDDINGS_ENABLED = !/^(0|false|no)$/i.test(process.env.MESH_ENABLE_EMBEDDINGS ?? "true");
+const EMBEDDING_TIMEOUT_MS = parseIntegerInRange(process.env.MESH_EMBEDDING_TIMEOUT_MS, 12000, 500, 60000);
+const DEFAULT_EMBEDDING_MODEL = process.env.MESH_EMBEDDING_MODEL || "nvidia/nv-embedcode-7b-v1";
 const DEFAULT_SKIP_DIRS = [
   ".git",
   ".mesh",

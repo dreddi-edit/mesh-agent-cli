@@ -214,7 +214,7 @@ async function readJsonFile<T>(filePath: string, fallback: T): Promise<T> {
 
 async function writeJsonFile(filePath: string, value: unknown): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(value, null, 2), "utf8");
+  await fs.writeFile(filePath, JSON.stringify(value), "utf8");
 }
 
 function uniqueStrings(values: Array<string | undefined | null>, limit = 100): string[] {
@@ -318,7 +318,8 @@ function extractSymbolHints(raw: string): Array<{ name: string; kind: string; li
     { kind: "function", regex: /\b(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/g },
     { kind: "class", regex: /\b(?:export\s+)?class\s+([A-Za-z_$][\w$]*)/g },
     { kind: "const", regex: /\b(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*=/g },
-    { kind: "type", regex: /\b(?:export\s+)?(?:type|interface)\s+([A-Za-z_$][\w$]*)/g }
+    { kind: "type", regex: /\b(?:export\s+)?(?:type|interface)\s+([A-Za-z_$][\w$]*)/g },
+    { kind: "zod", regex: /\b(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*=\s*z\.(?:object|string|number|array|boolean|enum|nativeEnum|union|intersection|tuple|record|map|set|function|lazy|promise|any|unknown|never|void|undefined|null|nan)/g }
   ];
   for (const pattern of patterns) {
     for (const match of raw.matchAll(pattern.regex)) {
@@ -330,6 +331,35 @@ function extractSymbolHints(raw: string): Array<{ name: string; kind: string; li
     }
   }
   return symbols;
+}
+
+function extractSchemaDefinitions(raw: string): Record<string, string> {
+  const schemas: Record<string, string> = {};
+  const patterns = [
+    { regex: /\b(?:export\s+)?interface\s+([A-Za-z_$][\w$]*)\s*(\{[\s\S]*?\})/g },
+    { regex: /\b(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]+);/g },
+    { regex: /\b(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*=\s*z\.object\s*\((\{[\s\S]*?\})\)/g }
+  ];
+  for (const p of patterns) {
+    for (const match of raw.matchAll(p.regex)) {
+      schemas[match[1]] = match[2].replace(/\s+/g, " ").trim();
+    }
+  }
+  return schemas;
+}
+
+function extractImports(raw: string): string[] {
+  const imports: string[] = [];
+  const patterns = [
+    /import\s+.*?\s+from\s+["'`]([^"'`]+)["'`]/g,
+    /require\(\s*["'`]([^"'`]+)["'`]\)/g
+  ];
+  for (const pattern of patterns) {
+    for (const match of raw.matchAll(pattern)) {
+      imports.push(match[1]);
+    }
+  }
+  return imports;
 }
 
 function detectRiskHints(relativePath: string, raw: string): string[] {
@@ -4513,6 +4543,13 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
     const env = await this.collectEnvNames(envFiles);
     const git = await this.getGitStatus();
     const index = await this.workspaceIndex.status();
+
+    // High-density AI brain prune: only raw routes and symbols
+    const prunedTwin = {
+      routes: routes.map(r => ({ f: r.file, m: r.method, r: r.route, l: r.line })),
+      symbols: symbols.map(s => ({ f: s.file, n: s.name, k: s.kind, l: s.line }))
+    };
+
     const twin = {
       schemaVersion: 1,
       builtAt: new Date().toISOString(),
@@ -4542,8 +4579,8 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
           .map(([name, value]) => ({ name, command: value }))
       },
       tests: testFiles.slice(0, 250),
-      routes: routes.slice(0, 250),
-      symbols: symbols.slice(0, 1000),
+      routes: prunedTwin.routes.slice(0, 500),
+      symbols: prunedTwin.symbols.slice(0, 2000),
       riskHotspots: riskHotspots.sort((left: any, right: any) => right.score - left.score).slice(0, 100),
       git
     };
@@ -6208,42 +6245,61 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
     const exists = await fs.access(meshDir).then(() => true).catch(() => false);
     if (!exists) return;
 
-    // Simple heuristic-based update for now
-    const architecturePath = path.join(meshDir, "architecture.md");
-    const depGraphPath = path.join(meshDir, "dependency_graph.md");
+    const files = await collectFiles(this.workspaceRoot, 2000, this.workspaceRoot);
+    const tsFiles = files.filter(f => f.endsWith(".ts") || f.endsWith(".tsx") || f.endsWith(".js"));
+    const relativeFiles = tsFiles.map(f => toPosixRelative(this.workspaceRoot, f));
 
-    const files = await collectFiles(this.workspaceRoot, 1000, this.workspaceRoot);
-    const tsFiles = files.filter(f => f.endsWith(".ts") || f.endsWith(".js"));
+    // 1. Dependency Graph: Raw adjacency notation "file -> dep1, dep2"
+    const depLines: string[] = [];
+    for (const rel of relativeFiles.slice(0, 100)) {
+      try {
+        const abs = ensureInsideRoot(this.workspaceRoot, rel);
+        const content = await fs.readFile(abs, "utf8");
+        const imports = extractImports(content);
+        if (imports.length > 0) {
+          depLines.push(`${rel} -> ${imports.join(", ")}`);
+        }
+      } catch { /* skip */ }
+    }
+    await fs.writeFile(path.join(meshDir, "dependency_graph.md"), depLines.join("\n"));
 
-    const architecture = [
-      "# Project Architecture 🏛️",
-      "",
-      `Last full index: ${new Date().toISOString()}`,
-      `Total indexed files: ${files.length}`,
-      "",
-      "## 📦 Core Modules",
-      ...tsFiles.slice(0, 10).map(f => `- ${toPosixRelative(this.workspaceRoot, f)}`),
-      tsFiles.length > 10 ? `- ... and ${tsFiles.length - 10} more` : "",
-      "",
-      "---",
-      "*Maintained by Mesh Intelligence.*"
-    ].join("\n");
+    // 2. Architecture: Flat layer map "LAYER: file1, file2"
+    const layers: Record<string, string[]> = { CORE: [], API: [], INFRA: [], MCP: [] };
+    for (const rel of relativeFiles) {
+      if (rel.includes("agent-loop") || rel.includes("agent-os") || rel.includes("mesh-core")) layers.CORE.push(rel);
+      else if (rel.includes("api") || rel.includes("gateway") || rel.includes("server") || rel.includes("portal")) layers.API.push(rel);
+      else if (rel.includes("index") || rel.includes("cache") || rel.includes("storage") || rel.includes("db") || rel.includes("assembler")) layers.INFRA.push(rel);
+      else if (rel.includes("mcp")) layers.MCP.push(rel);
+    }
+    const archLines = Object.entries(layers)
+      .filter(([_, files]) => files.length > 0)
+      .map(([name, files]) => `${name}: ${files.slice(0, 20).join(", ")}`);
+    await fs.writeFile(path.join(meshDir, "architecture.md"), archLines.join("\n"));
 
-    await fs.writeFile(architecturePath, architecture);
+    // 3. schemas.json: Flat JSON map of type definitions
+    const schemas: Record<string, string> = {};
+    for (const rel of relativeFiles.slice(0, 150)) {
+      try {
+        const abs = ensureInsideRoot(this.workspaceRoot, rel);
+        const content = await fs.readFile(abs, "utf8");
+        const defs = extractSchemaDefinitions(content);
+        Object.assign(schemas, defs);
+      } catch { /* skip */ }
+    }
+    await writeJsonFile(path.join(meshDir, "schemas.json"), schemas);
 
-    const depGraph = [
-      "# Dependency Graph 🕸️",
-      "",
-      "## Module Map",
-      ...tsFiles.slice(0, 15).map(f => {
-        const rel = toPosixRelative(this.workspaceRoot, f);
-        return `- ${rel}`;
-      }),
-      "",
-      "---",
-      "*Generated by Mesh. Update manually for specific deep-links.*"
-    ].join("\n");
-
-    await fs.writeFile(depGraphPath, depGraph);
+    // 4. ops.json: Task-to-Path map
+    const ops: Record<string, string[]> = {
+      "add_mcp_tool": ["src/mcp-client.ts", "src/local-tools.ts", "src/agent-loop.ts"],
+      "fix_auth": ["src/auth.ts", "src/mesh-gateway.ts"],
+      "update_index": ["src/workspace-index.ts", "src/cache-manager.ts"],
+      "refactor_brain": ["src/mesh-brain.ts", "src/company-brain.ts"],
+      "debug_runtime": ["src/runtime-api.ts", "src/agent-os.ts"],
+      "test_setup": ["scripts/run-tests.cjs", "tests/"]
+    };
+    if (relativeFiles.some(f => f.includes("moonshots"))) {
+      ops["moonshot_dev"] = ["src/moonshots/common.ts", "src/agent-loop.ts"];
+    }
+    await writeJsonFile(path.join(meshDir, "ops.json"), ops);
   }
 }

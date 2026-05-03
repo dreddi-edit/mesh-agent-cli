@@ -19,15 +19,15 @@ export interface BrainPattern {
 }
 
 export interface BrainContribution {
-  workspaceFingerprint: string;
-  errorSignature: string;
-  diffPattern: string;
-  verificationResult: {
-    verdict: "pass" | "fail" | "unknown";
-    command?: string;
-    exitCode?: number;
-    tsc?: "pass" | "fail" | "unknown";
-    lint?: "pass" | "fail" | "unknown";
+  f: string; // workspaceFingerprint
+  e: string; // errorSignature
+  d: string; // diffPattern
+  v: { // verificationResult
+    r: "pass" | "fail" | "unknown"; // verdict
+    c?: string; // command
+    x?: number; // exitCode
+    t?: "pass" | "fail" | "unknown"; // tsc
+    l?: "pass" | "fail" | "unknown"; // lint
   };
 }
 
@@ -88,7 +88,7 @@ export class MeshBrainClient {
       telemetryContribute: state.telemetryContribute,
       endpoint: state.endpoint,
       contributions: state.contributions.length,
-      lastContributionAt: state.contributions[0]?.at ?? null
+      lastContributionAt: state.contributions[0]?.a ?? null
     };
   }
 
@@ -121,13 +121,13 @@ export class MeshBrainClient {
     const local = state.contributions
       .map((entry, index) => ({
         id: `local-${index + 1}`,
-        score: similarity(entry.errorSignature, args.errorSignature),
-        errorSignature: entry.errorSignature,
-        diffPattern: entry.diffPattern,
+        score: similarity(entry.e, args.errorSignature),
+        errorSignature: entry.e,
+        diffPattern: entry.d,
         fixSummary: "Historical local timeline promotion",
-        successRate: entry.verificationResult.verdict === "pass" ? 1 : 0,
+        successRate: entry.v.r === "pass" ? 1 : 0,
         usageCount: 1,
-        verification: entry.verificationResult
+        verification: entry.v
       }))
       .filter((pattern) => pattern.score > 0.15)
       .sort((left, right) => right.score - left.score)
@@ -172,8 +172,8 @@ export class MeshBrainClient {
       return { ok: true, contributed: false, reason: "telemetry_opted_out" };
     }
 
-    const item = { ...payload, at: new Date().toISOString() };
-    state.contributions.unshift(item);
+    const item = { ...payload, a: new Date().toISOString() };
+    state.contributions.unshift(item as any);
     state.contributions = state.contributions.slice(0, 250);
     await this.writeState(state);
 
@@ -199,14 +199,14 @@ export class MeshBrainClient {
   private async readState(): Promise<{
     telemetryContribute: boolean;
     endpoint?: string;
-    contributions: Array<BrainContribution & { at: string }>;
+    contributions: Array<BrainContribution & { a: string }>;
   }> {
     try {
       const raw = await fs.readFile(this.telemetryPath, "utf8");
       const parsed = JSON.parse(raw) as {
         telemetryContribute?: boolean;
         endpoint?: string;
-        contributions?: Array<BrainContribution & { at: string }>;
+        contributions?: Array<BrainContribution & { a: string }>;
       };
       return {
         telemetryContribute: parsed.telemetryContribute ?? this.telemetryContribute,
@@ -225,10 +225,10 @@ export class MeshBrainClient {
   private async writeState(state: {
     telemetryContribute: boolean;
     endpoint?: string;
-    contributions: Array<BrainContribution & { at: string }>;
+    contributions: Array<BrainContribution & { a: string }>;
   }): Promise<void> {
     await fs.mkdir(path.dirname(this.telemetryPath), { recursive: true });
-    await fs.writeFile(this.telemetryPath, JSON.stringify(state, null, 2), "utf8");
+    await fs.writeFile(this.telemetryPath, JSON.stringify(state), "utf8");
   }
 }
 

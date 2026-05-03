@@ -24,7 +24,7 @@ export async function readJson<T>(filePath: string, fallback: T): Promise<T> {
 
 export async function writeJson(filePath: string, value: unknown): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(value, null, 2), "utf8");
+  await fs.writeFile(filePath, JSON.stringify(value), "utf8");
 }
 
 export async function appendJsonl(filePath: string, value: unknown): Promise<void> {
