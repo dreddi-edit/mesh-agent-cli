@@ -44,6 +44,10 @@ if (files.length === 0) {
 
 const result = spawnSync(process.execPath, ["--import", "tsx", "--test", ...files], {
   cwd: root,
+  env: {
+    ...process.env,
+    MESH_DISABLE_WATCHERS: process.env.MESH_DISABLE_WATCHERS || "1"
+  },
   stdio: "inherit"
 });
 

@@ -690,8 +690,11 @@ export function detectStreamingHazard(streamSoFar: string, delta: string): strin
   }
 
   // 5. Classic Hallucination Checks
+  if (/\bprocess\.env\.[A-Z0-9_]+\s*\.\s*(?:trim|toLowerCase|toUpperCase|split|replace)\s*\(/i.test(recent)) {
+    return "CODE HAZARD: unsafe chained env access";
+  }
   if (/\b(?:undefined|null)\s*(?:\.|\[)\s*[a-zA-Z_$]/i.test(recent)) {
-    return "CODE HAZARD: Potential null/undefined access";
+    return "CODE HAZARD: Potential null/undefined property access";
   }
 
   return null;

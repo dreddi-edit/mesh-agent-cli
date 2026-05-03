@@ -7,28 +7,33 @@
   "license": "UNLICENSED",
   "repository": {
     "type": "git",
-    "url": "https://github.com/dreddi-edit/mesh-agent-cli"
+    "url": "git+https://github.com/dreddi-edit/mesh-agent-cli.git"
   },
   "homepage": "https://github.com/dreddi-edit/mesh-agent-cli",
   "bin": {
-    "mesh": "./dist/index.js",
-    "mesh-agent": "./dist/index.js",
-    "mesh-daemon": "./dist/daemon.js"
+    "mesh": "dist/index.js",
+    "mesh-agent": "dist/index.js",
+    "mesh-daemon": "dist/daemon.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/minify.js",
     "dev": "tsx src/index.ts",
     "test": "node scripts/run-tests.cjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "smoke:release": "node scripts/release-smoke.cjs",
+    "verify:release": "npm run typecheck && npm run build && npm run test && npm run smoke:release",
+    "publish:dry-run": "npm publish --dry-run --access public",
     "eval": "tsx scripts/run-eval.ts",
     "lint": "eslint src/**/*.ts",
-    "prepublishOnly": "npm run build",
+    "prepublishOnly": "npm run verify:release",
     "postinstall": "node scripts/postinstall.cjs"
   },
   "files": [
     "assets",
+    "docs",
     "dist",
     "scripts",
+    "CHANGELOG.md",
     "LICENSE",
     "README.md"
   ],
@@ -41,7 +46,7 @@
     "boxen": "^7.1.1",
     "dotenv": "^16.4.5",
     "enquirer": "^2.4.1",
-    "glob": "^11.0.0",
+    "glob": "^13.0.6",
     "ignore": "^7.0.5",
     "keytar": "^7.9.0",
     "marked": "^11.0.1",

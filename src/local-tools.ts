@@ -1,4 +1,4 @@
-import { promises as fs, existsSync, watch, writeFileSync } from "node:fs";
+import { promises as fs, existsSync, watch, type FSWatcher } from "node:fs";
 import path from "node:path";
 import { exec, spawn, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
@@ -123,6 +123,9 @@ import { SemanticSheriffEngine } from "./moonshots/semantic-sheriff.js";
 const SKIP_DIRS = [".git", "node_modules", "dist", ".mesh"];
 const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
 const CAPSULE_TIERS = ["low", "medium", "high"] as const;
+const WATCHER_DISABLED = /^(1|true|yes)$/i.test(process.env.MESH_DISABLE_WATCHERS ?? "");
+const BACKGROUND_RESOLVER_ENABLED = /^(1|true|yes)$/i.test(process.env.MESH_ENABLE_BACKGROUND_RESOLVER ?? "");
+const WATCHABLE_DIRS = ["src", "tests", "docs", "scripts", "packages", "mesh-core/src", "worker/src"];
 
 function parseIntegerInRange(value: string | undefined, fallback: number, min: number, max: number): number {
   const parsed = Number(value);
@@ -134,6 +137,13 @@ function parseIntegerInRange(value: string | undefined, fallback: number, min: n
 
 function normalizeCapsuleTier(value: string): "low" | "medium" | "high" {
   return CAPSULE_TIERS.includes(value as any) ? value as "low" | "medium" | "high" : "medium";
+}
+
+function isWatchableSourcePath(filename: string): boolean {
+  if (filename.includes("node_modules") || filename.includes(".git") || filename.includes("dist") || filename.includes(".mesh")) {
+    return false;
+  }
+  return /\.(ts|tsx|js|jsx|mjs|cjs|json|md|py|go|rs|cpp|c|h|java)$/.test(filename);
 }
 
 function toPosixRelative(root: string, absolutePath: string): string {
@@ -433,7 +443,7 @@ export class LocalToolBackend implements ToolBackend {
   private readonly meshCore = new MeshCoreAdapter();
   private readonly cache: CacheManager;
   private agentPlan: string = "No plan defined yet.";
-  private watcher: any = null;
+  private watchers: FSWatcher[] = [];
   private recentChanges: { file: string; diff: string; time: string }[] = [];
   private sessionSymbolIndex: Map<number, { path: string; name: string }> = new Map();
   private projectLexicon: Record<string, string> = {};
@@ -606,116 +616,77 @@ export class LocalToolBackend implements ToolBackend {
   }
 
   private startWatcher() {
-    try {
-      // Non-recursive watch on key directories to avoid EMFILE limits, or just the src directory.
-      // For a robust minimalist approach, we watch the root and immediate children.
-      const srcPath = path.join(this.workspaceRoot, "src");
-      const watcher = watch(this.workspaceRoot, { recursive: true }, async (eventType: string, filename: string | null) => {
-        if (!filename) return;
-        if (filename.includes("node_modules") || filename.includes(".git") || filename.includes("dist")) return;
-        if (!filename.match(/\.(ts|js|tsx|jsx|py|go|rs|cpp|c|h|java)$/)) return;
+    if (WATCHER_DISABLED || this.watchers.length > 0) return;
+    const watchRoots = [this.workspaceRoot, ...WATCHABLE_DIRS.map((dir) => path.join(this.workspaceRoot, dir))]
+      .filter((dir, index, dirs) => existsSync(dir) && dirs.indexOf(dir) === index);
 
-        try {
-          const absPath = path.join(this.workspaceRoot, filename);
-          const stat = await fs.stat(absPath);
+    for (const watchRoot of watchRoots) {
+      try {
+        const watcher = watch(watchRoot, { recursive: false }, async (_eventType: string, filename: string | null) => {
+          if (!filename) return;
+          const absPath = path.resolve(watchRoot, filename);
           const rel = toPosixRelative(this.workspaceRoot, absPath);
-          const mtimeMs = Math.floor(stat.mtimeMs);
+          if (rel.startsWith("..") || path.isAbsolute(rel) || !isWatchableSourcePath(rel)) return;
+          await this.handleWatchedFile(absPath, rel);
+        });
+        watcher.on("error", () => this.closeWatcher(watcher));
+        watcher.unref?.();
+        this.watchers.push(watcher);
+      } catch {
+        // Watchers are best-effort. Mesh must still start if live sync is unavailable.
+      }
+    }
+  }
 
-          // Capture structural diff for Time-Travel AST Diffing & Predictive Synthesis
-          try {
-            const { stdout } = await execAsync(`git diff -U1 "${rel}"`, { cwd: this.workspaceRoot });
-            if (stdout) {
-              const diffText = stdout.slice(0, 1000);
-              this.recentChanges.unshift({ file: rel, diff: diffText, time: new Date().toISOString() });
-              if (this.recentChanges.length > 5) this.recentChanges.pop();
+  private closeWatcher(watcher: FSWatcher): void {
+    try {
+      watcher.close();
+    } catch {
+      // Ignore shutdown errors.
+    }
+    this.watchers = this.watchers.filter((entry) => entry !== watcher);
+  }
 
-              // Local Compute Heuristic: Detect structural intent without LLM
-              const addedLines = diffText.split("\\n").filter(l => l.startsWith("+") && !l.startsWith("+++")).map(l => l.slice(1).trim());
-              let intentDetected = false;
-              let intentMessage = "";
+  private async handleWatchedFile(absPath: string, rel: string): Promise<void> {
+    try {
+      const stat = await fs.stat(absPath);
+      if (!stat.isFile()) return;
+      const mtimeMs = Math.floor(stat.mtimeMs);
 
-              for (const line of addedLines) {
-                // Detect added DB Column or Type Property (e.g., "email: string;", "@Column()")
-                if (line.match(/^[a-zA-Z0-9_]+\s*:\s*[a-zA-Z0-9_\[\]]+;?$/) || line.includes("@Column") || line.includes("@Field")) {
-                  intentDetected = true;
-                  intentMessage = `Added data field/property '${line.split(":")[0]?.trim() || "new field"}' in ${path.basename(rel)}`;
-                  break;
-                }
-                // Detect new API route (e.g., router.post('/...', app.get('/...'))
-                if (line.match(/(router|app)\.(get|post|put|delete|patch)\(/)) {
-                  intentDetected = true;
-                  intentMessage = `Added new API route in ${path.basename(rel)}`;
-                  break;
-                }
-                // Detect new React Component export
-                if (line.match(/export (const|function) [A-Z][a-zA-Z0-9_]+.*=>|return\s*\<[A-Z]/)) {
-                  intentDetected = true;
-                  intentMessage = `Created UI Component in ${path.basename(rel)}`;
-                  break;
-                }
-              }
-
-              if (intentDetected) {
-                const intentPath = path.join(this.workspaceRoot, ".mesh", "latest_intent.json");
-                writeFileSync(intentPath, JSON.stringify({ file: rel, message: intentMessage, diff: diffText }));
-                process.stdout.write(`\\n\\x1b[36m[💡 Mesh Synthesis] Detected: ${intentMessage}. Type '/synthesize' to auto-generate full stack updates in a ghost branch.\\x1b[0m\\n❯ `);
-              }
-            }
-          } catch {
-            // Ignore git errors
-          }
-
-
-          // Debounce and background re-index
-          setTimeout(async () => {
-            const currentStat = await fs.stat(absPath).catch(() => null);
-            if (!currentStat || Math.floor(currentStat.mtimeMs) !== mtimeMs) return;
-
-            const raw = await fs.readFile(absPath, "utf8").catch(() => null);
-            if (!raw) return;
-
-            if (this.meshCore.isAvailable) {
-              const summaries = await this.meshCore.summarizeAllTiers(rel, raw);
-              await this.cache.setCapsule(rel, "low", summaries.low, mtimeMs);
-              await this.cache.setCapsule(rel, "medium", summaries.medium, mtimeMs);
-              await this.cache.setCapsule(rel, "high", summaries.high, mtimeMs);
-
-              // Background Resolving: Try fixing errors in the background
-              if (rel.match(/\.(ts|js|tsx)$/)) {
-                try {
-                  const diag = await this.getDiagnostics();
-                  if (!(diag as any).ok) {
-                    await this.recordPredictiveRepairSignal(rel, diag);
-                    // Pre-compute a fix using a sub-agent (0-token cost for main turn)
-                    const fixResult = await this.invokeSubAgent({
-                      prompt: `The file '${rel}' has the following error. Generate a precise alien_patch to fix it without changing logic:\n${(diag as any).output}`
-                    }).catch(() => null);
-                    if (fixResult && (fixResult as any).summary) {
-                      this.speculativeFixes.set(rel, (fixResult as any).summary);
-                      process.stdout.write(`\\n\\x1b[35m[🧠 Mesh Resolving] Background fix for ${path.basename(rel)} is ready. Type /fix to apply instantly.\\x1b[0m\\n❯ `);
-                    }
-                  }
-                } catch { /* Silent */ }
-              }
-            }
-          }, 1000);
-        } catch {
-          // File likely deleted, cache will naturally miss
+      try {
+        const { stdout } = await execAsync(`git diff -U1 "${rel}"`, { cwd: this.workspaceRoot });
+        if (stdout) {
+          this.recentChanges.unshift({ file: rel, diff: stdout.slice(0, 1000), time: new Date().toISOString() });
+          if (this.recentChanges.length > 5) this.recentChanges.pop();
         }
-      });
-      watcher.on("error", () => {
-        try {
-          watcher.close();
-        } catch {
-          // Ignore shutdown errors
-        }
-        if (this.watcher === watcher) {
-          this.watcher = null;
-        }
-      });
-      this.watcher = watcher;
-    } catch (e) {
-      this.watcher = null;
+      } catch {
+        // Ignore git errors.
+      }
+
+      setTimeout(() => {
+        this.refreshWatchedFile(absPath, rel, mtimeMs).catch(() => undefined);
+      }, 1000);
+    } catch {
+      // File likely deleted, cache will naturally miss.
+    }
+  }
+
+  private async refreshWatchedFile(absPath: string, rel: string, mtimeMs: number): Promise<void> {
+    const currentStat = await fs.stat(absPath).catch(() => null);
+    if (!currentStat?.isFile() || Math.floor(currentStat.mtimeMs) !== mtimeMs) return;
+    await this.workspaceIndex.partialUpdate([rel]).catch(() => undefined);
+
+    if (!BACKGROUND_RESOLVER_ENABLED || !this.meshCore.isAvailable) return;
+    const raw = await fs.readFile(absPath, "utf8").catch(() => null);
+    if (!raw) return;
+    const summaries = await this.meshCore.summarizeAllTiers(rel, raw);
+    await Promise.all(CAPSULE_TIERS.map((tier) => this.cache.setCapsule(rel, tier, summaries[tier], mtimeMs)));
+
+    if (rel.match(/\.(ts|js|tsx)$/)) {
+      const diag = await this.getDiagnostics();
+      if (!(diag as any).ok) {
+        await this.recordPredictiveRepairSignal(rel, diag);
+      }
     }
   }
 
@@ -2460,8 +2431,8 @@ export class LocalToolBackend implements ToolBackend {
   }
 
   async close(): Promise<void> {
-    if (this.watcher && typeof this.watcher.close === "function") {
-      this.watcher.close();
+    for (const watcher of [...this.watchers]) {
+      this.closeWatcher(watcher);
     }
     await Promise.allSettled(this.startupTasks);
     await this.cache.flushCache().catch(() => undefined);
@@ -2988,36 +2959,8 @@ export class LocalToolBackend implements ToolBackend {
   }
 
   private startLiveSyncWatcher() {
-    const root = this.workspaceRoot;
-    let debounceTimer: NodeJS.Timeout | null = null;
-    const pendingChanges = new Set<string>();
-
-    const triggerUpdate = () => {
-      if (pendingChanges.size === 0) return;
-      const paths = Array.from(pendingChanges);
-      pendingChanges.clear();
-      this.workspaceIndex.partialUpdate(paths).catch(() => {});
-    };
-
-    try {
-      const watcher = watch(root, { recursive: true }, (event, filename) => {
-        if (!filename) return;
-
-        // Filter out noise
-        if (filename.includes("node_modules") || filename.includes(".git") || filename.includes(".mesh")) return;
-        if (!/\.(ts|tsx|js|jsx|json|md|py|go|rs)$/.test(filename)) return;
-
-        pendingChanges.add(filename);
-
-        if (debounceTimer) clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(triggerUpdate, 1500);
-      });
-
-      // Ensure watcher doesn't block process exit
-      watcher.unref?.();
-    } catch (err) {
-      // Fallback: system might not support recursive watch
-    }
+    // Live sync is handled by startWatcher(). Keeping a second recursive watcher
+    // caused EMFILE crashes in real workspaces and test runs.
   }
 
   private async saveBackup(relativePath: string): Promise<void> {

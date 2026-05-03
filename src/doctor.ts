@@ -1,9 +1,12 @@
 import { execFile } from "node:child_process";
+import { constants as fsConstants, promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
 import { AppConfig } from "./config.js";
-import { isNvidiaHostedModel } from "./nvidia-services.js";
 
 const execFileAsync = promisify(execFile);
+const DOCTOR_NETWORK_TIMEOUT_MS = 3000;
 
 export interface DoctorResult {
   ok: boolean;
@@ -25,6 +28,8 @@ export class MeshDoctorEngine {
   async run(): Promise<DoctorResult> {
     const checks: DoctorCheck[] = await Promise.all([
       this.checkLocalEnvironment(),
+      this.checkWorkspaceReadiness(),
+      this.checkReleaseGuardrails(),
       this.checkProxyConnectivity(),
       this.checkAuthentication(),
       this.checkProviderHealth()
@@ -35,6 +40,92 @@ export class MeshDoctorEngine {
       ok,
       timestamp: new Date().toISOString(),
       checks
+    };
+  }
+
+  private async checkWorkspaceReadiness(): Promise<DoctorCheck> {
+    const root = this.config.agent.workspaceRoot;
+    const stateRoot = process.env.MESH_STATE_DIR || path.join(os.homedir(), ".config", "mesh");
+    const details: string[] = [`Workspace: ${root}`, `State root: ${stateRoot}`];
+    let status: "pass" | "warn" | "fail" = "pass";
+
+    try {
+      const stat = await fs.stat(root);
+      if (!stat.isDirectory()) {
+        return {
+          id: "workspace",
+          title: "Workspace Readiness",
+          status: "fail",
+          message: "Workspace root is not a directory.",
+          details
+        };
+      }
+      await fs.access(root, fsConstants.R_OK | fsConstants.W_OK);
+    } catch (error) {
+      return {
+        id: "workspace",
+        title: "Workspace Readiness",
+        status: "fail",
+        message: "Workspace root is not readable and writable.",
+        details: [...details, (error as Error).message]
+      };
+    }
+
+    try {
+      await fs.mkdir(stateRoot, { recursive: true, mode: 0o700 });
+      await fs.access(stateRoot, fsConstants.R_OK | fsConstants.W_OK);
+      details.push("State directory is writable.");
+    } catch (error) {
+      status = "warn";
+      details.push(`State directory warning: ${(error as Error).message}`);
+    }
+
+    try {
+      const { stdout } = await execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: root });
+      details.push(`Git repository: ${stdout.trim() === "true" ? "yes" : "no"}`);
+    } catch {
+      status = "warn";
+      details.push("Git repository: no or unavailable");
+    }
+
+    return {
+      id: "workspace",
+      title: "Workspace Readiness",
+      status,
+      message: status === "pass" ? "Workspace and Mesh state paths are writable." : "Workspace works, but some persistence features may be degraded.",
+      details
+    };
+  }
+
+  private async checkReleaseGuardrails(): Promise<DoctorCheck> {
+    const details = [
+      `Cloud cache: ${this.config.agent.enableCloudCache ? "enabled" : "disabled"}`,
+      `Telemetry contribution: ${this.config.telemetry.contribute ? "enabled" : "disabled"}`,
+      `Watchers: ${truthyEnv("MESH_DISABLE_WATCHERS") ? "disabled" : "enabled"}`,
+      `Background resolver: ${truthyEnv("MESH_ENABLE_BACKGROUND_RESOLVER") ? "enabled" : "disabled"}`,
+      `Embeddings: ${truthyEnv("MESH_ENABLE_EMBEDDINGS") ? "enabled" : "disabled"}`
+    ];
+
+    let status: "pass" | "warn" | "fail" = "pass";
+    if (this.config.telemetry.contribute) {
+      status = "warn";
+      details.push("Telemetry contribution is opt-in and enabled for this workspace.");
+    }
+    if (truthyEnv("MESH_ENABLE_BACKGROUND_RESOLVER")) {
+      status = "warn";
+      details.push("Background resolver may run diagnostics after file changes.");
+    }
+    if (truthyEnv("MESH_ENABLE_EMBEDDINGS")) {
+      status = "warn";
+      details.push("Embeddings may use local model loading or a configured remote provider.");
+    }
+
+    return {
+      id: "guardrails",
+      title: "Release Guardrails",
+      status,
+      message: status === "pass" ? "Costly and experimental background features are off by default." : "One or more opt-in features may affect cost, CPU, or privacy.",
+      details
     };
   }
 
@@ -78,7 +169,7 @@ export class MeshDoctorEngine {
 
     try {
       const start = Date.now();
-      const res = await fetch(endpoint.replace(/\/+$/, "") + "/brain/health", { method: "GET" }).catch(() => null);
+      const res = await fetchWithTimeout(endpoint.replace(/\/+$/, "") + "/brain/health", { method: "GET" }).catch(() => null);
       const latency = Date.now() - start;
 
       if (res && res.ok) {
@@ -174,7 +265,7 @@ export class MeshDoctorEngine {
 
     // Check Bedrock (Claude)
     try {
-      const bedrockRes = await fetch(endpoint.replace(/\/+$/, "") + "/model/us.anthropic.claude-haiku-4-5-20251001-v1:0/converse", {
+      const bedrockRes = await fetchWithTimeout(endpoint.replace(/\/+$/, "") + "/model/us.anthropic.claude-haiku-4-5-20251001-v1:0/converse", {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -200,7 +291,7 @@ export class MeshDoctorEngine {
 
     // Check NVIDIA (Minimax/Llama)
     try {
-      const nvidiaRes = await fetch(endpoint.replace(/\/+$/, "") + "/chat/completions", {
+      const nvidiaRes = await fetchWithTimeout(endpoint.replace(/\/+$/, "") + "/chat/completions", {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -232,5 +323,19 @@ export class MeshDoctorEngine {
       message: status === "pass" ? "All providers are healthy." : "Some providers are unreachable.",
       details
     };
+  }
+}
+
+function truthyEnv(name: string): boolean {
+  return /^(1|true|yes)$/i.test(process.env[name] ?? "");
+}
+
+async function fetchWithTimeout(input: string, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DOCTOR_NETWORK_TIMEOUT_MS);
+  try {
+    return await fetch(input, { ...init, signal: init.signal ?? controller.signal });
+  } finally {
+    clearTimeout(timer);
   }
 }

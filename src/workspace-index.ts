@@ -14,14 +14,17 @@ import {
   nvidiaEmbeddingWithFallbacks
 } from "./nvidia-services.js";
 
-// Optional: configure transformers env to avoid local caching issues
-env.allowLocalModels = false;
+// Prefer offline-safe lexical indexing by default. Embeddings are opt-in because
+// first-run model downloads or remote embedding calls can hang a CLI session.
+env.allowLocalModels = true;
 
 const execFileAsync = promisify(execFile);
 
 const INDEX_SCHEMA_VERSION = 1;
 const INDEX_PARALLELISM = parseIntegerInRange(process.env.MESH_INDEX_PARALLELISM, 12, 1, 128);
-const DEFAULT_EMBEDDING_MODEL = process.env.MESH_EMBEDDING_MODEL || DEFAULT_NVIDIA_EMBEDDING_MODELS[0];
+const EMBEDDINGS_ENABLED = /^(1|true|yes)$/i.test(process.env.MESH_ENABLE_EMBEDDINGS ?? "");
+const EMBEDDING_TIMEOUT_MS = parseIntegerInRange(process.env.MESH_EMBEDDING_TIMEOUT_MS, 8000, 500, 60000);
+const DEFAULT_EMBEDDING_MODEL = process.env.MESH_EMBEDDING_MODEL || "Xenova/all-MiniLM-L6-v2";
 const DEFAULT_SKIP_DIRS = [
   ".git",
   ".mesh",
@@ -339,22 +342,29 @@ export class WorkspaceIndex {
 
   private async vectorize(value: string): Promise<number[]> {
     if (!value || value.trim() === "") return [];
-    if (isRemoteEmbeddingModel(DEFAULT_EMBEDDING_MODEL)) {
-      const result = await nvidiaEmbeddingWithFallbacks(
-        value,
-        {
-          inputType: DEFAULT_EMBEDDING_MODEL.startsWith("nvidia/") ? "query" : undefined,
-          models: [DEFAULT_EMBEDDING_MODEL, ...DEFAULT_NVIDIA_EMBEDDING_MODELS],
-          apiKey: this.config.apiKey,
-          baseUrl: this.config.baseUrl
-        }
-      );
-      return result.embedding;
+    if (!EMBEDDINGS_ENABLED) return [];
+    try {
+      if (isRemoteEmbeddingModel(DEFAULT_EMBEDDING_MODEL)) {
+        if (!this.config.apiKey) return [];
+        const result = await nvidiaEmbeddingWithFallbacks(
+          value,
+          {
+            inputType: DEFAULT_EMBEDDING_MODEL.startsWith("nvidia/") ? "query" : undefined,
+            models: [DEFAULT_EMBEDDING_MODEL, ...DEFAULT_NVIDIA_EMBEDDING_MODELS],
+            apiKey: this.config.apiKey,
+            baseUrl: this.config.baseUrl,
+            abortSignal: AbortSignal.timeout(EMBEDDING_TIMEOUT_MS)
+          }
+        );
+        return result.embedding;
+      }
+      const extractor = await withTimeout(getEmbeddingPipeline(), EMBEDDING_TIMEOUT_MS);
+      if (!extractor) return [];
+      const output = await withTimeout<any>(extractor(value, { pooling: "mean", normalize: true }), EMBEDDING_TIMEOUT_MS);
+      return Array.from(output.data);
+    } catch {
+      return [];
     }
-    const extractor = await getEmbeddingPipeline();
-    if (!extractor) return [];
-    const output = await extractor(value, { pooling: "mean", normalize: true });
-    return Array.from(output.data);
   }
 
   async getSemanticSlice(filePath: string, symbol: string): Promise<{ ok: boolean; error?: string; slice?: string }> {
@@ -1002,6 +1012,20 @@ function parseIntegerInRange(value: string | undefined, fallback: number, min: n
     return fallback;
   }
   return Math.max(min, Math.min(max, Math.trunc(parsed)));
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Timed out after ${timeoutMs}ms`)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function tokenize(value: string): string[] {

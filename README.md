@@ -53,6 +53,16 @@ cd path/to/your/project
 mesh
 ```
 
+Recommended first-run path:
+
+```text
+/doctor
+/index
+/status
+explain the main runtime path with citations
+find the failing test and propose the smallest fix
+```
+
 Then ask for real engineering work:
 
 ```text
@@ -63,6 +73,27 @@ create a timeline for this migration and verify it before promotion
 ```
 
 Mesh writes project-specific artifacts to `.mesh/` and persistent per-workspace indexes to `~/.config/mesh/`.
+
+## First-User Readiness
+
+Before onboarding a new user or workspace, run:
+
+```bash
+npm run verify:release
+mesh --version
+mesh --help
+```
+
+Inside the target repo, run `/doctor` first. It checks local tooling, workspace write access, state/index paths, model endpoint/auth, provider health, and whether costly or experimental background features are enabled.
+
+The full pre-release checklist lives in [docs/go-live.md](docs/go-live.md). Privacy and support guidance live in [docs/privacy.md](docs/privacy.md) and [docs/support.md](docs/support.md).
+
+Default behavior is conservative:
+
+- Source files stay local unless a model/tool call needs context for the task.
+- Mesh Brain telemetry contribution is opt-in and disabled by default.
+- Background resolver and embeddings are opt-in to avoid surprise CPU, model downloads, or provider costs.
+- Tests run with file watchers disabled to avoid OS watcher-limit flakiness.
 
 ## Core Capabilities
 
@@ -235,11 +266,28 @@ Important environment variables:
 - `BEDROCK_MODEL_ID`: override the default model.
 - `BEDROCK_FALLBACK_MODEL_IDS`: comma-separated fallback model IDs for transient failures.
 - `BEDROCK_MAX_TOKENS`: default output token cap.
+- `AGENT_MAX_STEPS`: per-turn tool/model loop cap. Default: `8`.
+- `MESH_DISABLE_WATCHERS`: disable file watchers when set to `1`, `true`, or `yes`.
+- `MESH_ENABLE_BACKGROUND_RESOLVER`: opt in to background diagnostics after file changes.
+- `MESH_ENABLE_EMBEDDINGS`: opt in to local/remote embedding generation for the persistent index.
+- `MESH_EMBEDDING_TIMEOUT_MS`: timeout for embedding work. Default: `8000`.
 - `MESH_INDEX_PARALLELISM`: indexing concurrency. Default: `12`.
 - `MESH_EMBEDDING_MODEL`: local retrieval embedding model.
 - `MESH_STATE_DIR`: override local Mesh state directory.
+- `MESH_BRAIN_ENDPOINT`: optional Mesh Brain contribution endpoint when telemetry contribution is enabled.
 
 User settings are stored under `~/.config/mesh/`. Project artifacts are stored under `.mesh/`.
+
+## Release
+
+Before publishing, run:
+
+```bash
+npm run verify:release
+npm run publish:dry-run
+```
+
+The release and rollback runbook lives in [docs/release-runbook.md](docs/release-runbook.md). See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## Requirements
 
