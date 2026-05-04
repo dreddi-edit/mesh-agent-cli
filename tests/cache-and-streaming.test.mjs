@@ -143,6 +143,11 @@ test("agent falls back from unavailable streaming and skips stream on later turn
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "mesh-agent-stream-fallback-"));
   const previousStateDir = process.env.MESH_STATE_DIR;
   const previousFetch = globalThis.fetch;
+  const originalNvidiaKey = process.env.NVIDIA_API_KEY;
+  const originalNvapiKey = process.env.NVAPI_KEY;
+  delete process.env.NVIDIA_API_KEY;
+  delete process.env.NVAPI_KEY;
+
   process.env.MESH_STATE_DIR = workspaceRoot;
   const calls = [];
 
@@ -164,7 +169,7 @@ test("agent falls back from unavailable streaming and skips stream on later turn
 
   const config = testConfig(workspaceRoot);
   config.bedrock.endpointBase = "https://mesh.test";
-  config.bedrock.modelId = "primary-model";
+  config.bedrock.modelId = "us.anthropic.claude-sonnet-4-6"; // Use DEFAULT_MODEL_ID
   config.bedrock.fallbackModelIds = ["fallback-model"];
   config.bedrock.maxTokens = 20;
   const backend = {
@@ -202,6 +207,7 @@ test("agent falls back from unavailable streaming and skips stream on later turn
     assert.equal(second.text, "pong");
     assert.equal(firstDeltas, "pong");
     assert.equal(secondDeltas, "pong");
+    // Should be 2: DEFAULT_MODEL_ID and fallback-model
     assert.equal(streamCallsAfterFirst, 2);
     assert.equal(streamCallsAfterSecond, streamCallsAfterFirst);
   } finally {
@@ -211,6 +217,8 @@ test("agent falls back from unavailable streaming and skips stream on later turn
     } else {
       process.env.MESH_STATE_DIR = previousStateDir;
     }
+    if (originalNvidiaKey) process.env.NVIDIA_API_KEY = originalNvidiaKey;
+    if (originalNvapiKey) process.env.NVAPI_KEY = originalNvapiKey;
     await rm(workspaceRoot, { recursive: true, force: true });
   }
 });

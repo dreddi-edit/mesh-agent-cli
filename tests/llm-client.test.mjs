@@ -52,6 +52,11 @@ test("Bedrock client retries fallback model on transient 429 response", async ()
 
 test("fetchWithRetry retries same model up to 3 times on 429 before failing", async () => {
   const originalFetch = globalThis.fetch;
+  const originalNvidiaKey = process.env.NVIDIA_API_KEY;
+  const originalNvapiKey = process.env.NVAPI_KEY;
+  delete process.env.NVIDIA_API_KEY;
+  delete process.env.NVAPI_KEY;
+
   let callCount = 0;
   globalThis.fetch = async (_url) => {
     callCount++;
@@ -61,7 +66,7 @@ test("fetchWithRetry retries same model up to 3 times on 429 before failing", as
   try {
     const client = new BedrockLlmClient({
       endpointBase: "https://mesh.example.test",
-      modelId: "primary-model",
+      modelId: "us.anthropic.claude-sonnet-4-6", // use DEFAULT_MODEL_ID to avoid extra fallbacks
       temperature: 0,
       maxTokens: 100
     });
@@ -79,6 +84,8 @@ test("fetchWithRetry retries same model up to 3 times on 429 before failing", as
     assert.equal(callCount, 4, `Expected 4 fetch calls (1 initial + 3 retries), got ${callCount}`);
   } finally {
     globalThis.fetch = originalFetch;
+    if (originalNvidiaKey) process.env.NVIDIA_API_KEY = originalNvidiaKey;
+    if (originalNvapiKey) process.env.NVAPI_KEY = originalNvapiKey;
   }
 });
 
