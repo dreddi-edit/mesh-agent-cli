@@ -11,6 +11,7 @@ import pkg from "enquirer";
 import os from "node:os";
 import http from "node:http";
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
 import { MODEL_CATALOG } from "./model-catalog.js";
@@ -22,7 +23,7 @@ marked.use(markedTerminal() as any);
 type EnquirerCtor = new (options: Record<string, unknown>) => { run(): Promise<unknown> };
 const { Select, Confirm, Input } = pkg as unknown as { Select: EnquirerCtor; Confirm: EnquirerCtor; Input: EnquirerCtor };
 
-const DASHBOARD_SERVER_VERSION = "context-ledger-v6";
+const DASHBOARD_SERVER_VERSION = "visual-cockpit-v2";
 
 import { AppConfig, loadUserSettings, saveUserSettings, shortPathLabel, UserSettings, VoiceSettings } from "./config.js";
 import {
@@ -501,6 +502,7 @@ export class AgentLoop {
   private dashboardEventWrite: Promise<void> = Promise.resolve();
   private dashboardActionTimer: NodeJS.Timeout | null = null;
   private dashboardActionRunning = false;
+  private dashboardToken: string | null = null;
   private toolEventsExpanded = false;
   private turnToolCalls = 0;
   private turnToolErrors = 0;
@@ -3753,13 +3755,14 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
 
       const existing = await this.readDashboardServerInfo();
       let port = existing?.port;
-      if (!port || existing?.version !== DASHBOARD_SERVER_VERSION || !await this.isDashboardReachable(port)) {
-        port = await this.startDashboardServer(dashboardDir);
+      if (!this.dashboardToken || !port || existing?.version !== DASHBOARD_SERVER_VERSION || !await this.isDashboardReachable(port)) {
+        this.dashboardToken = crypto.randomBytes(32).toString("hex");
+        port = await this.startDashboardServer(dashboardDir, this.dashboardToken);
       }
 
-      const url = `http://127.0.0.1:${port}`;
+      const url = `http://127.0.0.1:${port}/#token=${this.dashboardToken}`;
       this.openDashboardUrl(url);
-      spinner.succeed(pc.green(`Dashboard live at ${url}`));
+      spinner.succeed(pc.green(`Dashboard live at http://127.0.0.1:${port}`));
     } catch (e) {
       spinner.fail(pc.red(`Interface initialization failed: ${(e as Error).message}`));
     }
@@ -3836,11 +3839,18 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
     });
   }
 
-  private async startDashboardServer(dashboardDir: string): Promise<number> {
+  private async startDashboardServer(dashboardDir: string, token: string): Promise<number> {
     const child = spawn(
       process.execPath,
       [path.join(path.dirname(fileURLToPath(import.meta.url)), "dashboard-server.js"), this.config.agent.workspaceRoot],
-      { detached: true, stdio: "ignore" }
+      {
+        detached: true,
+        stdio: "ignore",
+        env: {
+          ...process.env,
+          MESH_DASHBOARD_TOKEN: token
+        }
+      }
     );
     child.unref();
 

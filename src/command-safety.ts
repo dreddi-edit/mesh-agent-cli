@@ -42,6 +42,14 @@ const DESTRUCTIVE_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
     reason: "credential exfiltration pattern"
   },
   {
+    pattern: /\b(?:cat|less|more|head|tail|sed|awk|grep|rg)\b[\s\S]*(?:^|\s)(?:\.env(?:\b|[./_-])|[^;&|]*\/\.env(?:\b|[./_-])|[^;&|]*(?:secret|credential|token|private)[^;&|]*\.(?:json|key|pem)\b)/i,
+    reason: "credential file read"
+  },
+  {
+    pattern: /(?:^|[;&|]\s*)(?:env|printenv|set)\b/i,
+    reason: "environment dump"
+  },
+  {
     pattern: /\bchmod\s+-R\s+777\s+(?:\/|\.)/i,
     reason: "unsafe recursive permission change"
   },
@@ -71,11 +79,17 @@ export function analyzeCommandSafety(command: string): CommandSafetyResult {
   if (/(?:^|\|\s*|\&\&\s*|;\s*)(?:eval|exec)\s+/i.test(normalized)) {
     return { ok: false, reason: "dynamic evaluation (eval/exec) blocked" };
   }
+  if (/(?:`[^`]*`|\$\([^)]*\))/.test(normalized)) {
+    return { ok: false, reason: "command substitution blocked" };
+  }
   if (/\|\s*base64\s+(?:-d|--decode)\s*\|\s*(?:sh|bash|zsh)/i.test(normalized)) {
     return { ok: false, reason: "base64 payload execution blocked" };
   }
-  if (/\b(?:sh|bash|zsh)\s+-c\s+["']?\$/i.test(normalized)) {
-    return { ok: false, reason: "dynamic shell execution blocked" };
+  if (/\b(?:sh|bash|zsh)\s+-c\b/i.test(normalized)) {
+    return { ok: false, reason: "nested shell execution blocked" };
+  }
+  if (/(?:^|[;&|]\s*)(?:curl|wget|nc|netcat)\b/i.test(normalized) && /\b(?:\.env|SECRET|TOKEN|API_KEY|PASSWORD|PRIVATE_KEY|printenv|env)\b/i.test(normalized)) {
+    return { ok: false, reason: "network credential exfiltration blocked" };
   }
 
   return { ok: true };

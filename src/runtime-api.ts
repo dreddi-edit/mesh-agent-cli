@@ -67,7 +67,7 @@ export async function createMeshRuntime(options: MeshRuntimeOptions): Promise<Me
 
   const backends: ToolBackend[] = [new LocalToolBackend(config.agent.workspaceRoot, config)];
 
-  if (options.includeWorkspaceMcp !== false) {
+  if (shouldLoadWorkspaceMcp(options)) {
     const mcpConfigPath = path.join(config.agent.workspaceRoot, ".mesh", "mcp.json");
     await loadWorkspaceMcpBackends(mcpConfigPath, backends);
   }
@@ -82,6 +82,13 @@ export async function createMeshRuntime(options: MeshRuntimeOptions): Promise<Me
   }
 
   return new MeshRuntime(config, new CompositeToolBackend(backends), backends.length);
+}
+
+function shouldLoadWorkspaceMcp(options: MeshRuntimeOptions): boolean {
+  if (typeof options.includeWorkspaceMcp === "boolean") {
+    return options.includeWorkspaceMcp;
+  }
+  return /^(1|true|yes)$/i.test(process.env.MESH_ENABLE_WORKSPACE_MCP ?? "");
 }
 
 async function loadWorkspaceMcpBackends(configPath: string, backends: ToolBackend[]): Promise<void> {

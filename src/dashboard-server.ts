@@ -13,7 +13,7 @@ const actionsPath = path.join(dashboardDir, "actions.json");
 const contextMetricsPath = path.join(dashboardDir, "context-metrics.json");
 const artifactIndexPath = path.join(workspaceRoot, ".mesh", "context", "artifacts", "index.json");
 const serverInfoPath = path.join(dashboardDir, "server.json");
-const DASHBOARD_SERVER_VERSION = "visual-cockpit-v1";
+const DASHBOARD_SERVER_VERSION = "visual-cockpit-v2";
 
 const SKIP_DIRS = new Set([".git", "node_modules", "dist", ".mesh", ".next", ".turbo", "coverage", "benchmarks"]);
 let stateCache: { at: number; value: Record<string, unknown> } | null = null;
@@ -89,10 +89,9 @@ function getActionBackend(): LocalToolBackend {
 async function main(): Promise<void> {
   await fs.mkdir(dashboardDir, { recursive: true });
 
-  // Per-process secret — injected into the HTML page and required on every API call.
-  // Prevents any local process or curl call from accessing workspace data without
-  // having loaded the dashboard page first.
-  const SESSION_TOKEN = crypto.randomBytes(32).toString("hex");
+  // Per-process secret, supplied out-of-band by the launcher and required on
+  // every API call. It is intentionally never rendered into server HTML.
+  const SESSION_TOKEN = resolveDashboardToken();
 
   const closeBackend = () => {
     void actionBackend?.close().catch(() => undefined);
@@ -153,7 +152,7 @@ async function main(): Promise<void> {
 
       if (url.pathname === "/") {
         const nonce = crypto.randomBytes(16).toString("base64");
-        return html(res, renderHtml(SESSION_TOKEN, nonce), nonce);
+        return html(res, renderHtml(nonce), nonce);
       }
 
       res.writeHead(404);
@@ -167,8 +166,20 @@ async function main(): Promise<void> {
   server.listen(0, "127.0.0.1", async () => {
     const address = server.address();
     const port = typeof address === "object" && address ? address.port : 0;
-    await fs.writeFile(serverInfoPath, JSON.stringify({ port, pid: process.pid, workspaceRoot, version: DASHBOARD_SERVER_VERSION }, null, 2), "utf8");
+    await fs.writeFile(
+      serverInfoPath,
+      JSON.stringify({ port, pid: process.pid, workspaceRoot, version: DASHBOARD_SERVER_VERSION }, null, 2),
+      { encoding: "utf8", mode: 0o600 }
+    );
   });
+}
+
+function resolveDashboardToken(): string {
+  const raw = process.env.MESH_DASHBOARD_TOKEN || process.argv[3] || "";
+  if (/^[a-f0-9]{64}$/i.test(raw)) {
+    return raw;
+  }
+  return crypto.randomBytes(32).toString("hex");
 }
 
 function html(res: http.ServerResponse, body: string, nonce: string): void {
@@ -610,7 +621,7 @@ async function readJson(filePath: string, fallback: any): Promise<any> {
   }
 }
 
-function renderHtml(sessionToken: string, nonce: string): string {
+function renderHtml(nonce: string): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -705,7 +716,9 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 <script src="https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.min.js" nonce="${nonce}"></script>
 <script nonce="${nonce}">
 (function(){'use strict';
-var DASHBOARD_TOKEN='${sessionToken}';
+var DASHBOARD_TOKEN=sessionStorage.getItem('meshDashboardToken')||'';
+try{var hash=new URLSearchParams(location.hash.replace(/^#/,''));var token=hash.get('token');if(token&&/^[a-f0-9]{64}$/i.test(token)){DASHBOARD_TOKEN=token;sessionStorage.setItem('meshDashboardToken',token);history.replaceState(null,'',location.pathname+location.search);}}catch(_){}
+function authHeaders(extra){if(!DASHBOARD_TOKEN){toast('Dashboard token missing. Reopen with /dashboard.',true);throw new Error('dashboard token missing');}return Object.assign({'X-Dashboard-Token':DASHBOARD_TOKEN},extra||{});}
 let state=null,selFile=null,graphMode='focus',toastTimer=null,evSeenIds=new Set();
 const GRP_COLOR={source:'#0f9f8f',tests:'#687f2d',docs:'#8157b8',config:'#4357b2',other:'#c97512'};
 const GRP_LABEL={source:'Source',tests:'Tests',docs:'Docs',config:'Config',other:'Other'};
@@ -954,11 +967,11 @@ function allFiles(){if(!state)return[];return Object.entries(state.groupedFiles|
 function renderFiles(){var el=$('file-list'),cnt=$('file-count');if(!el||!state)return;var q=($('file-search').value||'').trim().toLowerCase(),grp=($('file-group').value||'all'),hotSet=new Set((state.hotFiles||[]).map(function(h){return h.file;})),files=allFiles().filter(function(e){return(grp==='all'||e.group===grp)&&(!q||e.file.toLowerCase().includes(q));}).slice(0,300);cnt.textContent=files.length+' visible files';el.innerHTML=files.map(function(e){return '<div class="file-row'+(selFile===e.file?' active':'')+(hotSet.has(e.file)?' hot':'')+'" data-file="'+esc(e.file)+'"><span>'+esc(e.file)+'</span><span class="fgroup">'+esc(e.group)+'</span></div>';}).join('');el.querySelectorAll('.file-row').forEach(function(row){row.addEventListener('click',function(){selFile=row.dataset.file;renderAllViews();});});var active=el.querySelector('.active');if(active)active.scrollIntoView({block:'nearest'});}
 function renderDetail(){var el=$('file-detail');if(!el||!state)return;if(!selFile){el.innerHTML='<div class="detail-empty">No file selected.</div>';return;}var gd=(state.dependencyGraph&&state.dependencyGraph.details&&state.dependencyGraph.details[selFile])||{dependencies:[],dependents:[],externalImports:[]},node=(state.dependencyGraph.nodes||[]).find(function(n){return n.id===selFile;})||{group:'other'},hot=(state.hotFiles||[]).find(function(h){return h.file===selFile}),ev=(state.events||[]).find(function(e){return e.path===selFile||(e.path||'').endsWith(selFile);});setText('selected-title',fileBase(selFile));setText('selected-path',selFile);setText('kpi-imports',(gd.dependencies||[]).length);setText('kpi-usedby',(gd.dependents||[]).length);setText('kpi-pkgs',(gd.externalImports||[]).length);setText('kpi-risk',hot?(hot.score==null?(hot.risks||[]).length:hot.score):0);var max=Math.max(1,(gd.dependencies||[]).length,(gd.dependents||[]).length,(gd.externalImports||[]).length),html='<div class="detail-section"><div class="detail-section-head">classification</div><div class="detail-path">'+esc(node.group||'other')+'</div></div>';html+='<div class="detail-section"><div class="detail-section-head">dependency balance</div><div class="dependency-bars">'+depRow('imports',(gd.dependencies||[]).length,max,'var(--teal)')+depRow('used by',(gd.dependents||[]).length,max,'var(--indigo)')+depRow('packages',(gd.externalImports||[]).length,max,'var(--amber)')+'</div></div>';if((gd.dependencies||[]).length)html+='<div class="detail-section"><div class="detail-section-head">imports</div>'+gd.dependencies.slice(0,12).map(function(d){return'<span class="detail-pill">'+esc(fileBase(d))+'</span>';}).join('')+'</div>';if((gd.dependents||[]).length)html+='<div class="detail-section"><div class="detail-section-head">used by</div>'+gd.dependents.slice(0,12).map(function(d){return'<span class="detail-pill">'+esc(fileBase(d))+'</span>';}).join('')+'</div>';if((gd.externalImports||[]).length)html+='<div class="detail-section"><div class="detail-section-head">external packages</div>'+gd.externalImports.slice(0,12).map(function(p){return'<span class="detail-pill pkg">'+esc(p)+'</span>';}).join('')+'</div>';if(hot)html+='<div class="detail-section"><div class="detail-section-head">risk signals</div>'+(hot.risks||['flagged']).map(function(rr){return'<span class="detail-pill risk">'+esc(rr)+'</span>';}).join('')+'</div>';html+='<div class="detail-section"><div class="detail-section-head">last activity</div><div class="detail-empty">'+(ev?esc((ev.msg||ev.type)+' / '+new Date(ev.at).toLocaleTimeString()):'No recent activity for this file.')+'</div></div>';el.innerHTML=html;}
 function depRow(label,value,max,color){return '<div class="dep-row"><span>'+esc(label)+'</span><div class="dep-track"><div class="dep-fill" style="width:'+(value/max*100)+'%;background:'+color+'"></div></div><b>'+compact(value)+'</b></div>';}
-async function runAction(action,btn){if(!action)return;btn.disabled=true;btn.classList.add('spinning');btn.textContent='...';toast('Running '+action);try{var resp=await fetch('/api/actions',{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Token':DASHBOARD_TOKEN},body:JSON.stringify({action:action})}),data=await resp.json();if(data.ok)toast((data.request&&data.request.summary)||action+' complete');else toast(data.error||action+' failed',true);}catch(err){toast(String(err),true);}btn.disabled=false;btn.classList.remove('spinning');btn.textContent='Run';await refresh();}
+async function runAction(action,btn){if(!action)return;btn.disabled=true;btn.classList.add('spinning');btn.textContent='...';toast('Running '+action);try{var resp=await fetch('/api/actions',{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify({action:action})}),data=await resp.json();if(data.ok)toast((data.request&&data.request.summary)||action+' complete');else toast(data.error||action+' failed',true);}catch(err){toast(String(err),true);}btn.disabled=false;btn.classList.remove('spinning');btn.textContent='Run';await refresh();}
 function renderAllViews(){renderOverview();renderBudget();renderHotspots();renderActions();renderSignals();renderEvidence();renderRules();renderEvents();renderGraph();renderFiles();renderDetail();}
 document.addEventListener('keydown',function(e){if(e.target.tagName==='INPUT'||e.target.tagName==='SELECT')return;if(e.key==='f'||e.key==='F'){$('file-search').focus();e.preventDefault();}if(e.key==='r'||e.key==='R')refresh();if(e.key==='1')setGraphMode('focus');if(e.key==='2')setGraphMode('full');if(e.key==='0'){orbitState={theta:0.6,phi:0.8,dist:220,target:{x:0,y:0,z:0},isDragging:false,lastX:0,lastY:0};}});
 function setGraphMode(m){graphMode=m;lastGraphKey='';document.querySelectorAll('#graph-mode-seg button').forEach(function(b){b.classList.toggle('active',b.dataset.mode===m);});renderGraph();}
-async function refresh(){try{var resp=await fetch('/api/state',{cache:'no-store',headers:{'X-Dashboard-Token':DASHBOARD_TOKEN}});state=await resp.json();if(!selFile){var hot=(state.hotFiles||[])[0];selFile=hot&&hot.file||(state.groupedFiles.source&&state.groupedFiles.source[0])||(state.groupedFiles.tests&&state.groupedFiles.tests[0])||null;}setText('ws-path',(state.workspaceRoot||'').split('/').filter(Boolean).pop()||state.workspaceRoot);$('ws-path').title=state.workspaceRoot||'';renderAllViews();setText('refresh-clock',new Date().toLocaleTimeString());}catch(err){toast('Refresh failed: '+String(err),true);}}
+async function refresh(){try{var resp=await fetch('/api/state',{cache:'no-store',headers:authHeaders()});state=await resp.json();if(!selFile){var hot=(state.hotFiles||[])[0];selFile=hot&&hot.file||(state.groupedFiles.source&&state.groupedFiles.source[0])||(state.groupedFiles.tests&&state.groupedFiles.tests[0])||null;}setText('ws-path',(state.workspaceRoot||'').split('/').filter(Boolean).pop()||state.workspaceRoot);$('ws-path').title=state.workspaceRoot||'';renderAllViews();setText('refresh-clock',new Date().toLocaleTimeString());}catch(err){toast('Refresh failed: '+String(err),true);}}
 document.querySelectorAll('#graph-mode-seg button').forEach(function(btn){btn.addEventListener('click',function(){setGraphMode(btn.dataset.mode);});});$('file-search').addEventListener('input',renderFiles);$('file-group').addEventListener('change',renderFiles);refresh();setInterval(refresh,2000);
 })();
 </script>
@@ -966,7 +979,7 @@ document.querySelectorAll('#graph-mode-seg button').forEach(function(btn){btn.ad
 </html>`;
 }
 
-function renderLegacyHtml(sessionToken: string, nonce: string): string {
+function renderLegacyHtml(nonce: string): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1318,8 +1331,10 @@ body{font:13px/1.5 var(--sans);color:var(--text);background:var(--bg);}
 (function(){
 'use strict';
 
-// ── auth token (injected server-side, required on all API calls) ────────────
-var DASHBOARD_TOKEN='${sessionToken}';
+// ── auth token (delivered via URL fragment by /dashboard launcher) ──────────
+var DASHBOARD_TOKEN=sessionStorage.getItem('meshDashboardToken')||'';
+try{var hash=new URLSearchParams(location.hash.replace(/^#/,''));var token=hash.get('token');if(token&&/^[a-f0-9]{64}$/i.test(token)){DASHBOARD_TOKEN=token;sessionStorage.setItem('meshDashboardToken',token);history.replaceState(null,'',location.pathname+location.search);}}catch(_){}
+function authHeaders(extra){if(!DASHBOARD_TOKEN){toast('Dashboard token missing. Reopen with /dashboard.',true);throw new Error('dashboard token missing');}return Object.assign({'X-Dashboard-Token':DASHBOARD_TOKEN},extra||{});}
 
 // ── state ──────────────────────────────────────────
 let state=null, selFile=null, graphMode='focus';
@@ -1678,7 +1693,7 @@ async function runAction(action,btn){
   btn.disabled=true; btn.classList.add('spinning'); btn.textContent='···';
   toast('Running '+action+'…');
   try{
-    var resp=await fetch('/api/actions',{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Token':DASHBOARD_TOKEN},body:JSON.stringify({action:action})});
+    var resp=await fetch('/api/actions',{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify({action:action})});
     var data=await resp.json();
     if(data.ok){toast((data.request&&data.request.summary)||action+' complete');}
     else{toast(data.error||action+' failed',true);}
@@ -1706,7 +1721,7 @@ function setGraphMode(m){
 // ── main refresh ─────────────────────────────────────
 async function refresh(){
   try{
-    var resp=await fetch('/api/state',{cache:'no-store',headers:{'X-Dashboard-Token':DASHBOARD_TOKEN}});
+    var resp=await fetch('/api/state',{cache:'no-store',headers:authHeaders()});
     state=await resp.json();
     if(!selFile){selFile=state.groupedFiles.source[0]||state.groupedFiles.tests[0]||null;}
     $('ws-path').textContent=state.workspaceRoot.split('/').filter(Boolean).pop()||state.workspaceRoot;

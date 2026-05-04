@@ -58,7 +58,7 @@ async function startDaemon(): Promise<number> {
     process.stdout.write("Mesh daemon already running.\n");
     return 0;
   }
-  await fs.mkdir(DAEMON_DIR, { recursive: true });
+  await fs.mkdir(DAEMON_DIR, { recursive: true, mode: 0o700 });
   const script = new URL("./daemon.js", import.meta.url).pathname;
   const child = spawn(process.execPath, [script, "run"], {
     detached: true,
@@ -70,9 +70,9 @@ async function startDaemon(): Promise<number> {
 }
 
 async function runDaemonServer(): Promise<void> {
-  await fs.mkdir(DAEMON_DIR, { recursive: true });
+  await fs.mkdir(DAEMON_DIR, { recursive: true, mode: 0o700 });
   await fs.rm(DAEMON_SOCKET_PATH, { force: true }).catch(() => undefined);
-  await fs.writeFile(DAEMON_PID_PATH, String(process.pid), "utf8");
+  await fs.writeFile(DAEMON_PID_PATH, String(process.pid), { encoding: "utf8", mode: 0o600 });
   setPriority(0, 10);
   const config = await loadConfig();
   const backend = new LocalToolBackend(config.agent.workspaceRoot, config);
@@ -121,9 +121,6 @@ async function runDaemonServer(): Promise<void> {
     void tick();
   }, 15 * 60 * 1000);
 
-  // Restrict socket to owner only — prevents other local processes from sending stop/status
-  await fs.chmod(DAEMON_SOCKET_PATH, 0o700).catch(() => undefined);
-
   const server = net.createServer((socket) => {
     let body = "";
     socket.on("data", (chunk) => {
@@ -146,7 +143,10 @@ async function runDaemonServer(): Promise<void> {
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(DAEMON_SOCKET_PATH, () => resolve());
+    server.listen(DAEMON_SOCKET_PATH, () => {
+      // Restrict socket to owner only after listen creates it.
+      void fs.chmod(DAEMON_SOCKET_PATH, 0o600).finally(resolve);
+    });
   });
 }
 
@@ -207,7 +207,7 @@ function safeParseRequest(raw: string): DaemonRequest | null {
 }
 
 async function writeState(state: DaemonState): Promise<void> {
-  await fs.writeFile(DAEMON_STATE_PATH, JSON.stringify(state, null, 2), "utf8");
+  await fs.writeFile(DAEMON_STATE_PATH, JSON.stringify(state, null, 2), { encoding: "utf8", mode: 0o600 });
 }
 
 function canRunHeavyTasks(): boolean {

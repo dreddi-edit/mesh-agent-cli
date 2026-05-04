@@ -47,7 +47,7 @@ Der praktische Vorteil: weniger blindes Editieren, mehr reproduzierbare Evidenz,
 | `/synthesize` | Erzeugt strukturelle Change-Vorschläge. | Nutzt heuristische Repo-Signale und vorhandene Projekt-Artefakte, um nächste Änderungen vorzuschlagen. | `src/agent-loop.ts#runSynthesize` |
 | `/twin` | Baut oder liest den Codebase Digital Twin. | Erzeugt strukturierte Sicht auf Dateien, Symbole, Routen und Risk-Hotspots. | `workspace.digital_twin`, `src/local-tools.ts` |
 | `/repair` | Zeigt Predictive Repair Queue. | Sammelt Diagnostics und schlägt reparierbare Fehler/Tasks vor. | `workspace.predictive_repair`, `src/local-tools.ts` |
-| `/daemon` | Kontrolliert den Mesh Background Daemon. | Delegiert start/status/digest/stop an das Daemon-Tool. | `workspace.daemon`, `src/daemon.ts`, `src/daemon-protocol.ts` |
+| `/daemon` | Kontrolliert den Mesh Background Daemon. | Delegiert start/status/digest/stop an das Daemon-Tool; Socket, PID und State-Dateien werden owner-only geschrieben. | `workspace.daemon`, `src/daemon.ts`, `src/daemon-protocol.ts` |
 | `/issues` | Issue-to-PR Pipeline für GitHub/Linear/Jira. | Scannt Issues und erzeugt PR-orientierte Arbeitsentwürfe. | `workspace.issue_pipeline`, `src/integrations/issues/*` |
 | `/change` | Führt eine kleine, verifizierte Codeänderung aus. | Scopet wahrscheinliche Dateien, instruiert den Agent auf minimalen Patch und führt erkannte Verification aus. | `src/agent-loop.ts#runChange`, `workspace.ask_codebase` |
 | `/chatops` | Slack/Discord Co-Engineer Flow. | Nimmt ChatOps-Kontext, erstellt Investigation/Approval-Status und PR-Draft. | `workspace.chatops`, `src/integrations/chatops/manager.ts` |
@@ -69,7 +69,7 @@ Der praktische Vorteil: weniger blindes Editieren, mehr reproduzierbare Evidenz,
 | `/inspect` | Visual Agent Portal attachen. | Startet/attacht Browser-Portal und Overlay für UI/Canvas-Inspection. | `src/mesh-portal.ts`, `src/agent-loop.ts#handleInspect` |
 | `/stop-inspect` | Visual Portal detach. | Entfernt Browser-Overlay und beendet Portal-Verbindung. | `src/agent-loop.ts#handleSlashCommand`, `MeshPortal.stop` |
 | `/preview` | Frontend Screenshot im Terminal. | Nutzt Chrome/CDP Preview mit optionalen Ausgabeprotokollen. | `frontend.preview`, `src/terminal-preview.ts` |
-| `/dashboard` | Lokales 3D/Interactive Dashboard starten. | Startet `dashboard-server.js`, schreibt Events nach `.mesh/dashboard`, öffnet lokale URL. | `src/dashboard-server.ts`, `src/agent-loop.ts#launchDashboard` |
+| `/dashboard` | Lokales 3D/Interactive Dashboard starten. | Startet `dashboard-server.js`, schreibt Events nach `.mesh/dashboard`, öffnet lokale URL mit API-Token im Fragment statt im HTML. | `src/dashboard-server.ts`, `src/agent-loop.ts#launchDashboard` |
 | `/sync` | L2 Cache Sync Status. | Fragt Cloud/Supabase Cache-Zustand und lokale L1/L2-Statistiken ab. | `workspace.check_sync`, `src/cache-manager.ts` |
 | `/setup` | Interaktive oder scripted Settings. | Speichert Modell, Theme, Cloud, Key, Endpoint und Voice-Konfig in User Settings. | `src/config.ts`, `src/agent-loop.ts#handleSetupCommand` |
 | `/model` | Modell wählen/listen/speichern. | Nutzt den zentralen Model Catalog und aktualisiert Current/User Model. | `src/model-catalog.ts`, `src/agent-loop.ts#handleModelCommand` |
@@ -133,7 +133,7 @@ Code proof: `src/runtime-observer.ts#buildAutopsyHookSource`, `captureDeepAutops
 
 ### Dashboard und Portal
 
-Der Agent schreibt Dashboard-Events nach `.mesh/dashboard` und startet einen lokalen Server. `/inspect` kann Browser-Overlay/Portal verbinden.
+Der Agent schreibt Dashboard-Events nach `.mesh/dashboard` und startet einen lokalen Server. `/inspect` kann Browser-Overlay/Portal verbinden. Dashboard-API-Aufrufe benötigen einen pro Prozess erzeugten Token; `/dashboard` übergibt ihn per URL-Fragment und entfernt ihn nach dem Laden aus der sichtbaren URL.
 
 Code proof: `src/dashboard-server.ts`, `src/mesh-portal.ts`, `src/agent-loop.ts#appendDashboardEvent`.
 

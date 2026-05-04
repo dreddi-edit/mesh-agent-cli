@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.21 - Local Security Hardening
+
+### Changed
+
+- Hardened the local dashboard flow so the API token is delivered out-of-band by the CLI launcher and is no longer rendered into server-generated HTML.
+- Made workspace MCP loading opt-in by default; enable it explicitly with `includeWorkspaceMcp: true` or `MESH_ENABLE_WORKSPACE_MCP=1`.
+- Reduced MCP subprocess environment inheritance to a small allowlist by default. Use `MESH_MCP_ENV_ALLOWLIST` for specific env names, or `MESH_MCP_INHERIT_ENV=1` only for trusted servers.
+- Tightened `workspace.run_command` safety checks around credential file reads, environment dumps, command substitution, and nested shell execution.
+
+### Fixed
+
+- Fixed daemon socket permission hardening so `daemon.sock` is chmodded after `listen()` creates it, with daemon state/PID files written owner-only.
+- Ignored `.env.*` files while keeping `.env.example` trackable.
+
 ## 0.3.11 - Username Login Polish
 
 ### Added

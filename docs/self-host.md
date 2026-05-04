@@ -39,3 +39,6 @@ helm install mesh ./helm --set license.key="$MESH_LICENSE_KEY"
 - Tamper-evident hash-chain audit logs
 - Daily rotating JSONL files in `.mesh/audit/`
 - Keychain-first secret handling for integrations
+- Local dashboard API tokens are launcher-scoped and are not rendered into server HTML.
+- Workspace MCP loading is opt-in; MCP subprocesses receive only an allowlisted environment unless `MESH_MCP_INHERIT_ENV=1` is set for trusted deployments.
+- Daemon socket, PID, state, session, and local secret files should remain owner-only (`0600`; daemon directory `0700`).

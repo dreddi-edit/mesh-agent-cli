@@ -27,6 +27,44 @@ export interface McpTool {
   inputSchema?: unknown;
 }
 
+function buildMcpEnv(): Record<string, string> {
+  if (/^(1|true|yes)$/i.test(process.env.MESH_MCP_INHERIT_ENV ?? "")) {
+    return Object.fromEntries(
+      Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string")
+    );
+  }
+
+  const allowed = new Set([
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LOGNAME",
+    "NODE_PATH",
+    "PATH",
+    "SHELL",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "USER",
+    "USERNAME",
+    "SystemRoot",
+    "ComSpec"
+  ]);
+  for (const item of (process.env.MESH_MCP_ENV_ALLOWLIST ?? "").split(",")) {
+    const key = item.trim();
+    if (key) allowed.add(key);
+  }
+
+  const env: Record<string, string> = {};
+  for (const key of allowed) {
+    const value = process.env[key];
+    if (typeof value === "string") {
+      env[key] = value;
+    }
+  }
+  return env;
+}
+
 export class McpClient {
   private process: ChildProcessWithoutNullStreams;
   private nextId = 1;
@@ -39,7 +77,7 @@ export class McpClient {
   constructor(command: string, args: string[]) {
     this.process = spawn(command, args, {
       stdio: ["pipe", "pipe", "pipe"],
-      env: process.env
+      env: buildMcpEnv()
     });
 
     this.process.stdout.on("data", (chunk: Buffer) => this.onData(chunk));

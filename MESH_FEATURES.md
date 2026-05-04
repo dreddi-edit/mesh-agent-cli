@@ -120,7 +120,8 @@ A specialized engine for multi-repo orchestration.
 
 Mesh acts as an MCP (Model Context Protocol) Client to seamlessly add third-party tools.
 
--   **Configuration**: Reads `.mesh/mcp.json` or environment variables (`MESH_MCP_COMMAND`, `MESH_MCP_ARGS`).
+-   **Configuration**: Direct MCP mode reads environment variables (`MESH_MCP_COMMAND`, `MESH_MCP_ARGS`). Workspace MCP files (`.mesh/mcp.json`) are opt-in via `MESH_ENABLE_WORKSPACE_MCP=1` or the runtime API's `includeWorkspaceMcp: true`.
+-   **Environment Isolation**: MCP subprocesses inherit only a small safe environment allowlist by default. Add explicit variables with `MESH_MCP_ENV_ALLOWLIST`, or use `MESH_MCP_INHERIT_ENV=1` only for trusted servers.
 -   **Implementation**: `McpClient` in `mcp-client.ts` uses JSON-RPC over `stdio` to initialize, discover tools (`tools/list`), and execute them natively alongside Mesh's built-in tools.
 
 ---
@@ -131,6 +132,7 @@ Tools to bridge the terminal and the visual realm.
 
 -   **Command**: `/dashboard`
 -   **3D Code Graph**: Renders your codebase as a force-directed WebGL graph in the browser.
+-   **Local API Token**: The CLI launcher passes the dashboard API token through the URL fragment; the server never renders that token into HTML.
 -   **Live Pulse**: The terminal agent emits "Pulses" via WebSockets (`dashboardSocket`) to the dashboard to show real-time tool activity.
 -   **Neuro-Kinetic Mutations**: Enable with `/inspect`. Allows you to manipulate the codebase through the UI dashboard.
 -   **`frontend.preview`**: Uses Chrome CDP to take headless screenshots of URLs and renders them directly in the terminal via Kitty/iTerm2 image protocols.
@@ -253,6 +255,8 @@ For massive tasks, Mesh spawns specialized workers.
 
 **System & Execution:**
 `workspace.run_command`, `workspace.run_in_shadow`, `workspace.run_with_telemetry`, `workspace.get_env_info`, `workspace.get_diagnostics`
+
+`workspace.run_command` blocks destructive operations plus credential-shaped reads, environment dumps, command substitution, and nested shell execution.
 
 **Runtime Telemetry:**
 `runtime.start`, `runtime.capture_failure`, `runtime.trace_request`, `runtime.explain_failure`, `runtime.fix_failure`
