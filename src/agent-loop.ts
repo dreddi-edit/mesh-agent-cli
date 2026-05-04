@@ -23,7 +23,7 @@ marked.use(markedTerminal() as any);
 type EnquirerCtor = new (options: Record<string, unknown>) => { run(): Promise<unknown> };
 const { Select, Confirm, Input } = pkg as unknown as { Select: EnquirerCtor; Confirm: EnquirerCtor; Input: EnquirerCtor };
 
-const DASHBOARD_SERVER_VERSION = "visual-cockpit-v2";
+const DASHBOARD_SERVER_VERSION = "react-live-dashboard-v1";
 
 import { AppConfig, loadUserSettings, saveUserSettings, shortPathLabel, UserSettings, VoiceSettings } from "./config.js";
 import {

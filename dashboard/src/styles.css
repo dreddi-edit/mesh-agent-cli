@@ -1,0 +1,833 @@
+@import url("https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@400;500;600;700;800&display=swap");
+
+:root {
+  color-scheme: dark;
+  --bg: #080b0e;
+  --panel: #10161b;
+  --panel-2: #151d23;
+  --panel-3: #1b252c;
+  --line: #24323b;
+  --line-2: #354653;
+  --text: #edf7f4;
+  --muted: #9dadb6;
+  --dim: #687983;
+  --green: #25d0b5;
+  --green-soft: rgba(37, 208, 181, .16);
+  --amber: #f0a942;
+  --amber-soft: rgba(240, 169, 66, .16);
+  --red: #ff6464;
+  --red-soft: rgba(255, 100, 100, .15);
+  --blue: #8aa3ff;
+  --radius: 8px;
+  --shadow: 0 18px 44px rgba(0, 0, 0, .28);
+  font-family: "Fira Sans", ui-sans-serif, system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  background:
+    radial-gradient(circle at 20% 0%, rgba(37, 208, 181, .10), transparent 34%),
+    linear-gradient(180deg, #090d10 0%, #06080a 100%);
+  color: var(--text);
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  color: inherit;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid rgba(37, 208, 181, .72);
+  outline-offset: 2px;
+}
+
+.boot-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.boot-panel {
+  width: min(420px, 100%);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 28px;
+}
+
+.boot-icon {
+  color: var(--green);
+}
+
+.boot-panel h1 {
+  margin: 12px 0 6px;
+  font-size: 26px;
+}
+
+.boot-panel p {
+  color: var(--muted);
+  margin: 0 0 18px;
+}
+
+.dashboard-shell {
+  min-height: 100vh;
+  padding: 12px;
+  display: grid;
+  grid-template-rows: 64px 116px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.topbar,
+.metric-card,
+.health-card,
+.context-card,
+.panel,
+.graph-stage,
+.file-rail {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(16, 22, 27, .92);
+  box-shadow: var(--shadow);
+}
+
+.topbar {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr) auto;
+  align-items: center;
+  overflow: hidden;
+}
+
+.brand-block {
+  height: 100%;
+  padding: 0 18px;
+  border-right: 1px solid var(--line);
+  display: grid;
+  align-content: center;
+}
+
+.brand-block span {
+  font: 700 11px "Fira Code", monospace;
+  color: var(--green);
+  text-transform: uppercase;
+}
+
+.brand-block strong {
+  font-size: 18px;
+  line-height: 1.1;
+}
+
+.workspace-path {
+  margin: 0 16px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 600 12px "Fira Code", monospace;
+  color: var(--muted);
+  background: #0b1013;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 8px 12px;
+}
+
+.top-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 0 14px;
+  border-left: 1px solid var(--line);
+}
+
+.socket-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  padding: 0 11px;
+  font: 700 11px "Fira Code", monospace;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.socket-pill.live {
+  color: var(--green);
+  border-color: rgba(37, 208, 181, .42);
+  background: var(--green-soft);
+}
+
+.socket-pill.error,
+.socket-pill.closed {
+  color: var(--red);
+  border-color: rgba(255, 100, 100, .36);
+  background: var(--red-soft);
+}
+
+.icon-button {
+  width: 34px;
+  height: 34px;
+  border-radius: 7px;
+  border: 1px solid var(--line-2);
+  background: var(--panel-2);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.metric-strip {
+  display: grid;
+  grid-template-columns: 1.25fr repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  min-height: 0;
+}
+
+.metric-card,
+.context-card,
+.health-card {
+  min-width: 0;
+  padding: 15px 16px;
+  overflow: hidden;
+}
+
+.metric-label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--muted);
+  font: 700 10px "Fira Code", monospace;
+  text-transform: uppercase;
+}
+
+.metric-card strong,
+.context-card strong {
+  display: block;
+  margin-top: 8px;
+  font: 800 30px "Fira Code", monospace;
+}
+
+.metric-card p,
+.context-card p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.metric-card.ok strong {
+  color: var(--green);
+}
+
+.metric-card.warn strong {
+  color: var(--amber);
+}
+
+.health-card {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+}
+
+.dial {
+  --score: 0;
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: conic-gradient(var(--green) calc(var(--score) * 1%), #25333b 0);
+  position: relative;
+}
+
+.health-card.warn .dial {
+  background: conic-gradient(var(--amber) calc(var(--score) * 1%), #25333b 0);
+}
+
+.health-card.danger .dial {
+  background: conic-gradient(var(--red) calc(var(--score) * 1%), #25333b 0);
+}
+
+.dial::after {
+  content: "";
+  position: absolute;
+  inset: 8px;
+  border-radius: 50%;
+  background: var(--panel);
+}
+
+.dial span {
+  position: relative;
+  z-index: 1;
+  font: 800 24px "Fira Code", monospace;
+}
+
+.health-card p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.health-card strong {
+  display: block;
+  margin: 3px 0;
+  font-size: 20px;
+  text-transform: capitalize;
+}
+
+.health-card span {
+  color: var(--muted);
+}
+
+.budget-track {
+  height: 7px;
+  border-radius: 99px;
+  overflow: hidden;
+  background: #25333b;
+  margin-top: 8px;
+}
+
+.budget-track span {
+  display: block;
+  height: 100%;
+  background: var(--green);
+}
+
+.work-grid {
+  display: grid;
+  grid-template-columns: 286px minmax(460px, 1fr) 340px;
+  gap: 10px;
+  min-height: 0;
+}
+
+.left-rail {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.panel {
+  padding: 14px;
+  min-height: 0;
+}
+
+.panel.fill {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.panel-head h3 {
+  margin: 0;
+  font: 700 11px "Fira Code", monospace;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.panel-head span {
+  color: var(--dim);
+  font: 600 11px "Fira Code", monospace;
+}
+
+.mix-list {
+  display: grid;
+  gap: 9px;
+}
+
+.mix-row {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr) 44px;
+  gap: 8px;
+  align-items: center;
+  font: 600 12px "Fira Code", monospace;
+  color: var(--muted);
+}
+
+.mix-row div {
+  height: 7px;
+  background: #26343d;
+  border-radius: 99px;
+  overflow: hidden;
+}
+
+.mix-row i {
+  display: block;
+  height: 100%;
+}
+
+.mix-row b {
+  color: var(--text);
+  text-align: right;
+}
+
+.risk-list {
+  overflow: auto;
+  display: grid;
+  gap: 7px;
+}
+
+.risk-list button,
+.file-list button {
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #0c1115;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.risk-list button {
+  position: relative;
+  padding: 9px 42px 9px 10px;
+}
+
+.risk-list button.active,
+.file-list button.active {
+  border-color: rgba(37, 208, 181, .6);
+  background: var(--green-soft);
+}
+
+.risk-list span,
+.risk-list small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.risk-list span {
+  font: 700 12px "Fira Code", monospace;
+}
+
+.risk-list small {
+  margin-top: 3px;
+  color: var(--muted);
+}
+
+.risk-list b {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  color: var(--amber);
+}
+
+.command-list {
+  display: grid;
+  gap: 8px;
+}
+
+.command-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 8px;
+  align-items: center;
+}
+
+.command-item strong,
+.command-item span,
+.command-item em {
+  display: block;
+}
+
+.command-item strong {
+  font: 700 12px "Fira Code", monospace;
+  color: var(--green);
+}
+
+.command-item span,
+.command-item em {
+  margin-top: 2px;
+  color: var(--muted);
+  font-style: normal;
+  font-size: 12px;
+}
+
+.command-item .error-text {
+  color: var(--red);
+}
+
+.command-item button {
+  width: 34px;
+  height: 34px;
+  border-radius: 7px;
+  border: 1px solid var(--line-2);
+  background: var(--panel-2);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.command-item button:disabled {
+  opacity: .55;
+  cursor: default;
+}
+
+.graph-stage {
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: 58px minmax(0, 1fr) 88px;
+}
+
+.stage-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.stage-toolbar strong,
+.stage-toolbar span {
+  display: block;
+}
+
+.stage-toolbar strong {
+  font-size: 17px;
+}
+
+.stage-toolbar span {
+  color: var(--muted);
+  font: 600 11px "Fira Code", monospace;
+}
+
+.segmented {
+  display: flex;
+  border: 1px solid var(--line-2);
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.segmented button {
+  border: 0;
+  background: transparent;
+  padding: 7px 12px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.segmented button.active {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.dependency-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+}
+
+.package-row {
+  border-top: 1px solid var(--line);
+  padding: 12px 14px;
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  overflow: auto;
+}
+
+.package-row span,
+.pill-wrap span {
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: #0c1115;
+  color: var(--muted);
+  padding: 4px 8px;
+  font: 600 11px "Fira Code", monospace;
+}
+
+.package-row b {
+  margin-left: 7px;
+  color: var(--text);
+}
+
+.file-rail {
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto auto 220px minmax(0, 1fr);
+}
+
+.file-hero {
+  padding: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.eyebrow {
+  margin: 0;
+  color: var(--muted);
+  font: 700 10px "Fira Code", monospace;
+  text-transform: uppercase;
+}
+
+.file-hero h2 {
+  margin: 5px 0 2px;
+  font: 800 18px "Fira Code", monospace;
+  overflow-wrap: anywhere;
+}
+
+.file-hero p:last-of-type {
+  margin: 0;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.file-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.mini-kpi {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 7px 6px;
+  background: #0c1115;
+}
+
+.mini-kpi span {
+  display: block;
+  color: var(--dim);
+  font: 700 9px "Fira Code", monospace;
+  text-transform: uppercase;
+}
+
+.mini-kpi b {
+  display: block;
+  margin-top: 2px;
+  font: 800 18px "Fira Code", monospace;
+}
+
+.file-tools {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px;
+  gap: 8px;
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.file-tools label {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  border: 1px solid var(--line-2);
+  border-radius: 7px;
+  padding: 0 9px;
+  background: #0c1115;
+}
+
+.file-tools input,
+.file-tools select {
+  min-width: 0;
+  width: 100%;
+  height: 34px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+}
+
+.file-tools select {
+  border: 1px solid var(--line-2);
+  border-radius: 7px;
+  padding: 0 8px;
+  background: #0c1115;
+}
+
+.file-list {
+  min-height: 0;
+  border-bottom: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.file-list p {
+  margin: 0;
+  padding: 8px 12px;
+  color: var(--dim);
+  font: 600 11px "Fira Code", monospace;
+}
+
+.file-list div {
+  height: calc(100% - 31px);
+  overflow: auto;
+  padding: 0 8px 8px;
+}
+
+.file-list button {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-bottom: 5px;
+  padding: 7px 8px;
+}
+
+.file-list button.hot {
+  box-shadow: inset 3px 0 0 var(--red);
+}
+
+.file-list span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 600 12px "Fira Code", monospace;
+}
+
+.file-list small {
+  color: var(--dim);
+}
+
+.file-detail {
+  min-height: 0;
+  overflow: auto;
+  padding: 14px;
+}
+
+.detail-section {
+  border-bottom: 1px solid var(--line);
+  padding: 10px 0;
+}
+
+.detail-section:first-child {
+  padding-top: 0;
+}
+
+.detail-section h4 {
+  margin: 0 0 8px;
+  color: var(--dim);
+  font: 700 10px "Fira Code", monospace;
+  text-transform: uppercase;
+}
+
+.balance-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) 34px;
+  gap: 8px;
+  align-items: center;
+  margin: 7px 0;
+  color: var(--muted);
+  font: 600 11px "Fira Code", monospace;
+}
+
+.balance-row div {
+  height: 7px;
+  border-radius: 99px;
+  background: #25333b;
+  overflow: hidden;
+}
+
+.balance-row i {
+  display: block;
+  height: 100%;
+  background: var(--green);
+}
+
+.balance-row b {
+  color: var(--text);
+  text-align: right;
+}
+
+.pill-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pill-wrap .pkg {
+  color: var(--amber);
+  background: var(--amber-soft);
+  border-color: rgba(240, 169, 66, .32);
+}
+
+.pill-wrap .risk {
+  color: var(--red);
+  background: var(--red-soft);
+  border-color: rgba(255, 100, 100, .36);
+}
+
+.quiet,
+.empty {
+  color: var(--muted);
+  margin: 0;
+}
+
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--line-2);
+  border-radius: 9px;
+}
+
+@media (max-width: 1180px) {
+  .metric-strip {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .work-grid {
+    grid-template-columns: 250px minmax(360px, 1fr) 310px;
+  }
+}
+
+@media (max-width: 920px) {
+  .dashboard-shell {
+    min-height: auto;
+    grid-template-rows: auto;
+  }
+
+  .topbar,
+  .metric-strip,
+  .work-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .topbar {
+    gap: 0;
+  }
+
+  .brand-block,
+  .top-actions {
+    border: 0;
+    padding: 12px 16px;
+  }
+
+  .graph-stage {
+    min-height: 580px;
+  }
+
+  .file-rail {
+    min-height: 760px;
+  }
+}

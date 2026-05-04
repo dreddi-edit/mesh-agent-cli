@@ -3,12 +3,27 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 test("dashboard token is not rendered into server-generated HTML", () => {
-  const source = readFileSync(new URL("../src/dashboard-server.ts", import.meta.url), "utf8");
+  const serverSource = readFileSync(new URL("../src/dashboard-server.ts", import.meta.url), "utf8");
+  const clientSource = readFileSync(new URL("../dashboard/src/useDashboardSocket.ts", import.meta.url), "utf8");
 
-  assert.doesNotMatch(source, /DASHBOARD_TOKEN='\$\{sessionToken\}'/);
-  assert.match(source, /sessionStorage\.getItem\('meshDashboardToken'\)/);
-  assert.match(source, /location\.hash/);
-  assert.match(source, /mode: 0o600/);
+  assert.doesNotMatch(serverSource, /DASHBOARD_TOKEN='\$\{sessionToken\}'/);
+  assert.doesNotMatch(serverSource, /renderHtml|renderLegacyHtml/);
+  assert.match(clientSource, /sessionStorage\.getItem\("meshDashboardToken"\)/);
+  assert.match(clientSource, /location\.hash/);
+  assert.match(serverSource, /WebSocketServer/);
+  assert.match(serverSource, /mode: 0o600/);
+});
+
+test("react dashboard does not use innerHTML rendering or fetch polling", () => {
+  const clientSources = [
+    readFileSync(new URL("../dashboard/src/App.tsx", import.meta.url), "utf8"),
+    readFileSync(new URL("../dashboard/src/useDashboardSocket.ts", import.meta.url), "utf8")
+  ].join("\n");
+  const serverSource = readFileSync(new URL("../src/dashboard-server.ts", import.meta.url), "utf8");
+
+  assert.doesNotMatch(clientSources, /innerHTML|dangerouslySetInnerHTML/);
+  assert.doesNotMatch(clientSources, /\bfetch\(/);
+  assert.doesNotMatch(serverSource, /\/api\/state|\/api\/actions/);
 });
 
 test("daemon socket permissions are applied after listen creates the socket", () => {

@@ -19,10 +19,11 @@
     "mesh-daemon": "dist/daemon.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/minify.js",
+    "build": "tsc -p tsconfig.json && vite build --config dashboard/vite.config.ts && node scripts/minify.js",
+    "build:dashboard": "vite build --config dashboard/vite.config.ts",
     "dev": "tsx src/index.ts",
     "test": "node scripts/run-tests.cjs",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p dashboard/tsconfig.json",
     "smoke:release": "node scripts/release-smoke.cjs",
     "smoke:published": "node scripts/published-install-smoke.cjs",
     "verify:release": "npm run typecheck && npm run build && npm run test && npm run smoke:release",
@@ -52,11 +53,15 @@
     "enquirer": "^2.4.1",
     "glob": "^13.0.6",
     "ignore": "^7.0.5",
+    "lucide-react": "^1.14.0",
     "marked": "^11.0.1",
     "marked-terminal": "^6.2.0",
     "ora": "^7.0.1",
     "picocolors": "^1.0.0",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
     "ts-morph": "^24.0.0",
+    "ws": "^8.20.0",
     "z3-solver": "^4.13.0"
   },
   "optionalDependencies": {
@@ -65,9 +70,14 @@
   "devDependencies": {
     "@types/marked-terminal": "^6.1.0",
     "@types/node": "^20.11.24",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^6.0.1",
     "terser": "^5.29.1",
     "tsx": "^4.7.1",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vite": "^8.0.10"
   },
   "overrides": {
     "protobufjs": "^7.5.5"

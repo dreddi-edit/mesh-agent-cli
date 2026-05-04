@@ -69,7 +69,7 @@ Der praktische Vorteil: weniger blindes Editieren, mehr reproduzierbare Evidenz,
 | `/inspect` | Visual Agent Portal attachen. | Startet/attacht Browser-Portal und Overlay für UI/Canvas-Inspection. | `src/mesh-portal.ts`, `src/agent-loop.ts#handleInspect` |
 | `/stop-inspect` | Visual Portal detach. | Entfernt Browser-Overlay und beendet Portal-Verbindung. | `src/agent-loop.ts#handleSlashCommand`, `MeshPortal.stop` |
 | `/preview` | Frontend Screenshot im Terminal. | Nutzt Chrome/CDP Preview mit optionalen Ausgabeprotokollen. | `frontend.preview`, `src/terminal-preview.ts` |
-| `/dashboard` | Lokales 3D/Interactive Dashboard starten. | Startet `dashboard-server.js`, schreibt Events nach `.mesh/dashboard`, öffnet lokale URL mit API-Token im Fragment statt im HTML. | `src/dashboard-server.ts`, `src/agent-loop.ts#launchDashboard` |
+| `/dashboard` | Lokales React Live-Dashboard starten. | Startet `dashboard-server.js`, schreibt Events nach `.mesh/dashboard`, öffnet lokale URL mit Token im Fragment und verbindet die UI per WebSocket. | `src/dashboard-server.ts`, `dashboard/src`, `src/agent-loop.ts#launchDashboard` |
 | `/sync` | L2 Cache Sync Status. | Fragt Cloud/Supabase Cache-Zustand und lokale L1/L2-Statistiken ab. | `workspace.check_sync`, `src/cache-manager.ts` |
 | `/setup` | Interaktive oder scripted Settings. | Speichert Modell, Theme, Cloud, Key, Endpoint und Voice-Konfig in User Settings. | `src/config.ts`, `src/agent-loop.ts#handleSetupCommand` |
 | `/model` | Modell wählen/listen/speichern. | Nutzt den zentralen Model Catalog und aktualisiert Current/User Model. | `src/model-catalog.ts`, `src/agent-loop.ts#handleModelCommand` |
@@ -133,9 +133,9 @@ Code proof: `src/runtime-observer.ts#buildAutopsyHookSource`, `captureDeepAutops
 
 ### Dashboard und Portal
 
-Der Agent schreibt Dashboard-Events nach `.mesh/dashboard` und startet einen lokalen Server. `/inspect` kann Browser-Overlay/Portal verbinden. Dashboard-API-Aufrufe benötigen einen pro Prozess erzeugten Token; `/dashboard` übergibt ihn per URL-Fragment und entfernt ihn nach dem Laden aus der sichtbaren URL.
+Der Agent schreibt Dashboard-Events nach `.mesh/dashboard` und startet einen lokalen Server. `/inspect` kann Browser-Overlay/Portal verbinden. Das React-Dashboard authentifiziert den lokalen WebSocket mit einem pro Prozess erzeugten Token; `/dashboard` übergibt ihn per URL-Fragment und entfernt ihn nach dem Laden aus der sichtbaren URL.
 
-Code proof: `src/dashboard-server.ts`, `src/mesh-portal.ts`, `src/agent-loop.ts#appendDashboardEvent`.
+Code proof: `src/dashboard-server.ts`, `dashboard/src`, `src/mesh-portal.ts`, `src/agent-loop.ts#appendDashboardEvent`.
 
 ### Moonshot Ledgers
 
