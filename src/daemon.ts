@@ -116,10 +116,16 @@ async function runDaemonServer(): Promise<void> {
     }
   };
 
-  void tick();
-  const timer = setInterval(() => {
-    void tick();
-  }, 15 * 60 * 1000);
+  let stopped = false;
+  let timer: NodeJS.Timeout | null = null;
+  const scheduleTick = (delayMs: number) => {
+    timer = setTimeout(async () => {
+      await tick();
+      if (!stopped) scheduleTick(15 * 60 * 1000);
+    }, delayMs);
+    timer.unref();
+  };
+  scheduleTick(0);
 
   const server = net.createServer((socket) => {
     let body = "";
@@ -132,7 +138,8 @@ async function runDaemonServer(): Promise<void> {
       socket.write(JSON.stringify(response));
       socket.end();
       if (request?.action === "stop") {
-        clearInterval(timer);
+        stopped = true;
+        if (timer) clearTimeout(timer);
         server.close();
         await backend.close();
         await fs.rm(DAEMON_SOCKET_PATH, { force: true }).catch(() => undefined);

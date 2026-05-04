@@ -4,6 +4,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
 import { StructuredLogger } from "./structured-logger.js";
+import { parseAllowedCommand } from "./command-safety.js";
 
 type RuntimeStatus = "running" | "exited" | "failed" | "timeout";
 
@@ -62,6 +63,7 @@ export class RuntimeObserver {
     const profile = profileName ? await this.loadProfile(profileName) : {};
     const command = String(args.command ?? profile.command ?? "").trim();
     if (!command) throw new Error("runtime.start requires command or a runbook profile with command");
+    const parsedCommand = parseAllowedCommand(command);
 
     const id = `run-${Date.now().toString(36)}-${crypto.randomBytes(3).toString("hex")}`;
     const runDir = path.join(this.basePath, id);
@@ -100,7 +102,7 @@ export class RuntimeObserver {
       MESH_RUNTIME_AUTOPSY_PATH: autopsyPath,
       MESH_RUNTIME_RUN_ID: id
     };
-    const child = spawn("sh", ["-c", command], {
+    const child = spawn(parsedCommand.command, parsedCommand.args, {
       cwd,
       env
     });

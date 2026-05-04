@@ -1091,9 +1091,9 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
       let userInput = "";
       try {
         if (this.voiceMode) {
-          output.write(this.themeColor(pc.bold("\n[LISTENING]")) + pc.dim(" (Speak for 5s...)\n"));
+          output.write(this.themeColor(pc.bold("\n[LISTENING]")) + pc.dim(" (stops after silence...)\n"));
           try {
-            const audioFile = await this.voiceManager.record(5);
+            const audioFile = await this.voiceManager.record();
             output.write(pc.dim("Transcribing...\n"));
             const transcription = await this.voiceManager.transcribe(audioFile);
             userInput = transcription.text;
@@ -2122,9 +2122,16 @@ Ensure the final code is clean, idiomatic, and adheres to the styling paradigm. 
 
   private startDashboardActionPump(): void {
     if (this.dashboardActionTimer) return;
-    this.dashboardActionTimer = setInterval(() => {
-      void this.processDashboardActions();
-    }, 900);
+    const pump = async () => {
+      await this.processDashboardActions();
+      this.dashboardActionTimer = setTimeout(() => {
+        void pump();
+      }, 900);
+      this.dashboardActionTimer.unref();
+    };
+    this.dashboardActionTimer = setTimeout(() => {
+      void pump();
+    }, 0);
     this.dashboardActionTimer.unref();
   }
 
@@ -3987,32 +3994,7 @@ Finish by running 'workspace.finalize_task' with the commit message "Fix linter 
   }
 
   private sanitizeLlmOutput(text: string): string {
-    let clean = text
-      // Strip <thinking>...</thinking> blocks completely (content included) — D-10
-      .replace(/<thinking>[\s\S]*?<\/thinking>/g, "")
-      // Strip <thought>...</thought> blocks completely — D-10
-      // (system prompt at line 77 explicitly instructs model to emit these)
-      .replace(/<thought>[\s\S]*?<\/thought>/g, "")
-      // Strip <reflection>...</reflection> and <scratchpad>...</scratchpad> blocks
-      .replace(/<reflection>[\s\S]*?<\/reflection>/g, "")
-      .replace(/<scratchpad>[\s\S]*?<\/scratchpad>/g, "")
-      // Remove XML artifact wrapper TAGS but preserve their text content — D-11
-      .replace(/<\/?(artifact|result|answer)[^>]*>/g, "")
-      // Remove orphaned open/close thinking-variant tags (incomplete blocks)
-      .replace(/<\/?(thinking|thought|reflection|scratchpad)[^>]*>/g, "")
-      // Normalize literal \n escape sequences from raw LLM output — D-12
-      .replace(/\\n/g, "\n")
-      // Collapse excessive blank lines (4+ newlines → 2)
-      .replace(/\n{4,}/g, "\n\n")
-      .trim();
-    // Close unclosed code fences — D-12 (RESEARCH.md Pattern 3)
-    // Count ``` fence markers; odd count means one was never closed
-    const fenceCount = (clean.match(/^```/gm) || []).length;
-    if (fenceCount % 2 !== 0) clean += "\n```";
-    // Repair broken table rows: remove lines that are only pipe characters and whitespace
-    // (orphaned | lines that appear when a table is cut mid-row) — D-12
-    clean = clean.replace(/^\s*\|\s*$/gm, "");
-    return clean;
+    return sanitizeLlmOutput(text);
   }
 
   private renderSystemMessage(text: string): void {
@@ -5438,9 +5420,26 @@ ${baseSummary}`;
 // Export sanitizeLlmOutput as a standalone function for unit testing.
 // This allows tests/error-and-sanitization.test.mjs to import it without
 // instantiating AgentLoop (which requires heavy config setup).
-// The logic is identical to the private method above — keep them in sync.
 export function sanitizeLlmOutput(text: string): string {
-  let clean = text
+  const segments = splitMarkdownFencedRegions(String(text ?? ""));
+  if (segments.length === 0) return "";
+
+  const firstPlain = segments.findIndex((segment) => !segment.isCode);
+  const lastPlain = segments.findLastIndex((segment) => !segment.isCode);
+  const cleaned = segments.map((segment, index) => {
+    if (segment.isCode) return segment.text;
+    let plain = sanitizePlainLlmText(segment.text);
+    if (index === firstPlain) plain = plain.trimStart();
+    if (index === lastPlain) plain = plain.trimEnd();
+    return plain;
+  }).join("");
+
+  const fenceCount = (cleaned.match(/^```/gm) || []).length;
+  return fenceCount % 2 === 0 ? cleaned : `${cleaned}\n\`\`\``;
+}
+
+function sanitizePlainLlmText(text: string): string {
+  return text
     .replace(/<thinking>[\s\S]*?<\/thinking>/g, "")
     .replace(/<thought>[\s\S]*?<\/thought>/g, "")
     .replace(/<reflection>[\s\S]*?<\/reflection>/g, "")
@@ -5449,11 +5448,37 @@ export function sanitizeLlmOutput(text: string): string {
     .replace(/<\/?(thinking|thought|reflection|scratchpad)[^>]*>/g, "")
     .replace(/\\n/g, "\n")
     .replace(/\n{4,}/g, "\n\n")
-    .trim();
-  // Close unclosed code fences — D-12
-  const fenceCount = (clean.match(/^```/gm) || []).length;
-  if (fenceCount % 2 !== 0) clean += "\n```";
-  // Repair broken table rows — D-12
-  clean = clean.replace(/^\s*\|\s*$/gm, "");
-  return clean;
+    .replace(/^\s*\|\s*$/gm, "");
+}
+
+function splitMarkdownFencedRegions(text: string): Array<{ text: string; isCode: boolean }> {
+  const lines = text.match(/[^\n]*\n|[^\n]+/g) ?? (text ? [text] : []);
+  const segments: Array<{ text: string; isCode: boolean }> = [];
+  let current = "";
+  let inCode = false;
+
+  const push = (isCode: boolean) => {
+    if (!current) return;
+    segments.push({ text: current, isCode });
+    current = "";
+  };
+
+  for (const line of lines) {
+    if (/^\s*```/.test(line)) {
+      if (!inCode) {
+        push(false);
+        current += line;
+        inCode = true;
+      } else {
+        current += line;
+        push(true);
+        inCode = false;
+      }
+      continue;
+    }
+    current += line;
+  }
+
+  push(inCode);
+  return segments;
 }

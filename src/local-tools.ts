@@ -1,6 +1,6 @@
 import { promises as fs, existsSync, watch, type FSWatcher } from "node:fs";
 import path from "node:path";
-import { exec, spawn, spawnSync } from "node:child_process";
+import { exec, execFile, spawn, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import os from "node:os";
 import crypto from "node:crypto";
@@ -62,6 +62,7 @@ class VectorManager {
 const vectorManager = new VectorManager();
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 import { MeshCoreAdapter } from "./mesh-core-adapter.js";
 import { CacheManager, CapsuleBatchRequest } from "./cache-manager.js";
@@ -95,7 +96,7 @@ import { TsCompilerRefactor } from "./refactor/ts-compiler.js";
 import { PropertyTestGenerator } from "./quality/property-tests.js";
 import { SmtEdgeCaseFinder } from "./quality/smt.js";
 import { AuditLogger } from "./audit/logger.js";
-import { assertCommandAllowed } from "./command-safety.js";
+import { assertCommandAllowed, parseAllowedCommand } from "./command-safety.js";
 import { StructuredLogger } from "./structured-logger.js";
 import { ToolInputValidationError, validateToolInput } from "./tool-schema.js";
 import { HAIKU_MODEL_ID } from "./model-catalog.js";
@@ -2842,7 +2843,7 @@ export class LocalToolBackend implements ToolBackend {
   private async runInShadow(args: Record<string, unknown>, onProgress?: (chunk: string) => void): Promise<unknown> {
     const command = String(args.command ?? "").trim();
     if (!command) throw new Error("workspace.run_in_shadow requires 'command'");
-    assertCommandAllowed(command);
+    const parsedCommand = parseAllowedCommand(command);
 
     const shadowRoot = path.join(os.tmpdir(), `mesh-shadow-${Date.now()}`);
     onProgress?.(`[Shadow Workspace] Creating at ${shadowRoot}...\n`);
@@ -2855,7 +2856,7 @@ export class LocalToolBackend implements ToolBackend {
       const TIMEOUT_MS = 60_000;
 
       const result = await new Promise<any>((resolve) => {
-        const child = spawn("sh", ["-c", command], { cwd: shadowRoot });
+        const child = spawn(parsedCommand.command, parsedCommand.args, { cwd: shadowRoot });
         let stdout = "";
         let stderr = "";
         let timedOut = false;
@@ -2903,12 +2904,8 @@ export class LocalToolBackend implements ToolBackend {
     if (!(await pathExists(tsconfigPath))) {
       return { ok: true, output: "No tsconfig.json found; TypeScript diagnostics skipped." };
     }
-    const localTsc = path.join(this.workspaceRoot, "node_modules", ".bin", "tsc");
-    const command = await pathExists(localTsc)
-      ? `"${localTsc}" --noEmit`
-      : "npx --no-install tsc --noEmit";
     try {
-      const { stdout, stderr } = await execAsync(command, { cwd: this.workspaceRoot });
+      const { stdout, stderr } = await execFileAsync("npm", ["exec", "--", "tsc", "--noEmit"], { cwd: this.workspaceRoot });
       return { ok: true, output: stdout || stderr || "No issues found." };
     } catch (err: any) {
       return { ok: false, hasErrors: true, output: err.stdout || err.stderr || err.message };
@@ -3449,13 +3446,12 @@ export class LocalToolBackend implements ToolBackend {
       ? "sg"
       : null;
 
-    const escapedPattern = pattern.replace(/"/g, '\\"');
-    const command = localBin
-      ? `${localBin} run --pattern "${escapedPattern}"`
-      : `npx --yes @ast-grep/cli run --pattern "${escapedPattern}"`;
-
     try {
-      const { stdout } = await execAsync(command, { cwd: this.workspaceRoot });
+      const command = localBin || "npm";
+      const args = localBin
+        ? ["run", "--pattern", pattern]
+        : ["exec", "--yes", "--", "@ast-grep/cli", "run", "--pattern", pattern];
+      const { stdout } = await execFileAsync(command, args, { cwd: this.workspaceRoot });
 
       const lines = stdout.split("\n").filter(Boolean);
       return {
@@ -3534,10 +3530,11 @@ session.on('Debugger.paused', async (message) => {
 
     onProgress?.(`[Telemetry] Running: ${command}\n`);
     const TIMEOUT_MS = 60_000;
+    const parsedCommand = parseAllowedCommand(command);
 
     const result = await new Promise<any>((resolve) => {
       const env = { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require "${telemetryScriptPath}"` };
-      const child = spawn("sh", ["-c", command], { cwd: this.workspaceRoot, env });
+      const child = spawn(parsedCommand.command, parsedCommand.args, { cwd: this.workspaceRoot, env });
       let stdout = "";
       let stderr = "";
       let timedOut = false;
@@ -4397,7 +4394,7 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
   private async runCommand(args: Record<string, unknown>, onProgress?: (chunk: string) => void): Promise<unknown> {
     const command = String(args.command ?? "").trim();
     if (!command) throw new Error("workspace.run_command requires 'command'");
-    assertCommandAllowed(command);
+    const parsedCommand = parseAllowedCommand(command);
 
     const TIMEOUT_MS = 30_000;
     const TRIM_LIMIT = 15_000;
@@ -4409,7 +4406,7 @@ Respond ONLY with the raw diff content. No markdown code fences, no preamble.`;
     };
 
     const result = await new Promise<any>((resolve) => {
-      const child = spawn("sh", ["-c", command], { cwd: this.workspaceRoot });
+      const child = spawn(parsedCommand.command, parsedCommand.args, { cwd: this.workspaceRoot });
       let stdout = "";
       let stderr = "";
       let timedOut = false;

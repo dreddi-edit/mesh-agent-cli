@@ -59,7 +59,7 @@ try {
       lastError = err;
       if (attempt < 6) {
         console.log(`[published-smoke] install failed (attempt ${attempt}/6), waiting 10s for npm registry propagation...`);
-        spawnSync("node", ["-e", "setTimeout(()=>{}, 10000)"]);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10000);
       }
     }
   }

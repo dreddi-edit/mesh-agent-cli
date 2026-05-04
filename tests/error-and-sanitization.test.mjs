@@ -42,6 +42,23 @@ test("sanitizeLlmOutput strips <thought> blocks and XML artifact wrappers", asyn
   assert.ok(cleaned2.includes("Final answer"), "final answer preserved");
 });
 
+test("sanitizeLlmOutput preserves XML-like text inside markdown code fences", async () => {
+  const { sanitizeLlmOutput } = await import("../src/agent-loop.ts");
+  const input = [
+    "Before <result>plain</result>",
+    "```tsx",
+    "const node = <result>{value}</result>;",
+    "<thinking>keep this fixture exactly</thinking>",
+    "```",
+    "After"
+  ].join("\n");
+
+  const output = sanitizeLlmOutput(input);
+  assert.ok(!output.includes("Before <result>plain</result>"), "plain text wrappers are sanitized");
+  assert.ok(output.includes("const node = <result>{value}</result>;"), "code-fence JSX is preserved");
+  assert.ok(output.includes("<thinking>keep this fixture exactly</thinking>"), "code-fence XML-like fixtures are preserved");
+});
+
 // === Error format tests (from 01-01 scaffold) ===
 
 test("JSON.parse failures in agent-loop produce [Mesh] Error: format not raw SyntaxError", async () => {

@@ -68,8 +68,8 @@ export class ReplayEngine {
   }
 
   private async analyzeCommitRange(commitRange: string, trace: TraceFixture): Promise<Record<string, unknown>> {
-    const [start = "", end = "HEAD"] = commitRange.split("..");
-    const sampleCommit = start || "HEAD~20";
+    const { start, end } = parseCommitRange(commitRange);
+    const sampleCommit = start || "HEAD";
     const timeline = await this.timelines.create({ name: `replay-${trace.id}`, baseRef: sampleCommit });
     const verification = await this.timelines.run({
       timelineId: timeline.timeline.id,
@@ -95,4 +95,20 @@ export class ReplayEngine {
       return null;
     }
   }
+}
+
+function parseCommitRange(commitRange: string): { start: string; end: string } {
+  const normalized = commitRange.trim();
+  if (!normalized) throw new Error("Invalid commitRange: empty range");
+
+  const parts = normalized.split("..");
+  if (parts.length > 2) throw new Error("Invalid commitRange: expected <start>..<end>");
+
+  const start = parts[0] || "HEAD";
+  const end = parts.length === 2 ? (parts[1] || "HEAD") : "HEAD";
+  const refPattern = /^[a-zA-Z0-9_.-]+$/;
+  if (!refPattern.test(start) || !refPattern.test(end)) {
+    throw new Error("Invalid commitRange: refs may only contain letters, numbers, underscore, dot, or dash");
+  }
+  return { start, end };
 }

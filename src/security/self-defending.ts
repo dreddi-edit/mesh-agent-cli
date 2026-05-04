@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { Worker } from "node:worker_threads";
+import { Node, Project, ScriptKind, SyntaxKind } from "ts-morph";
 import { runCritic } from "../agents/critic.js";
 import { appendJsonl, clampNumber, collectWorkspaceFiles, lineNumberAt, readJson, toPosix, writeJson } from "../moonshots/common.js";
 import {
@@ -41,6 +42,19 @@ interface SelfDefenseCandidate {
   line: number;
   kind: FindingKind;
 }
+
+interface AstSecurityCandidates {
+  commandInjection: Array<{ pattern: string; flags: string; line: number }>;
+  sqli: Array<{ pattern: string; flags: string; line: number }>;
+}
+
+const REGEX_PROBE_WORKER_URL = new URL(`data:text/javascript,${encodeURIComponent(`
+import { parentPort, workerData } from "node:worker_threads";
+const start = process.hrtime.bigint();
+new RegExp(workerData.pattern, workerData.flags).test(workerData.input);
+const end = process.hrtime.bigint();
+parentPort?.postMessage({ ms: Number(end - start) / 1e6 });
+`)}`);
 
 interface SecurityPolicy {
   autoMerge: boolean;
@@ -315,12 +329,13 @@ export class SelfDefendingCodeEngine {
       const absolute = safeResolve(this.workspaceRoot, file);
       const raw = await fs.readFile(absolute, "utf8").catch(() => "");
       if (!raw) continue;
+      const astSecurityCandidates = extractAstSecurityCandidates(raw, file);
 
       const candidates = [
         ...extractRegexCandidates(raw, file).map((candidate) => ({ ...candidate, kind: "redos" as const })),
-        ...extractCommandInjectionCandidates(raw, file).map((candidate) => ({ ...candidate, kind: "command_injection" as const })),
+        ...astSecurityCandidates.commandInjection.map((candidate) => ({ ...candidate, kind: "command_injection" as const })),
         ...extractPathTraversalCandidates(raw, file).map((candidate) => ({ ...candidate, kind: "path_traversal" as const })),
-        ...extractSqliCandidates(raw, file).map((candidate) => ({ ...candidate, kind: "sqli" as const }))
+        ...astSecurityCandidates.sqli.map((candidate) => ({ ...candidate, kind: "sqli" as const }))
       ];
 
       for (const candidate of candidates) {
@@ -489,16 +504,6 @@ function extractRegexCandidates(raw: string, file: string): Array<{ pattern: str
   return candidates.filter((item) => item.pattern && !/node_modules/.test(file));
 }
 
-function extractCommandInjectionCandidates(raw: string, file: string): Array<{ pattern: string; flags: string; line: number }> {
-  if (/node_modules/.test(file)) return [];
-  const candidates: Array<{ pattern: string; flags: string; line: number }> = [];
-  const regex = /\b(?:exec|spawn|eval)\s*\(\s*`[^`]*\$\{[^}]+\}[^`]*`/g;
-  for (const match of raw.matchAll(regex)) {
-    candidates.push({ pattern: match[0], flags: "", line: lineNumberAt(raw, match.index ?? 0) });
-  }
-  return candidates;
-}
-
 function extractPathTraversalCandidates(raw: string, file: string): Array<{ pattern: string; flags: string; line: number }> {
   if (/node_modules/.test(file)) return [];
   const candidates: Array<{ pattern: string; flags: string; line: number }> = [];
@@ -509,14 +514,96 @@ function extractPathTraversalCandidates(raw: string, file: string): Array<{ patt
   return candidates;
 }
 
-function extractSqliCandidates(raw: string, file: string): Array<{ pattern: string; flags: string; line: number }> {
-  if (/node_modules/.test(file)) return [];
-  const candidates: Array<{ pattern: string; flags: string; line: number }> = [];
-  const regex = /\b(?:query|execute|exec)\s*\(\s*`(?:\s*SELECT|\s*INSERT|\s*UPDATE|\s*DELETE)[^`]*\$\{[^}]+\}[^`]*`/ig;
-  for (const match of raw.matchAll(regex)) {
-    candidates.push({ pattern: match[0], flags: "", line: lineNumberAt(raw, match.index ?? 0) });
+function extractAstSecurityCandidates(raw: string, file: string): AstSecurityCandidates {
+  const result: AstSecurityCandidates = { commandInjection: [], sqli: [] };
+  if (/node_modules/.test(file) || !/\.[cm]?[jt]sx?$/.test(file)) return result;
+
+  try {
+    const ext = path.extname(file).toLowerCase();
+    const scriptKind = ext === ".js" || ext === ".jsx" || ext === ".cjs" || ext === ".mjs"
+      ? ScriptKind.JS
+      : ScriptKind.TS;
+    const project = new Project({
+      useInMemoryFileSystem: true,
+      skipFileDependencyResolution: true,
+      compilerOptions: {
+        allowJs: true,
+        checkJs: false
+      }
+    });
+    const sourceFile = project.createSourceFile(`/scan${ext || ".ts"}`, raw, { scriptKind, overwrite: true });
+
+    sourceFile.forEachDescendant((node) => {
+      if (!Node.isCallExpression(node)) return;
+      const args = node.getArguments();
+      if (args.length === 0) return;
+
+      const callee = callExpressionName(node.getExpression());
+      const dynamicArgs = args.filter((arg) => isDynamicStringExpression(arg));
+      if (dynamicArgs.length === 0) return;
+
+      if (isCommandSink(callee)) {
+        result.commandInjection.push({
+          pattern: node.getText().slice(0, 500),
+          flags: "ast",
+          line: node.getStartLineNumber()
+        });
+      }
+
+      const firstArg = args[0];
+      if (isSqlSink(callee) && dynamicArgs.includes(firstArg) && looksLikeSql(firstArg.getText())) {
+        result.sqli.push({
+          pattern: node.getText().slice(0, 500),
+          flags: "ast",
+          line: node.getStartLineNumber()
+        });
+      }
+    });
+  } catch {
+    return result;
   }
-  return candidates;
+
+  return result;
+}
+
+function callExpressionName(expression: Node): string {
+  if (Node.isIdentifier(expression)) return expression.getText();
+  if (Node.isPropertyAccessExpression(expression)) return expression.getName();
+  return expression.getText();
+}
+
+function isCommandSink(name: string): boolean {
+  return /^(exec|execSync|spawn|spawnSync|eval)$/.test(name);
+}
+
+function isSqlSink(name: string): boolean {
+  return /^(query|execute|exec)$/.test(name);
+}
+
+function isDynamicStringExpression(node: Node): boolean {
+  if (Node.isTemplateExpression(node)) return true;
+  if (Node.isBinaryExpression(node) && node.getOperatorToken().getKind() === SyntaxKind.PlusToken) {
+    return containsStringLikeExpression(node.getLeft()) || containsStringLikeExpression(node.getRight());
+  }
+  if (Node.isParenthesizedExpression(node) || Node.isAsExpression(node) || Node.isTypeAssertion(node)) {
+    return isDynamicStringExpression(node.getExpression());
+  }
+  return false;
+}
+
+function containsStringLikeExpression(node: Node): boolean {
+  if (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node) || Node.isTemplateExpression(node)) return true;
+  if (Node.isBinaryExpression(node) && node.getOperatorToken().getKind() === SyntaxKind.PlusToken) {
+    return containsStringLikeExpression(node.getLeft()) || containsStringLikeExpression(node.getRight());
+  }
+  if (Node.isParenthesizedExpression(node) || Node.isAsExpression(node) || Node.isTypeAssertion(node)) {
+    return containsStringLikeExpression(node.getExpression());
+  }
+  return false;
+}
+
+function looksLikeSql(text: string): boolean {
+  return /\b(?:SELECT|INSERT|UPDATE|DELETE|UPSERT|MERGE|WITH)\b/i.test(text);
 }
 
 function buildRedosGuardPatch(
@@ -594,33 +681,32 @@ async function confirmRedos(pattern: string, flags: string): Promise<{ vulnerabl
 
 function measureRegex(pattern: string, flags: string, input: string, timeoutMs: number): Promise<{ ms: number; timedOut: boolean }> {
   return new Promise((resolve) => {
-    const script = [
-      `const start = process.hrtime.bigint();`,
-      `new RegExp(${JSON.stringify(pattern)}, ${JSON.stringify(flags.replace(/[gy]/g, ""))}).test(${JSON.stringify(input)});`,
-      `const end = process.hrtime.bigint();`,
-      `console.log(Number(end - start) / 1e6);`
-    ].join("\n");
-    const child = spawn(process.execPath, ["-e", script], { stdio: ["ignore", "pipe", "ignore"] });
-    let stdout = "";
+    const worker = new Worker(REGEX_PROBE_WORKER_URL, {
+      workerData: {
+        pattern,
+        flags: flags.replace(/[gy]/g, ""),
+        input
+      }
+    });
     let settled = false;
     const done = (result: { ms: number; timedOut: boolean }) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      void worker.terminate().catch(() => undefined);
       resolve(result);
     };
     const timer = setTimeout(() => {
-      child.kill("SIGTERM");
       done({ ms: timeoutMs, timedOut: true });
     }, timeoutMs);
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString();
+    worker.on("message", (message: { ms?: number }) => {
+      done({ ms: Number(message.ms) || 0, timedOut: false });
     });
-    child.on("close", () => {
-      done({ ms: Number(stdout.trim()) || 0, timedOut: false });
-    });
-    child.on("error", () => {
+    worker.on("error", () => {
       done({ ms: 0, timedOut: false });
+    });
+    worker.on("exit", (code) => {
+      if (code !== 0) done({ ms: 0, timedOut: false });
     });
   });
 }

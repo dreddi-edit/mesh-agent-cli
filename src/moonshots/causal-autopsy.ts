@@ -2,12 +2,11 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import { exec, execFile } from "node:child_process";
+import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { assertCommandAllowed } from "../command-safety.js";
+import { parseAllowedCommand } from "../command-safety.js";
 import { clampNumber, collectWorkspaceFiles, readJson, writeJson } from "./common.js";
 
-const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 
 interface StackFrame {
@@ -111,9 +110,9 @@ export class CausalAutopsyEngine {
   }
 
   private async runFailingCommand(command: string, timeoutMs: number): Promise<AutopsyEvidence> {
-    assertCommandAllowed(command);
+    const parsedCommand = parseAllowedCommand(command);
     try {
-      const { stdout, stderr } = await execAsync(command, {
+      const { stdout, stderr } = await execFileAsync(parsedCommand.command, parsedCommand.args, {
         cwd: this.workspaceRoot,
         timeout: timeoutMs,
         maxBuffer: 1024 * 1024

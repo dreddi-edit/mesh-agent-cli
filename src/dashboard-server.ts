@@ -972,7 +972,8 @@ function renderAllViews(){renderOverview();renderBudget();renderHotspots();rende
 document.addEventListener('keydown',function(e){if(e.target.tagName==='INPUT'||e.target.tagName==='SELECT')return;if(e.key==='f'||e.key==='F'){$('file-search').focus();e.preventDefault();}if(e.key==='r'||e.key==='R')refresh();if(e.key==='1')setGraphMode('focus');if(e.key==='2')setGraphMode('full');if(e.key==='0'){orbitState={theta:0.6,phi:0.8,dist:220,target:{x:0,y:0,z:0},isDragging:false,lastX:0,lastY:0};}});
 function setGraphMode(m){graphMode=m;lastGraphKey='';document.querySelectorAll('#graph-mode-seg button').forEach(function(b){b.classList.toggle('active',b.dataset.mode===m);});renderGraph();}
 async function refresh(){try{var resp=await fetch('/api/state',{cache:'no-store',headers:authHeaders()});state=await resp.json();if(!selFile){var hot=(state.hotFiles||[])[0];selFile=hot&&hot.file||(state.groupedFiles.source&&state.groupedFiles.source[0])||(state.groupedFiles.tests&&state.groupedFiles.tests[0])||null;}setText('ws-path',(state.workspaceRoot||'').split('/').filter(Boolean).pop()||state.workspaceRoot);$('ws-path').title=state.workspaceRoot||'';renderAllViews();setText('refresh-clock',new Date().toLocaleTimeString());}catch(err){toast('Refresh failed: '+String(err),true);}}
-document.querySelectorAll('#graph-mode-seg button').forEach(function(btn){btn.addEventListener('click',function(){setGraphMode(btn.dataset.mode);});});$('file-search').addEventListener('input',renderFiles);$('file-group').addEventListener('change',renderFiles);refresh();setInterval(refresh,2000);
+async function refreshLoop(){await refresh();setTimeout(refreshLoop,2000);}
+document.querySelectorAll('#graph-mode-seg button').forEach(function(btn){btn.addEventListener('click',function(){setGraphMode(btn.dataset.mode);});});$('file-search').addEventListener('input',renderFiles);$('file-group').addEventListener('change',renderFiles);refreshLoop();
 })();
 </script>
 </body>
@@ -1741,8 +1742,8 @@ $('file-search').addEventListener('input',renderFiles);
 $('file-group').addEventListener('change',renderFiles);
 
 initGraphInteraction();
-refresh();
-setInterval(refresh,2000);
+async function refreshLoop(){await refresh();setTimeout(refreshLoop,2000);}
+refreshLoop();
 })();
 </script>
 </body>

@@ -30,3 +30,10 @@ test("workspace MCP is opt-in and MCP subprocesses do not inherit full env by de
   assert.match(mcpClient, /MESH_MCP_INHERIT_ENV/);
   assert.doesNotMatch(mcpClient, /env: process\.env/);
 });
+
+test("self-defense regex probing uses worker threads instead of node -e subprocesses", () => {
+  const source = readFileSync(new URL("../src/security/self-defending.ts", import.meta.url), "utf8");
+
+  assert.match(source, /node:worker_threads/);
+  assert.doesNotMatch(source, /process\.execPath,\s*\[\s*["']-e["']/);
+});

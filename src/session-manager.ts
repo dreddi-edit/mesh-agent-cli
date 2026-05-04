@@ -45,7 +45,18 @@ export class DefaultSessionManager implements SessionManager {
 
   start(): void {
     if (this.autoSaveTimer) return;
-    this.autoSaveTimer = setInterval(() => this.autoSave(), AUTO_SAVE_INTERVAL_MS);
+    const loop = async () => {
+      await this.autoSave();
+      if (this.stopped) return;
+      this.autoSaveTimer = setTimeout(() => {
+        void loop();
+      }, AUTO_SAVE_INTERVAL_MS);
+      this.autoSaveTimer.unref?.();
+    };
+    this.autoSaveTimer = setTimeout(() => {
+      void loop();
+    }, AUTO_SAVE_INTERVAL_MS);
+    this.autoSaveTimer.unref?.();
   }
 
   async stop(): Promise<void> {
@@ -53,7 +64,7 @@ export class DefaultSessionManager implements SessionManager {
     this.stopped = true;
 
     if (this.autoSaveTimer) {
-      clearInterval(this.autoSaveTimer);
+      clearTimeout(this.autoSaveTimer);
       this.autoSaveTimer = null;
     }
 

@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { promisify } from "node:util";
 import { StructuredLogger } from "./structured-logger.js";
+import { parseAllowedCommand } from "./command-safety.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -322,7 +323,14 @@ async function runShell(
   runningChildren: Set<ChildProcessWithoutNullStreams>
 ): Promise<{ ok: boolean; exitCode: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    const child = spawn("sh", ["-c", command], { cwd });
+    let parsedCommand: ReturnType<typeof parseAllowedCommand>;
+    try {
+      parsedCommand = parseAllowedCommand(command);
+    } catch (error) {
+      resolve({ ok: false, exitCode: 126, stdout: "", stderr: (error as Error).message });
+      return;
+    }
+    const child = spawn(parsedCommand.command, parsedCommand.args, { cwd });
     runningChildren.add(child);
     let stdout = "";
     let stderr = "";

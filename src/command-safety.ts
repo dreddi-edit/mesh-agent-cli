@@ -2,7 +2,15 @@ export interface CommandSafetyResult {
   ok: boolean;
   reason?: string;
   pattern?: string;
+  parsed?: ParsedCommand;
 }
+
+export interface ParsedCommand {
+  command: "npm" | "node" | "git";
+  args: string[];
+}
+
+const ALLOWED_COMMANDS = new Set(["npm", "node", "git"]);
 
 const DESTRUCTIVE_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   {
@@ -61,6 +69,7 @@ const DESTRUCTIVE_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
 
 export function analyzeCommandSafety(command: string): CommandSafetyResult {
   const normalized = command.trim();
+  if (!normalized) return { ok: false, reason: "empty command" };
   
   // Strip quotes and backslashes to catch string splitting obfuscation (e.g. c"a"t)
   const deobfuscated = normalized.replace(/['"\\]/g, "");
@@ -92,7 +101,10 @@ export function analyzeCommandSafety(command: string): CommandSafetyResult {
     return { ok: false, reason: "network credential exfiltration blocked" };
   }
 
-  return { ok: true };
+  const parsed = tokenizeAllowedCommand(normalized);
+  if ("reason" in parsed) return { ok: false, reason: parsed.reason };
+
+  return { ok: true, parsed };
 }
 
 export function assertCommandAllowed(command: string): void {
@@ -100,4 +112,66 @@ export function assertCommandAllowed(command: string): void {
   if (!safety.ok) {
     throw new Error(`workspace.run_command blocked: ${safety.reason}`);
   }
+}
+
+export function parseAllowedCommand(command: string): ParsedCommand {
+  const safety = analyzeCommandSafety(command);
+  if (!safety.ok || !safety.parsed) {
+    throw new Error(`workspace.run_command blocked: ${safety.reason}`);
+  }
+  return safety.parsed;
+}
+
+function tokenizeAllowedCommand(command: string): ParsedCommand | { reason: string } {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: "'" | "\"" | null = null;
+
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index];
+    if (quote) {
+      if (char === quote) {
+        quote = null;
+      } else if (char === "\\" && index + 1 < command.length) {
+        index += 1;
+        current += command[index];
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === "'" || char === "\"") {
+      quote = char;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+    if (/[;&|<>]/.test(char)) {
+      return { reason: "shell control operators are not allowed" };
+    }
+    if (char === "\\" || char === "`") {
+      return { reason: "shell escaping and command substitution are not allowed" };
+    }
+    current += char;
+  }
+
+  if (quote) return { reason: "unterminated quoted argument" };
+  if (current) tokens.push(current);
+  if (tokens.length === 0) return { reason: "empty command" };
+
+  const executable = tokens[0];
+  if (!ALLOWED_COMMANDS.has(executable)) {
+    return { reason: "command must start with an allowed executable: npm, node, or git" };
+  }
+
+  return {
+    command: executable as ParsedCommand["command"],
+    args: tokens.slice(1)
+  };
 }

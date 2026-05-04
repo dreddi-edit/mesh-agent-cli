@@ -1,5 +1,6 @@
 import zlib from 'zlib';
 import { promisify } from 'util';
+import path from 'path';
 import * as htmlMinifier from 'html-minifier-terser';
 import * as terser from 'terser';
 
@@ -11,14 +12,14 @@ const brotliDecompress = promisify(zlib.brotliDecompress);
  * 1. Type Detection & Aggressive Minification
  * 2. Brotli-X (Level 11) Ultra Compression
  */
-export async function compressMeshPayload(rawText) {
+export async function compressMeshPayload(rawText, options = {}) {
     if (typeof rawText !== 'string') rawText = String(rawText);
     
     let minified = rawText;
-    let type = 'text';
+    let type = detectPayloadType(options);
 
     try {
-        if (rawText.includes('<') && rawText.includes('>')) {
+        if (type === 'html') {
             minified = await htmlMinifier.minify(rawText, {
                 collapseWhitespace: true,
                 removeComments: true,
@@ -26,12 +27,10 @@ export async function compressMeshPayload(rawText) {
                 minifyJS: true,
                 removeAttributeQuotes: true
             });
-            type = 'html';
-        } else if (rawText.includes('function ') || rawText.includes('const ') || rawText.includes('=>') || rawText.includes('var ') || rawText.includes('let ')) {
+        } else if (type === 'js') {
             const result = await terser.minify(rawText, { compress: true, mangle: true });
             if (result.code) {
                 minified = result.code;
-                type = 'js';
             }
         }
     } catch (err) {
@@ -57,6 +56,18 @@ export async function compressMeshPayload(rawText) {
         ratio: (originalSize / compressedSize).toFixed(2),
         type
     };
+}
+
+function detectPayloadType(options) {
+    const mimeType = String(options.mimeType || options.contentType || '').split(';')[0].trim().toLowerCase();
+    if (mimeType === 'text/html' || mimeType === 'application/xhtml+xml') return 'html';
+    if (mimeType === 'application/javascript' || mimeType === 'text/javascript' || mimeType === 'application/ecmascript') return 'js';
+
+    const filePath = String(options.filePath || options.filename || options.path || '');
+    const ext = path.extname(filePath).toLowerCase();
+    if (['.html', '.htm', '.xhtml'].includes(ext)) return 'html';
+    if (['.js', '.mjs', '.cjs'].includes(ext)) return 'js';
+    return 'text';
 }
 
 /**

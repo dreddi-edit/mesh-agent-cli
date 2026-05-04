@@ -365,31 +365,52 @@ export class VoiceManager {
   /**
    * Record audio to a temp file
    */
-  async record(durationSeconds: number = 5): Promise<string> {
+  async record(durationSeconds: number = 30): Promise<string> {
     const tempFile = path.join(os.tmpdir(), `mesh_voice_${Date.now()}.wav`);
     const ffmpegPath = this.resolveBinary("ffmpeg");
     const inputId = this.resolveAudioInputId();
+    const maxDurationSeconds = Math.max(3, Math.min(120, Number(durationSeconds) || 30));
+    const silenceSeconds = 1.5;
 
     const args = [
       "-hide_banner",
-      "-loglevel", "error",
+      "-loglevel", "info",
       "-f", "avfoundation",
       "-i", `:${inputId}`,
-      "-t", durationSeconds.toString(),
+      "-t", maxDurationSeconds.toString(),
       "-ar", AUDIO_SAMPLE_RATE,
       "-ac", "1",
       "-c:a", "pcm_s16le",
-      "-af", "volume=1.8",
+      "-af", `volume=1.8,silencedetect=n=-35dB:d=${silenceSeconds}`,
       "-y",
       tempFile
     ];
 
     return new Promise((resolve, reject) => {
       const proc = spawn(ffmpegPath, args);
-      proc.on("error", (err) => reject(new Error(`ffmpeg spawn failed: ${err.message}`)));
+      let stoppedForSilence = false;
+      let settled = false;
+      const finish = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        callback();
+      };
+
+      proc.on("error", (err) => {
+        finish(() => reject(new Error(`ffmpeg spawn failed: ${err.message}`)));
+      });
+      proc.stderr.on("data", (chunk: Buffer) => {
+        const text = chunk.toString();
+        if (!stoppedForSilence && /silence_start:/i.test(text)) {
+          stoppedForSilence = true;
+          proc.kill("SIGINT");
+        }
+      });
       proc.on("close", (code) => {
-        if (code === 0) resolve(tempFile);
-        else reject(new Error(`ffmpeg failed with code ${code}`));
+        finish(() => {
+          if (code === 0 || stoppedForSilence) resolve(tempFile);
+          else reject(new Error(`ffmpeg failed with code ${code}`));
+        });
       });
     });
   }
