@@ -16,11 +16,32 @@ export default defineConfig({
     ],
     sidebar: [
       {
-        text: 'Documentation',
+        text: 'Getting Started',
         items: [
           { text: 'Command Guide', link: '/mesh-cli-command-guide' },
-          { text: 'Go Live', link: '/go-live' },
-          { text: 'Self-Host', link: '/self-host' },
+          { text: 'Installation & Setup', link: '/go-live' },
+          { text: 'Self-Hosting', link: '/self-host' },
+        ]
+      },
+      {
+        text: 'Core Concepts',
+        items: [
+          { text: 'Architecture', link: '/core/architecture' },
+          { text: 'Verification & Timelines', link: '/core/timelines' },
+          { text: 'Semantic RAG', link: '/core/rag' },
+        ]
+      },
+      {
+        text: 'Moonshots',
+        items: [
+          { text: 'Overview', link: '/moonshots/overview' },
+          { text: 'Causal Autopsy', link: '/moonshots/autopsy' },
+          { text: 'Precrime', link: '/moonshots/precrime' },
+        ]
+      },
+      {
+        text: 'Resources',
+        items: [
           { text: 'Support', link: '/support' },
           { text: 'Privacy', link: '/privacy' },
           { text: 'Release Runbook', link: '/release-runbook' },
