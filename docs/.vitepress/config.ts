@@ -1,8 +1,14 @@
 import { defineConfig } from 'vitepress'
 
+const base = process.env.READTHEDOCS_VERSION 
+  ? `/en/${process.env.READTHEDOCS_VERSION}/`
+  : '/'
+
 export default defineConfig({
   title: "Mesh Agent CLI",
   description: "Agentic Operating System",
+  base: base,
+  cleanUrls: true,
   themeConfig: {
     nav: [
       { text: 'Home', link: '/' },
