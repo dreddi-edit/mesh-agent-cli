@@ -11,11 +11,11 @@ build:
     nodejs: "22"
 
   commands:
-    # Install Docusaurus dependencies
-    - cd docs/ && npm install
-    # Build the site
-    - cd docs/ && npm run build
+    # Install dependencies (root package.json)
+    - npm install
+    # Build the documentation using VitePress
+    - npm run docs:build
     # Copy generated files into Read the Docs directory
     - mkdir --parents $READTHEDOCS_OUTPUT/html/
-    - cp --recursive docs/build/* $READTHEDOCS_OUTPUT/html/
+    - cp --recursive docs/.vitepress/dist/* $READTHEDOCS_OUTPUT/html/
         
